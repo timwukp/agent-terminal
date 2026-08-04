@@ -1,1 +1,0 @@
-@tests/unit/test_scrollback.c

@@ -1,1 +1,54 @@
-@.github/workflows/ci.yml
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        build: [release, asan]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make BUILD=${{ matrix.build }} all || true # binaries exist from M1 on
+      - name: Unit tests
+        run: make BUILD=${{ matrix.build }} test
+      - name: Integration tests
+        if: matrix.build == 'release'
+        run: |
+          if ls tests/integration/test_*.sh >/dev/null 2>&1; then
+            for t in tests/integration/test_*.sh; do bash "$t"; done
+          fi
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fuzz targets
+        run: make BUILD=fuzz fuzz CC=clang
+      - name: Generate corpus
+        run: python3 tools/gen_corpus.py 200
+      - name: 60s smoke fuzz per target
+        run: |
+          for f in build/fuzz/fuzz/*; do
+            [ -x "$f" ] || continue
+            case "$f" in *_regress) continue;; esac
+            echo "== $f"
+            "$f" -max_total_time=60 -timeout=5 -dict=fuzz/dict/vt.dict fuzz/corpus/vt || exit 1
+          done
+
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-tidy
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
+      - name: Analyze VT engine + common (the security-critical surface)
+        run: |
+          clang-tidy src/vt/*.c src/common/*.c -- \
+            -std=c17 -Isrc -D_XOPEN_SOURCE=600

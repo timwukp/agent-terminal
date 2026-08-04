@@ -1,1 +1,0 @@
-@tests/data/golden/vttest_origin.txt
