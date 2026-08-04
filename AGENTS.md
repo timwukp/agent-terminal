@@ -41,19 +41,41 @@ Full local gate before proposing a change:
 
 ```sh
 make test BUILD=asan \
+  && python3 tools/gen_corpus.py 200 \
   && make fuzz-regress BUILD=asan \
   && make BUILD=release all \
   && for t in tests/integration/test_*.sh; do BUILD=release bash "$t" || exit 1; done \
-  && python3 tools/check_svg.py docs/architecture.svg
+  && python3 tools/check_svg.py docs/architecture.svg \
+  && bash tools/check_links.sh
 ```
+
+A fresh clone commits only **6 seed corpus entries**; `gen_corpus.py 200` expands
+them to 206, which is what CI fuzzes. Skipping it makes `fuzz-regress` pass in
+about a second while covering 6 inputs — green, but nearly meaningless.
 
 | Target | Purpose |
 |---|---|
 | `make test BUILD=asan` | unit tests, sanitizers on |
-| `make fuzz-regress BUILD=asan` | replay the 206-entry corpus (any compiler) |
+| `make fuzz-regress BUILD=asan` | replay `fuzz/corpus/vt` (any compiler — no libFuzzer needed) |
+| `python3 tools/gen_corpus.py 200` | grow the corpus from 6 committed seeds to 206 |
 | `make fuzz BUILD=fuzz CC=clang` | libFuzzer binaries (needs the fuzzer runtime; Apple clang lacks it) |
 | `make tidy` | clang-tidy over `src/vt/` + `src/common/` |
 | `python3 tools/check_svg.py docs/architecture.svg` | diagram geometry |
+
+### Installing
+
+```sh
+make                                  # release build
+make install PREFIX="$HOME/.local"    # no sudo; ensure ~/.local/bin is on PATH
+sudo make install                     # or system-wide, PREFIX defaults to /usr/local
+```
+
+Installs `agent-terminald`, `agent-terminal` and `agent-terminal.1`.
+`make install` depends on `all`, so a separate build step is optional.
+
+**Whether `agent-terminald` is on `PATH` changes client behaviour** — see the
+autospawn note in §3. An agent installing this unattended should prefer
+`PREFIX="$HOME/.local"`: `sudo` will block on a password prompt with no tty.
 
 ## 3. Command surface
 
@@ -77,13 +99,24 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | `ls`, no daemon running | **0** | warns on stderr, prints `no sessions (daemon not running)` |
 | `ls`, daemon running | 0 | `name: 80x24, pid N, K clients` per line |
 | `history -s missing` | 1 | `no scrollback found for 'missing'` |
-| `attach -s missing`, no daemon | 1 | `cannot reach daemon at <socket path>` |
+| `attach -s missing`, `agent-terminald` on `PATH` | 1 | `no such session` (daemon was autospawned) |
+| `attach -s missing`, daemon binary not on `PATH` | 1 | `cannot reach daemon at <socket path>` |
 | unknown verb / missing `-s` | 2 | usage block |
 | `kill -s name` | 0 | `killed 'name'` |
 
 `ls` exiting 0 with no daemon is deliberate — "no sessions" is a valid answer,
 not an error. **Do not** use `ls`'s exit code to test whether the daemon is up;
 grep the output or check the socket path.
+
+### The client autospawns the daemon
+
+`new` and `attach` start `agent-terminald` themselves if the socket is
+unreachable (`src/client/attach.c`, `daemon_connect(auto_start)`): they `fork`,
+`execlp("agent-terminald", ...)` — **resolved via `PATH`** — then retry the
+connect for up to 2 s. So after `make install` there is no separate "start the
+daemon" step, and the two `attach` rows above differ only in whether the daemon
+binary is reachable on `PATH`. Running the client straight out of
+`build/release/` without that directory on `PATH` takes the second row.
 
 ## 4. The constraint that matters most for agents
 
@@ -176,7 +209,7 @@ add narration. `clang-format` config is in `.clang-format` (`make fmt`).
 
 ### Static analysis
 
-`.clang-tidy` disables two checks **with recorded evidence** in the file
+`.clang-tidy` disables five checks **with recorded evidence** in the file
 itself. Do not re-enable them without reading those notes:
 
 - `insecureAPI.DeprecatedOrUnsafeBufferHandling` (67 hits) demands the C11
@@ -185,7 +218,12 @@ itself. Do not re-enable them without reading those notes:
   by ASan/UBSan and fuzzing instead.
 - `valist.Uninitialized` (3 hits, all correctly `va_start`/`va_end`-paired) is
   an x86_64-only false positive; clean under Apple clang and clang-tidy 18 on
-  arm64 Linux.
+  arm64 Linux. `va_list` is a struct on x86_64 and a pointer on arm64, which is
+  what changes the analyzer's conclusion.
+- `bugprone-reserved-identifier` and its two `cert-dcl37-c` / `cert-dcl51-cpp`
+  aliases fire on the feature-test macros (`_POSIX_C_SOURCE`,
+  `_DARWIN_C_SOURCE`, …). Those names are *required* to live in the reserved
+  namespace, so there is no conforming way to satisfy the check.
 
 CI runs clang-tidy with `--warnings-as-errors='*'` using the same flags as the
 real build. To reproduce it exactly:
