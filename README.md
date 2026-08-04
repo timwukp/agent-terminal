@@ -1,70 +1,128 @@
 # agent-terminal
 
 A tiny tmux-like session multiplexer in C, purpose-built so long-running
-terminal AI agents (e.g. Claude Code CLI) survive terminal front-end crashes.
+terminal AI agents (e.g. Claude Code CLI) survive terminal front-end
+crashes. macOS + Linux. Zero dependencies beyond libc. MIT licensed.
 
 ## Why
 
 Session state (PTY, screen, scrollback) normally lives in the same process
-that renders it. When a terminal emulator dies under a huge dialog, the
-session dies with it. agent-terminal splits the two:
+that renders it. When a terminal emulator dies under a huge dialog — a
+common failure mode for hours-long AI agent sessions — the session dies
+with it. agent-terminal splits the two:
 
-- **`agent-terminald`** — a per-user daemon that owns PTYs, the VT screen
-  state, and disk-persisted scrollback. It never dies with the front-end.
+- **`agent-terminald`** — a per-user daemon that owns PTYs, the emulated
+  screen state, and disk-persisted scrollback. It never dies with the
+  front-end.
 - **`agent-terminal`** — a thin client that runs inside any terminal
-  (Terminal.app, iTerm2, over SSH), attaches via a unix socket, and renders.
-  Kill the client — or the whole hosting terminal — then reattach: exact
-  screen restored, child process untouched.
+  (Terminal.app, iTerm2, Ghostty, over SSH), attaches via a unix socket,
+  and renders. Kill the client — or force-quit the whole hosting
+  terminal — then reattach: exact screen, cursor, and terminal modes
+  restored; the child process never noticed.
 
-SSH support = the daemon spawns your system OpenSSH client inside the PTY
-(`agent-terminal new -s prod -- ssh myhost`), inheriting `~/.ssh` config and
-your agent. No custom crypto, ever.
-
-## Usage
-
-```sh
-agent-terminal new -s work -- claude   # start claude in a managed session
-# ... terminal crashes, laptop hiccup, whatever ...
-agent-terminal attach -s work          # everything is still there
-agent-terminal ls                      # list sessions
-agent-terminal history -s work         # dump scrollback (works for dead sessions)
-agent-terminal kill -s work
+```
+┌─ Terminal.app / iTerm2 / SSH ─────────┐
+│  agent-terminal attach (thin client)  │   crashes freely
+└───────────────┬───────────────────────┘
+                │ unix socket (0600, peer-UID checked)
+┌───────────────┴───────────────────────┐
+│  agent-terminald (daemon)             │   survives
+│  PTY ── claude / vim / ssh / $SHELL   │
+│  VT screen state (fuzzed engine)      │
+│  scrollback → disk (CRC, rotation)    │
+└────────────────────────────────────────┘
 ```
 
-Detach without killing: `Ctrl-\` then `Ctrl-d`.
+## Installation
 
-## Build & install
+### From source
+
+Requirements: a C17 compiler (clang or gcc) and make. Nothing else.
 
 ```sh
-make                  # release build (macOS / Linux, no deps beyond libc)
-make test BUILD=asan  # unit tests under ASan+UBSan
-sudo make install     # /usr/local/bin + man page (PREFIX= to override)
+git clone https://github.com/timwukp/agent-terminal.git
+cd agent-terminal
+make                   # release build → build/release/
+make test BUILD=asan   # optional: run unit tests under ASan/UBSan
+sudo make install      # installs to /usr/local (override with PREFIX=)
 ```
+
+Installed artifacts: `agent-terminald`, `agent-terminal`, and the
+`agent-terminal(1)` man page.
 
 ### Run the daemon as a service (recommended)
 
-The daemon auto-starts on first `agent-terminal new`, but a service manager
-restarts it after crashes/reboots so `attach` always works:
+The daemon auto-starts on first use, but a service manager restarts it
+after crashes and reboots so `attach` always works:
 
+**macOS (launchd):**
 ```sh
-# macOS
 cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
+```
 
-# Linux (systemd user unit; add linger to survive logout)
+**Linux (systemd user unit):**
+```sh
 mkdir -p ~/.config/systemd/user
 cp contrib/systemd/agent-terminald.service ~/.config/systemd/user/
 systemctl --user enable --now agent-terminald
-loginctl enable-linger $USER
+loginctl enable-linger $USER   # keep sessions alive after logout
 ```
 
-## Security posture
+## Usage
 
-- Unix socket in a 0700 dir, 0600 socket, peer-UID verified
-  (`SO_PEERCRED` / `getpeereid`).
-- The VT parser — the untrusted-input surface — is an isolated, syscall-free
-  library (`src/vt/`), fuzzed (libFuzzer/AFL++) and run under ASan+UBSan in CI.
-- No crypto code in this repo: SSH is delegated to the system OpenSSH binary.
+### Quick start
+
+```sh
+agent-terminal new -s work -- claude    # run claude in a managed session
+```
+
+Work normally. If the terminal crashes, open a new one and:
+
+```sh
+agent-terminal attach -s work           # everything is still there
+```
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `agent-terminal new [-s name] [-- cmd args...]` | Create a session and attach. Default name `main`, default command `$SHELL`. |
+| `agent-terminal attach -s name` | Attach to a running session. |
+| `agent-terminal ls` | List sessions (size, pid, attached clients). |
+| `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
+| `agent-terminal kill -s name` | Terminate a session. |
+
+### Key bindings
+
+- **`Ctrl-\` then `Ctrl-d`** — detach, leaving the session running.
+  A lone `Ctrl-\` is forwarded to the application after 500 ms, so the
+  chord does not steal the key.
+
+### SSH sessions
+
+```sh
+agent-terminal new -s prod -- ssh user@host
+```
+
+This runs your **system OpenSSH client** inside the session — it inherits
+`~/.ssh/config`, known_hosts, and your SSH agent. agent-terminal contains
+no SSH or cryptographic code of its own.
+
+### Typical workflows
+
+```sh
+# A long AI-agent session that must survive anything:
+agent-terminal new -s agent -- claude
+
+# Recover history after a crash (even of the daemon itself):
+agent-terminal history -s agent | less -R
+
+# Several parallel sessions:
+agent-terminal new -s build -- make -j8
+agent-terminal new -s logs  -- tail -f /var/log/system.log
+agent-terminal ls
+```
 
 ## Scrollback persistence
 
@@ -72,9 +130,23 @@ Lines scrolling off the primary screen are kept in a 10k-line in-memory
 ring and appended to a CRC-framed on-disk log
 (`~/.agent-terminal/sessions/<name>/scrollback.log`, 2×32 MiB rotation).
 The log survives daemon crashes — recovery truncates at the first torn
-record — and `agent-terminal history -s <name>` reads it directly, no
-daemon required. Records store rendered ANSI text, so even a raw
-`less -R scrollback.log` is legible.
+record — and `history` reads it directly, no daemon required. Records
+store rendered ANSI text, so even a raw `less -R scrollback.log` is
+legible.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the threat model and how to report
+vulnerabilities. Highlights:
+
+- Unix socket in a 0700 dir, 0600 socket, peer-UID verified
+  (`SO_PEERCRED` / `getpeereid`). No network listener of any kind.
+- The VT parser — the untrusted-input surface — is an isolated,
+  **syscall-free** library (`src/vt/`), fuzzed nightly (libFuzzer) and run
+  under ASan+UBSan on every PR, with golden-replay conformance tests
+  against real vttest captures.
+- No crypto code in this repo: SSH is delegated to the system OpenSSH
+  binary.
 
 ## Limitations (v1, by design)
 
@@ -88,13 +160,20 @@ daemon required. Records store rendered ANSI text, so even a raw
   is a v2 item); CJK wide characters are fully supported.
 - No scrollback *paging UI* in the client yet — use `history | less -R`.
 
-## Status
+## Development
 
-All v1 milestones complete: M0 skeleton ✅ → M1 daemon+attach ✅ →
-M2 VT engine ✅ → M3 scrollback persistence ✅ → M4 hardening ✅ →
-M5 polish ✅.
+```sh
+make BUILD=debug            # -O0 -g3
+make test BUILD=asan        # unit tests under ASan+UBSan
+make fuzz-regress BUILD=asan  # replay fuzz corpus (works with any compiler)
+make fuzz BUILD=fuzz CC=clang # libFuzzer binaries (needs fuzzer runtime)
+bash tests/integration/test_reattach.sh   # acceptance tests
+```
 
-Hardening in place: nightly 30-min libFuzzer runs per target with corpus
-minimization (`.github/workflows/fuzz.yml`), clang-tidy CI gate on
-`src/vt/` + `src/common/`, and golden-replay tests pinning libvt against
-real vttest 2.7 captures (`tests/data/recordings/`).
+Layout: `src/vt/` (isolated VT engine), `src/daemon/`, `src/client/`,
+`src/common/` (protocol, ring, scrollback), `tests/`, `fuzz/`.
+
+## License
+
+[MIT](LICENSE). Provided **"as is"**, without warranty of any kind — see
+the LICENSE file for the full disclaimer of warranties and liability.
