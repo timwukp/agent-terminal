@@ -15,15 +15,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: make BUILD=${{ matrix.build }} all || true # binaries exist from M1 on
+        run: make BUILD=${{ matrix.build }} all
       - name: Unit tests
         run: make BUILD=${{ matrix.build }} test
       - name: Integration tests
         if: matrix.build == 'release'
+        # BUILD must match the variant built above: the scripts resolve
+        # build/$BUILD, so an unset BUILD silently tests binaries that were
+        # never compiled.
+        env:
+          BUILD: ${{ matrix.build }}
         run: |
-          if ls tests/integration/test_*.sh >/dev/null 2>&1; then
-            for t in tests/integration/test_*.sh; do bash "$t"; done
-          fi
+          rc=0
+          for t in tests/integration/test_*.sh; do
+            echo "== $t"
+            bash "$t" || rc=1
+          done
+          exit $rc
 
   fuzz-smoke:
     runs-on: ubuntu-latest
@@ -49,6 +57,9 @@ jobs:
       - name: Install clang-tidy
         run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
       - name: Analyze VT engine + common (the security-critical surface)
+        # Flags must match the real build (see Makefile COMMON_CFLAGS), or
+        # clang-tidy analyzes a different translation unit than ships.
         run: |
-          clang-tidy src/vt/*.c src/common/*.c -- \
-            -std=c17 -Isrc -D_XOPEN_SOURCE=600
+          clang-tidy --warnings-as-errors='*' src/vt/*.c src/common/*.c -- \
+            -std=c17 -Isrc \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE

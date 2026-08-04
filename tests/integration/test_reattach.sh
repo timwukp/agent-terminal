@@ -3,9 +3,9 @@
 # and a new client must be able to reattach and keep interacting.
 set -u
 
-BUILD="${BUILD:-debug}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="$ROOT/build/$BUILD"
+. "$(dirname "$0")/lib.sh"
+require_bins agent-terminald agent-terminal
+
 TMP="$(mktemp -d)"
 export HOME="$TMP"            # isolate runtime dir + socket
 unset XDG_RUNTIME_DIR
@@ -15,23 +15,12 @@ cleanup() {
     [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
     rm -rf "$TMP"
 }
-fail() { echo "FAIL: $1"; exit 1; }
 trap cleanup EXIT
-
-# Poll for a pattern in a file — fixed sleeps are flaky on loaded CI runners.
-wait_for() { # pattern file timeout_s
-    local i=0
-    while [ "$i" -lt "$((${3} * 10))" ]; do
-        grep -q "$1" "$2" 2>/dev/null && return 0
-        sleep 0.1
-        i=$((i + 1))
-    done
-    return 1
-}
 
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 sleep 0.3
+require_alive "$DPID" "daemon"
 
 SESSION_LOG="$TMP/child.log"
 

@@ -4,12 +4,11 @@
 # real-terminal-suite traffic, not synthetic cases.
 set -u
 
-BUILD="${BUILD:-debug}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="$ROOT/build/$BUILD"
+. "$(dirname "$0")/lib.sh"
 FAIL=0
 
 make -C "$ROOT" tools BUILD="$BUILD" > /dev/null 2>&1
+require_bins vtdump
 
 for rec in "$ROOT"/tests/data/recordings/*.raw; do
     base=$(basename "$rec" .raw)

@@ -1,5 +1,7 @@
 /* test_scrollback.c — persistence, torn-write recovery, rotation, fetch. */
-#define _DARWIN_C_SOURCE
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE   /* also set globally by the Makefile */
+#endif
 #include "runner.h"
 
 #include <fcntl.h>

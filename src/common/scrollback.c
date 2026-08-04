@@ -1,4 +1,6 @@
-#define _DARWIN_C_SOURCE
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE   /* also set globally by the Makefile */
+#endif
 #include "scrollback.h"
 
 #include <dirent.h>

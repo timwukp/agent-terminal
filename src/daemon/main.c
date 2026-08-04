@@ -1,6 +1,8 @@
 /* agent-terminald — session daemon. Owns PTYs and (from M2) screen state;
  * survives any client or hosting-terminal crash. */
-#define _DARWIN_C_SOURCE
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE   /* also set globally by the Makefile */
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>

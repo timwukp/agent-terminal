@@ -4,9 +4,9 @@
 # this — it proves the daemon reconstructs the screen, not just relays).
 set -u
 
-BUILD="${BUILD:-debug}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="$ROOT/build/$BUILD"
+. "$(dirname "$0")/lib.sh"
+require_bins agent-terminald agent-terminal
+
 TMP="$(mktemp -d)"
 export HOME="$TMP"
 unset XDG_RUNTIME_DIR
@@ -16,12 +16,12 @@ cleanup() {
     [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
     rm -rf "$TMP"
 }
-fail() { echo "FAIL: $1"; exit 1; }
 trap cleanup EXIT
 
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 sleep 1
+require_alive "$DPID" "daemon"
 
 # Session prints a marker (with SGR color to exercise pen state) and stays alive.
 mkfifo "$TMP/in1"

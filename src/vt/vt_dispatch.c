@@ -77,7 +77,8 @@ void vt_do_esc(vt *v, uint8_t final) {
         v->tabstops[v->cur.col / 32] |= 1u << (v->cur.col % 32);
         break;
     case 'c': vt_screen_reset(v); break;          /* RIS */
-    case '=': case '>': break;                    /* DECKPAM/DECKPNM: no-op */
+    /* '=' / '>' (DECKPAM/DECKPNM) need no state: the client sends real key
+     * bytes either way. They fall through to the no-op default. */
     default: break;
     }
 }
@@ -307,7 +308,8 @@ void vt_do_csi(vt *v, uint8_t final) {
     case 'c': respond(v, "\x1b[?62;22c", 9); break; /* DA1: VT220 + color */
     case 's': save_cursor(v); break;
     case 'u': restore_cursor(v); break;
-    case 't': break; /* window ops: consumed */
+    /* 't' (XTWINOPS) is deliberately unimplemented: geometry belongs to the
+     * attached client, not the app. Consumed by the no-op default. */
     default: break;
     }
 }

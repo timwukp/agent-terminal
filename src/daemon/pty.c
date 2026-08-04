@@ -2,8 +2,12 @@
  *
  * Explicit posix_openpt path rather than forkpty(3), so both platforms run
  * the exact same sequence and there is no libutil dependency. */
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
-#define _DARWIN_C_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE   /* also set globally by the Makefile */
+#endif
 #include "pty.h"
 
 #include <errno.h>

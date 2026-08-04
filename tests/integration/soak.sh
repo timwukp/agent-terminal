@@ -3,9 +3,9 @@
 # and scrollback files must respect the rotation cap.
 set -u
 
-BUILD="${BUILD:-release}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="$ROOT/build/$BUILD"
+. "$(dirname "$0")/lib.sh"
+require_bins agent-terminald agent-terminal
+
 TMP="$(mktemp -d)"
 export HOME="$TMP"
 unset XDG_RUNTIME_DIR
@@ -15,12 +15,12 @@ cleanup() {
     [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
     rm -rf "$TMP"
 }
-fail() { echo "FAIL: $1"; exit 1; }
 trap cleanup EXIT
 
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 sleep 0.3
+require_alive "$DPID" "daemon"
 
 # ~100 MB: 1.2M lines x ~84 bytes, with SGR color churn to stress the pen.
 mkfifo "$TMP/in1"

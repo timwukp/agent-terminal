@@ -1,6 +1,10 @@
 /* server.c — unix socket listener, per-client framing, request dispatch. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
-#define _DARWIN_C_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE   /* also set globally by the Makefile */
+#endif
 #include "server.h"
 
 #include <errno.h>

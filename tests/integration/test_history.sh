@@ -5,9 +5,9 @@
 #   3. `history` recovers the scrolled-off lines from disk — no daemon needed
 set -u
 
-BUILD="${BUILD:-debug}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="$ROOT/build/$BUILD"
+. "$(dirname "$0")/lib.sh"
+require_bins agent-terminald agent-terminal
+
 TMP="$(mktemp -d)"
 export HOME="$TMP"
 unset XDG_RUNTIME_DIR
@@ -17,12 +17,12 @@ cleanup() {
     [ -n "$DPID" ] && kill -9 "$DPID" 2>/dev/null
     rm -rf "$TMP"
 }
-fail() { echo "FAIL: $1"; exit 1; }
 trap cleanup EXIT
 
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 sleep 1
+require_alive "$DPID" "daemon"
 
 # 200 numbered lines through a 24-row PTY: ~176 lines must scroll into
 # the scrollback ring + disk log.
@@ -33,6 +33,9 @@ C1=$!
 exec 3>"$TMP/in1"
 sleep 2.0   # > 1s flush tick, so the log is durable
 
+# The kill must be the cause of death. If the daemon already exited, the
+# scrollback below would be testing a different scenario than advertised.
+require_alive "$DPID" "daemon (before kill -9)"
 kill -9 "$DPID"   # daemon dies hard: sessions gone, grids gone
 kill -9 "$C1" 2>/dev/null
 exec 3>&-
