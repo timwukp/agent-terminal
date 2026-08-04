@@ -1,0 +1,1 @@
+@fuzz/fuzz_proto.c

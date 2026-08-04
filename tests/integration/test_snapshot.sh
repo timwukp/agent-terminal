@@ -1,0 +1,1 @@
+@tests/integration/test_snapshot.sh
