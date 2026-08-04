@@ -4,6 +4,11 @@ A tiny tmux-like session multiplexer in C, purpose-built so long-running
 terminal AI agents (e.g. Claude Code CLI) survive terminal front-end
 crashes. macOS + Linux. Zero dependencies beyond libc. MIT licensed.
 
+> **Using a coding agent?** Point it at [AGENTS.md](AGENTS.md) — the same
+> material as this README, written for machine consumption: exact commands,
+> measured exit codes, invariants, and the non-interactive usage caveat that
+> trips up scripted callers.
+
 ## Why
 
 Session state (PTY, screen, scrollback) normally lives in the same process
@@ -20,18 +25,14 @@ with it. agent-terminal splits the two:
   terminal — then reattach: exact screen, cursor, and terminal modes
   restored; the child process never noticed.
 
-```
-┌─ Terminal.app / iTerm2 / SSH ─────────┐
-│  agent-terminal attach (thin client)  │   crashes freely
-└───────────────┬───────────────────────┘
-                │ unix socket (0600, peer-UID checked)
-┌───────────────┴───────────────────────┐
-│  agent-terminald (daemon)             │   survives
-│  PTY ── claude / vim / ssh / $SHELL   │
-│  VT screen state (fuzzed engine)      │
-│  scrollback → disk (CRC, rotation)    │
-└────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="Architecture: a thin client inside the hosting terminal talks to agent-terminald over a unix socket. The client can crash freely; the daemon owns the PTY, the VT screen state and the on-disk scrollback, and survives. The animation walks through normal operation, the terminal dying, the daemon continuing, and a new client reattaching to a snapshot repaint." width="900">
+</p>
+
+<sub>The diagram animates in browsers that render SVG (GitHub does). Four
+phases: normal operation → the hosting terminal dies → the daemon carries on
+with the child still running → a new client attaches and a snapshot restores
+the exact screen, cursor and modes.</sub>
 
 ## Installation
 
@@ -98,6 +99,15 @@ agent-terminal attach -s work           # everything is still there
 - **`Ctrl-\` then `Ctrl-d`** — detach, leaving the session running.
   A lone `Ctrl-\` is forwarded to the application after 500 ms, so the
   chord does not steal the key.
+
+### Scripted / non-interactive use
+
+`new` attaches a client, and a client whose stdin is closed (or `/dev/null`)
+sees immediate EOF and detaches — which ends the session. So
+`agent-terminal new -s x -- cmd < /dev/null` exits 0 but leaves nothing to
+attach to. Hold stdin open instead; see
+[AGENTS.md §4](AGENTS.md#4-the-constraint-that-matters-most-for-agents) for a
+working FIFO pattern.
 
 ### SSH sessions
 
@@ -167,11 +177,18 @@ make BUILD=debug            # -O0 -g3
 make test BUILD=asan        # unit tests under ASan+UBSan
 make fuzz-regress BUILD=asan  # replay fuzz corpus (works with any compiler)
 make fuzz BUILD=fuzz CC=clang # libFuzzer binaries (needs fuzzer runtime)
-bash tests/integration/test_reattach.sh   # acceptance tests
+BUILD=release bash tests/integration/test_reattach.sh   # acceptance test
+python3 tools/check_svg.py docs/architecture.svg        # diagram geometry
 ```
+
+`BUILD` must match between building and testing — the integration scripts
+resolve `build/$BUILD` and say so explicitly if the binaries are absent.
 
 Layout: `src/vt/` (isolated VT engine), `src/daemon/`, `src/client/`,
 `src/common/` (protocol, ring, scrollback), `tests/`, `fuzz/`.
+
+Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Machine-oriented
+reference for coding agents: [AGENTS.md](AGENTS.md).
 
 ## License
 

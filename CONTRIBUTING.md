@@ -17,8 +17,16 @@ Thanks for your interest in agent-terminal.
   ```sh
   make test BUILD=asan
   make fuzz-regress BUILD=asan
-  for t in tests/integration/test_*.sh; do bash "$t"; done
+  make BUILD=release all
+  for t in tests/integration/test_*.sh; do BUILD=release bash "$t" || break; done
+  python3 tools/check_svg.py docs/architecture.svg   # if you touched the diagram
   ```
+  `BUILD` must match between building and testing: the integration scripts
+  resolve `build/$BUILD` and abort with a `missing` message otherwise.
+
+If you use a coding agent on this repo, [AGENTS.md](AGENTS.md) is the
+machine-oriented version of these rules — keep the two in sync when either
+changes.
 
 ## Reporting bugs
 

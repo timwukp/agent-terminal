@@ -50,6 +50,15 @@ jobs:
             "$f" -max_total_time=60 -timeout=5 -dict=fuzz/dict/vt.dict fuzz/corpus/vt || exit 1
           done
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagram geometry (co-visible overlaps, bounds)
+        run: python3 tools/check_svg.py docs/architecture.svg
+      - name: Docs cross-references resolve
+        run: bash tools/check_links.sh
+
   clang-tidy:
     runs-on: ubuntu-latest
     steps:
