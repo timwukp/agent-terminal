@@ -1,0 +1,49 @@
+name: nightly-fuzz
+on:
+  schedule:
+    - cron: "17 3 * * *" # nightly, off the top of the hour
+  workflow_dispatch: {}
+
+jobs:
+  libfuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_vt_feed, fuzz_proto]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore corpus cache
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/vt
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Generate seed corpus
+        run: python3 tools/gen_corpus.py 200
+      - name: Build fuzz target
+        run: make fuzz BUILD=fuzz CC=clang
+      - name: Fuzz 30 minutes
+        run: |
+          mkdir -p artifacts
+          ./build/fuzz/fuzz/${{ matrix.target }} \
+            -max_total_time=1800 -timeout=10 -rss_limit_mb=2048 \
+            -dict=fuzz/dict/vt.dict \
+            -artifact_prefix=artifacts/ \
+            fuzz/corpus/vt
+      - name: Minimize corpus for next night
+        if: success()
+        run: |
+          mkdir -p corpus_min
+          ./build/fuzz/fuzz/${{ matrix.target }} \
+            -merge=1 corpus_min fuzz/corpus/vt
+          rm -rf fuzz/corpus/vt
+          mv corpus_min fuzz/corpus/vt
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashers-${{ matrix.target }}-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore

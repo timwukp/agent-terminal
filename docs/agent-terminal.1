@@ -1,0 +1,83 @@
+.TH AGENT-TERMINAL 1 "2026" "agent-terminal" "User Commands"
+.SH NAME
+agent-terminal \- crash-proof terminal session multiplexer
+.SH SYNOPSIS
+.B agent-terminal new
+.RB [ \-s
+.IR name ]
+.RB [ \-\-
+.IR command\ args... ]
+.br
+.B agent-terminal attach
+.B \-s
+.I name
+.br
+.B agent-terminal ls
+.br
+.B agent-terminal history
+.B \-s
+.I name
+.br
+.B agent-terminal kill
+.B \-s
+.I name
+.SH DESCRIPTION
+.B agent-terminal
+keeps long-running terminal programs (AI agents such as Claude Code CLI,
+editors, remote shells) alive when the terminal front-end crashes.
+A per-user daemon,
+.BR agent-terminald (1),
+owns the PTY, the emulated screen, and disk-persisted scrollback; the
+.B agent-terminal
+client merely renders. Killing the client \(em or the entire hosting
+terminal application \(em leaves the session running; reattaching restores
+the exact screen, cursor, and terminal modes.
+.SH COMMANDS
+.TP
+.B new
+Create a session and attach. Without \fB\-\-\fR, runs \fB$SHELL\fR.
+The default session name is \fImain\fR.
+.TP
+.B attach
+Attach to an existing session. Multiple clients may attach; the most
+recent attach wins the geometry.
+.TP
+.B ls
+List sessions with size, pid, and client count.
+.TP
+.B history
+Dump a session's scrollback log to stdout (ANSI text; pipe through
+.BR less \ \-R ).
+Reads the on-disk log directly \(em works with no daemon running and for
+dead sessions.
+.TP
+.B kill
+Terminate a session's child process and free the session.
+.SH KEY BINDINGS
+.TP
+.B Ctrl\-\\\\ Ctrl\-d
+Detach from the session, leaving it running. A lone
+.B Ctrl\-\\\\
+is forwarded to the application after a 500 ms timeout.
+.SH SSH
+Run the system OpenSSH client inside a session:
+.IP
+.EX
+agent-terminal new -s prod -- ssh myhost
+.EE
+.PP
+The child inherits
+.I ~/.ssh
+configuration and the SSH agent. No SSH or crypto code is implemented by
+agent-terminal itself.
+.SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/agent-terminal/default.sock
+Daemon control socket (0600, peer-UID checked). Falls back to
+.IR ~/.agent-terminal/run/ .
+.TP
+.I ~/.agent-terminal/sessions/<name>/scrollback.log
+CRC-framed scrollback log, 2\(mu32 MiB rotation. Survives daemon crashes.
+.SH SEE ALSO
+.BR tmux (1),
+.BR script (1)
