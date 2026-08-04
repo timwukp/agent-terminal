@@ -1,1 +1,7 @@
-@.gitignore
+build/
+*.o
+*.a
+.DS_Store
+crash-*
+fuzz-*.log
+fuzz/corpus/vt/gen_*

@@ -1,1 +1,65 @@
-@.github/workflows/ci.yml
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        build: [release, asan]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make BUILD=${{ matrix.build }} all
+      - name: Unit tests
+        run: make BUILD=${{ matrix.build }} test
+      - name: Integration tests
+        if: matrix.build == 'release'
+        # BUILD must match the variant built above: the scripts resolve
+        # build/$BUILD, so an unset BUILD silently tests binaries that were
+        # never compiled.
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          rc=0
+          for t in tests/integration/test_*.sh; do
+            echo "== $t"
+            bash "$t" || rc=1
+          done
+          exit $rc
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fuzz targets
+        run: make BUILD=fuzz fuzz CC=clang
+      - name: Generate corpus
+        run: python3 tools/gen_corpus.py 200
+      - name: 60s smoke fuzz per target
+        run: |
+          for f in build/fuzz/fuzz/*; do
+            [ -x "$f" ] || continue
+            case "$f" in *_regress) continue;; esac
+            echo "== $f"
+            "$f" -max_total_time=60 -timeout=5 -dict=fuzz/dict/vt.dict fuzz/corpus/vt || exit 1
+          done
+
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-tidy
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
+      - name: Analyze VT engine + common (the security-critical surface)
+        # Flags must match the real build (see Makefile COMMON_CFLAGS), or
+        # clang-tidy analyzes a different translation unit than ships.
+        run: |
+          clang-tidy --warnings-as-errors='*' src/vt/*.c src/common/*.c -- \
+            -std=c17 -Isrc \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE

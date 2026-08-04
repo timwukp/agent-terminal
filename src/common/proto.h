@@ -1,1 +1,79 @@
-@src/common/proto.h
+/* proto.h — wire protocol between agent-terminal (client) and agent-terminald.
+ *
+ * Frame layout, all integers little-endian:
+ *
+ *   offset  size  field
+ *   0       4     payload_len  (u32, excludes this 5-byte header)
+ *   4       1     type
+ *   5       N     payload      (N == payload_len, max PROTO_MAX_PAYLOAD)
+ *
+ * Rules:
+ *  - HELLO must be the first frame on a connection; version is negotiated
+ *    there and applies to the whole connection.
+ *  - Unknown frame types are skipped by the receiver (framing makes that
+ *    safe); unknown trailing payload bytes are ignored. Payload evolution
+ *    within a version is additive-only.
+ */
+#ifndef AT_PROTO_H
+#define AT_PROTO_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "ring.h"
+
+#define PROTO_VERSION      1
+#define PROTO_HDR_SIZE     5
+#define PROTO_MAX_PAYLOAD  (1u << 20) /* 1 MiB; peer violating this is disconnected */
+
+enum proto_type {
+    MSG_HELLO          = 0x01, /* C→D: u16 ver, u16 flags */
+    MSG_HELLO_OK       = 0x02, /* D→C: u16 ver, u32 daemon_pid */
+    MSG_ERR            = 0x03, /* D→C: u16 code, u16 msg_len, utf8 msg */
+    MSG_LIST_SESSIONS  = 0x10, /* C→D: empty */
+    MSG_SESSION_LIST   = 0x11, /* D→C: u16 count, entries */
+    MSG_NEW_SESSION    = 0x12, /* C→D: u16 cols, u16 rows, u8 nlen, name, u16 argv_bytes, argv */
+    MSG_KILL_SESSION   = 0x13, /* C→D: u8 nlen, name */
+    MSG_ATTACH         = 0x14, /* C→D: u16 cols, u16 rows, u8 pane_id(=0), u8 nlen, name */
+    MSG_DETACH         = 0x15, /* C→D: empty */
+    MSG_STDIN_DATA     = 0x20, /* C→D: raw bytes for the PTY */
+    MSG_RESIZE         = 0x21, /* C→D: u16 cols, u16 rows */
+    MSG_OUTPUT         = 0x30, /* D→C: raw child output (live tee) */
+    MSG_SNAPSHOT       = 0x31, /* D→C: u16 cols, u16 rows, u64 sb_lines, ANSI repaint */
+    MSG_SCROLLBACK_REQ = 0x32, /* C→D: u64 start_seq, u32 max_lines */
+    MSG_SCROLLBACK_DATA= 0x33, /* D→C: u64 first_seq, u32 nlines, {u32 len, bytes}... */
+    MSG_SESSION_EXITED = 0x34, /* D→C: i32 exit_status */
+    MSG_PING           = 0x40, /* both: u64 nonce */
+    MSG_PONG           = 0x41, /* both: u64 nonce */
+};
+
+enum proto_err {
+    ERR_VERSION      = 1,
+    ERR_NO_SESSION   = 2,
+    ERR_NAME_TAKEN   = 3,
+    ERR_BAD_REQUEST  = 4,
+    ERR_INTERNAL     = 5,
+};
+
+/* --- little-endian scalar helpers (safe on any alignment) --- */
+void     put_u16(uint8_t *p, uint16_t v);
+void     put_u32(uint8_t *p, uint32_t v);
+void     put_u64(uint8_t *p, uint64_t v);
+uint16_t get_u16(const uint8_t *p);
+uint32_t get_u32(const uint8_t *p);
+uint64_t get_u64(const uint8_t *p);
+
+/* Append one complete frame to out. Returns false only if the ring's
+ * capacity ceiling would be exceeded (slow-consumer signal). */
+bool proto_write_frame(ring *out, uint8_t type, const void *payload, size_t len);
+
+/* Try to decode one frame from the front of in.
+ * Returns:  1 frame decoded (type and len set; payload lands in the
+ *             caller-supplied scratch buffer, valid until next call),
+ *           0 need more bytes,
+ *          -1 protocol violation (oversized frame) — caller must disconnect.
+ * scratch must be at least PROTO_MAX_PAYLOAD bytes. */
+int proto_read_frame(ring *in, uint8_t *type, uint8_t *scratch, size_t *len);
+
+#endif

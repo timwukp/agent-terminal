@@ -1,1 +1,38 @@
-@contrib/launchd/dev.agentterminal.daemon.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for agent-terminald.
+
+  Install:
+    cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
+
+  Notes:
+  - Runs in the foreground (-f); launchd owns the lifecycle and restarts
+    the daemon if it ever dies (KeepAlive), so `new`/`attach` always work.
+  - For SSH sessions to inherit your agent, launchd must know
+    SSH_AUTH_SOCK. On macOS the system launchd sets it for user agents by
+    default; if you use a custom agent path, add it to EnvironmentVariables.
+  - Adjust ProgramArguments[0] if you installed somewhere other than
+    /usr/local/bin.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.agentterminal.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/agent-terminald</string>
+        <string>-f</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agent-terminald.log</string>
+</dict>
+</plist>

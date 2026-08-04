@@ -1,1 +1,232 @@
-@src/daemon/session.c
+#include "session.h"
+
+#include <errno.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "common/proto.h"
+#include "common/xutil.h"
+#include "loop.h"
+#include "server.h"
+
+static session g_sessions[MAX_SESSIONS];
+
+static void session_pty_readable(int fd, short revents, void *ud);
+
+/* ---- VT callbacks ---- */
+
+static void vt_cb_response(void *ud, const char *buf, size_t len) {
+    /* Query answers (DA/DSR/CPR) go back to the application via the PTY. */
+    session *s = ud;
+    session_stdin(s, (const uint8_t *)buf, (uint32_t)len);
+}
+
+static void vt_cb_scrollback(void *ud, const vt_cell *cells, uint16_t n) {
+    session *s = ud;
+    sb_push_line(s->sb, cells, n);
+}
+
+static void vt_cb_bell(void *ud) { (void)ud; }
+
+static void vt_cb_title(void *ud, const char *utf8, size_t len) {
+    (void)ud; (void)utf8; (void)len; /* passthrough already forwards it */
+}
+
+session *session_find(const char *name) {
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_sessions[i].in_use && strcmp(g_sessions[i].name, name) == 0)
+            return &g_sessions[i];
+    return NULL;
+}
+
+void session_flush_all(void) {
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_sessions[i].in_use) sb_flush(g_sessions[i].sb);
+}
+
+int session_count(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_sessions[i].in_use) n++;
+    return n;
+}
+
+session *session_at(int idx) {
+    return (idx >= 0 && idx < MAX_SESSIONS && g_sessions[idx].in_use) ? &g_sessions[idx] : NULL;
+}
+
+session *session_new(const char *name, char *const argv[], uint16_t cols, uint16_t rows) {
+    if (session_find(name)) { errno = EEXIST; return NULL; }
+    session *s = NULL;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (!g_sessions[i].in_use) { s = &g_sessions[i]; break; }
+    if (!s) { errno = ENOSPC; return NULL; }
+
+    memset(s, 0, sizeof *s);
+    strncpy(s->name, name, SESSION_NAME_MAX);
+    s->cols = cols ? cols : 80;
+    s->rows = rows ? rows : 24;
+
+    vt_callbacks cb = {
+        .on_response = vt_cb_response,
+        .on_scrollback_line = vt_cb_scrollback,
+        .on_title = vt_cb_title,
+        .on_bell = vt_cb_bell,
+        .on_passthrough = NULL, /* raw tee already forwards everything live */
+    };
+    s->vt = vt_new(s->rows, s->cols, &cb, s);
+    if (!s->vt) { errno = ENOMEM; return NULL; }
+    /* Best-effort: a session without persistent scrollback still works. */
+    s->sb = sb_open(s->name, 0, 0);
+    if (!s->sb)
+        log_msg(LOG_WARN, "session '%s': scrollback disabled (%s)", s->name,
+                strerror(errno));
+
+    if (pty_spawn(&s->child, argv, s->cols, s->rows, "xterm-256color") != 0) {
+        int saved = errno;
+        vt_free(s->vt);
+        s->vt = NULL;
+        sb_close(s->sb);
+        s->sb = NULL;
+        errno = saved;
+        return NULL;
+    }
+    s->in_use = true;
+    loop_add_fd(s->child.master_fd, POLLIN, session_pty_readable, s);
+    log_msg(LOG_INFO, "session '%s': pid %d on fd %d", s->name, (int)s->child.pid,
+            s->child.master_fd);
+    return s;
+}
+
+static void session_free_slot(session *s) {
+    if (s->child.master_fd >= 0) {
+        loop_del_fd(s->child.master_fd);
+        close(s->child.master_fd);
+        s->child.master_fd = -1;
+    }
+    vt_free(s->vt);
+    s->vt = NULL;
+    sb_close(s->sb);
+    s->sb = NULL;
+    s->in_use = false;
+}
+
+void session_kill(session *s) {
+    if (s->child.pid > 0) kill(s->child.pid, SIGHUP);
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i]) {
+            struct client *c = s->clients[i];
+            s->clients[i] = NULL;
+            client_disconnect(c);
+        }
+    session_free_slot(s);
+}
+
+void session_reap_children(void) {
+    int st;
+    pid_t pid;
+    while ((pid = waitpid(-1, &st, WNOHANG)) > 0) {
+        for (int i = 0; i < MAX_SESSIONS; i++) {
+            session *s = &g_sessions[i];
+            if (!s->in_use || s->child.pid != pid) continue;
+            s->child.pid = -1;
+            s->exit_status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+            log_msg(LOG_INFO, "session '%s': child exited %d", s->name, s->exit_status);
+            uint8_t payload[4];
+            put_u32(payload, (uint32_t)s->exit_status);
+            for (int j = 0; j < MAX_CLIENTS_PER_SESSION; j++)
+                if (s->clients[j])
+                    client_send(s->clients[j], MSG_SESSION_EXITED, payload, 4);
+            /* Grid stays viewable until kill-session; but with no VT engine
+             * yet (M1) there is nothing to keep — free once drained. */
+            session_free_slot(s);
+        }
+    }
+}
+
+static void session_pty_readable(int fd, short revents, void *ud) {
+    session *s = ud;
+    (void)revents;
+    uint8_t buf[16384];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n > 0) {
+            /* VT engine tracks screen state (snapshot source on reattach);
+             * attached clients get the same bytes raw (perfect fidelity). */
+            if (s->vt) vt_feed(s->vt, buf, (size_t)n);
+            for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+                if (s->clients[i])
+                    client_send(s->clients[i], MSG_OUTPUT, buf, (uint32_t)n);
+            if ((size_t)n < sizeof buf) return;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n < 0 && errno == EINTR) continue;
+        /* EOF or EIO: child side closed. Reap will finish the cleanup;
+         * stop watching now to avoid a hot loop. */
+        loop_del_fd(fd);
+        return;
+    }
+}
+
+void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) {
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++) {
+        if (s->clients[i] == c) return;
+        if (!s->clients[i]) {
+            s->clients[i] = c;
+            /* Force geometry to the newest client (last-resize-wins). */
+            session_resize(s, cols, rows);
+            /* Real grid snapshot: repaint blob restores screen content,
+             * cursor, and tracked modes exactly as the app left them. */
+            char *blob = NULL;
+            size_t blob_len = s->vt ? vt_snapshot(s->vt, &blob) : 0;
+            static const char fallback[] = "\x1b[0m\x1b[2J\x1b[H";
+            const char *body = blob_len ? blob : fallback;
+            size_t body_len = blob_len ? blob_len : sizeof fallback - 1;
+
+            size_t payload_len = 12 + body_len;
+            uint8_t *payload = xmalloc(payload_len);
+            put_u16(payload, s->cols);
+            put_u16(payload + 2, s->rows);
+            put_u64(payload + 4, sb_total_lines(s->sb));
+            memcpy(payload + 12, body, body_len);
+            client_send(c, MSG_SNAPSHOT, payload, (uint32_t)payload_len);
+            free(payload);
+            free(blob);
+            return;
+        }
+    }
+    client_disconnect(c); /* session full */
+}
+
+void session_detach(session *s, struct client *c) {
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i] == c) s->clients[i] = NULL;
+    sb_flush(s->sb); /* detach is a durability point */
+}
+
+void session_stdin(session *s, const uint8_t *data, uint32_t len) {
+    if (s->child.master_fd < 0) return;
+    /* PTY master write; kernel buffers. Short writes under flood are
+     * tolerable for keyboard input in M1; M3 adds a staging ring. */
+    ssize_t off = 0;
+    while (off < (ssize_t)len) {
+        ssize_t n = write(s->child.master_fd, data + off, len - (size_t)off);
+        if (n > 0) { off += n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break;
+    }
+}
+
+void session_resize(session *s, uint16_t cols, uint16_t rows) {
+    if (!cols || !rows || (cols == s->cols && rows == s->rows)) return;
+    s->cols = cols;
+    s->rows = rows;
+    /* Grid reflow first, then TIOCSWINSZ (SIGWINCH makes the app repaint
+     * into the new geometry). */
+    if (s->vt) vt_resize(s->vt, rows, cols);
+    if (s->child.master_fd >= 0) pty_resize(s->child.master_fd, cols, rows);
+}
