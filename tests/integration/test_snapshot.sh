@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
-sleep 0.3
+sleep 1
 
 # Session prints a marker (with SGR color to exercise pen state) and stays alive.
 mkfifo "$TMP/in1"
@@ -30,19 +30,19 @@ mkfifo "$TMP/in1"
     < "$TMP/in1" > /dev/null 2>&1 &
 C1=$!
 exec 3>"$TMP/in1"
-sleep 0.8
+sleep 2
 
 # Kill client 1 hard; no client is attached while the content sits in the daemon.
 kill -9 "$C1"
 exec 3>&-
-sleep 0.3
+sleep 1
 
 # Client 2 attaches fresh: everything it knows must come from the snapshot.
 mkfifo "$TMP/in2"
 "$BIN/agent-terminal" attach -s snap < "$TMP/in2" > "$TMP/out2" 2>&1 &
 C2=$!
 exec 4>"$TMP/in2"
-sleep 0.8
+sleep 2
 
 printf '\x1c\x04' >&4   # detach
 exec 4>&-

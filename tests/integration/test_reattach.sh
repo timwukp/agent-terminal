@@ -18,6 +18,17 @@ cleanup() {
 fail() { echo "FAIL: $1"; exit 1; }
 trap cleanup EXIT
 
+# Poll for a pattern in a file — fixed sleeps are flaky on loaded CI runners.
+wait_for() { # pattern file timeout_s
+    local i=0
+    while [ "$i" -lt "$((${3} * 10))" ]; do
+        grep -q "$1" "$2" 2>/dev/null && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
 "$BIN/agent-terminald" -f > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 sleep 0.3
@@ -32,11 +43,10 @@ mkfifo "$TMP/in1"
     < "$TMP/in1" > /dev/null 2>&1 &
 C1=$!
 exec 3>"$TMP/in1"   # hold the FIFO open
-sleep 0.5
+sleep 1
 
 printf 'before-crash\r' >&3
-sleep 0.5
-grep -q "before-crash" "$SESSION_LOG" || fail "input via client 1 did not reach child"
+wait_for "before-crash" "$SESSION_LOG" 10 || fail "input via client 1 did not reach child"
 
 kill -9 "$C1"
 exec 3>&-
@@ -50,11 +60,10 @@ mkfifo "$TMP/in2"
 "$BIN/agent-terminal" attach -s t1 < "$TMP/in2" > /dev/null 2>&1 &
 C2=$!
 exec 4>"$TMP/in2"
-sleep 0.5
+sleep 1
 
 printf 'after-reattach\r' >&4
-sleep 0.5
-grep -q "after-reattach" "$SESSION_LOG" || fail "reattached input did not reach the child"
+wait_for "after-reattach" "$SESSION_LOG" 10 || fail "reattached input did not reach the child"
 
 # Detach politely: Ctrl-\ Ctrl-d, client should exit 0.
 printf '\x1c\x04' >&4

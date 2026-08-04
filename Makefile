@@ -11,8 +11,11 @@ O := build/$(BUILD)
 UNAME_S := $(shell uname -s)
 
 CC ?= cc
+# Feature-test macros: strict -std=c17 hides POSIX declarations on glibc
+# (CLOCK_MONOTONIC, lstat, ...). Harmless duplicates of per-file defines.
 COMMON_CFLAGS := -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wvla -Wconversion \
                  -fno-common -fstack-protector-strong -fPIE \
+                 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE \
                  -Isrc
 
 ifeq ($(BUILD),release)
