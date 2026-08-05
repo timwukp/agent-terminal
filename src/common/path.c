@@ -15,6 +15,25 @@
 
 #include "xutil.h"
 
+/* A session name is interpolated into a path as one component and then
+ * mkdir'd, so an unvalidated name escapes the sessions directory: `../escape`
+ * created ~/.agent-terminal/escape/ and a name of
+ * `../../../../../../tmp/victim/pwned` wrote a scrollback log there. Names
+ * that differ but resolve to the same directory ('.' and './') also shared
+ * one log, so `history -s .` returned the other session's output.
+ *
+ * Reject rather than sanitize: rewriting a name would make `ls` disagree with
+ * the directory it names, and there is no legitimate use for a separator in a
+ * session name. A leading '.' is refused too, because sb_list_logs() skips
+ * dotted entries — such a session would exist but never be listed. */
+bool at_valid_session_name(const char *name) {
+    if (!name || !*name) return false;
+    if (name[0] == '.') return false; /* ".", "..", and hidden names */
+    for (const char *p = name; *p; p++)
+        if (*p == '/' || (unsigned char)*p < 0x20) return false;
+    return true;
+}
+
 static int ensure_private_dir(const char *dir) {
     if (mkdir(dir, 0700) != 0 && errno != EEXIST) return -1;
     struct stat st;

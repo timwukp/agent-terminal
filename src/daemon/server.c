@@ -17,6 +17,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "common/path.h"
 #include "common/proto.h"
 #include "common/ring.h"
 #include "common/xutil.h"
@@ -129,6 +130,14 @@ static void handle_new(client *c, const uint8_t *p, size_t len) {
     char name[SESSION_NAME_MAX + 1];
     memcpy(name, p + 5, nlen);
     name[nlen] = '\0';
+    /* The name becomes a directory, so it must be one path component. Length
+     * alone was checked before, and `../escape` was accepted: the daemon
+     * mkdir'd it outside the sessions dir and wrote a scrollback log there.
+     * The client screens names too, but a daemon must not trust a client. */
+    if (!at_valid_session_name(name)) {
+        client_err(c, ERR_BAD_REQUEST, "invalid session name");
+        return;
+    }
 
     uint16_t argv_bytes = get_u16(p + 5 + nlen);
     if ((size_t)7 + nlen + argv_bytes > len) { client_err(c, ERR_BAD_REQUEST, "bad argv"); return; }

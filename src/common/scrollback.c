@@ -131,6 +131,11 @@ static size_t serialize_line(const vt_cell *cells, uint16_t n, char *out, size_t
 /* ---- disk log ---- */
 
 static int session_dir(const char *name, char *out, size_t outsz) {
+    /* The choke point: every path built from a session name goes through here,
+     * from the daemon (sb_open) and from the client's `history` (sb_read_log)
+     * alike. Callers validate too, so reaching this branch means a caller was
+     * added without a gate — fail closed rather than mkdir outside the tree. */
+    if (!at_valid_session_name(name)) { errno = EINVAL; return -1; }
     char base[512];
     if (at_sessions_dir(base, sizeof base) != 0) return -1;
     if ((size_t)snprintf(out, outsz, "%s/%s", base, name) >= outsz) {
