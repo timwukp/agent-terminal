@@ -79,10 +79,13 @@ static bool anywhere(vt *v, uint8_t b) {
         clear_seq(v);
         v->state = ST_ESCAPE;
         return true;
-    case 0x9c: /* raw C1 ST terminates strings; elsewhere no-op */
-        if (v->state == ST_OSC_STRING) { vt_do_osc(v); }
-        v->state = ST_GROUND;
-        return true;
+    /* No case for 0x9c (raw C1 ST). This stream is UTF-8, where 0x80-0x9f are
+     * continuation bytes and 8-bit C1 controls are unreachable — xterm likewise
+     * disables them in UTF-8 mode. Honouring raw ST here dropped every
+     * character whose encoding contains 0x9c (4.5% of all codepoints: U+672C
+     * 本, U+00DC U-umlaut, U+D55C Korean HAN, ...) and, inside OSC, ended the
+     * string early so the tail of a title leaked onto the grid. Strings are
+     * terminated by BEL or ESC \ only. */
     default:
         return false;
     }

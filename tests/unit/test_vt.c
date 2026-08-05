@@ -79,6 +79,14 @@ static const vt_case CASES[] = {
     {"overlong rejected", "\xc0\xafz", 0, "\xef\xbf\xbd\xef\xbf\xbdz.......", -1, -1},
     {"osc title ignored on grid", "\x1b]2;my title\x07x", 0, "x.........", 0, 1},
     {"osc esc-st terminated", "\x1b]0;t\x1b\\y", 0, "y.........", 0, 1},
+    /* 0x9c is C1 ST in a 7/8-bit locale but a plain UTF-8 continuation byte
+     * here, and it appears in 4.5% of all codepoints (U+672C 本, U+00DC Ü,
+     * U+D55C 한, ...). Treating it as a control drops the character and, worse,
+     * ends an OSC string early so the rest of a title leaks onto the grid. */
+    {"utf8 cont byte 9c not ST", "\xe6\x9c\xac", 0, "\xe6\x9c\xac_........", 0, 2},
+    {"9c in 2-byte seq", "\xc3\x9c" "z", 0, "\xc3\x9cz........", 0, 2},
+    {"9c in 4-byte seq", "\xf0\x9f\x8c\x9c", 0, "\xf0\x9f\x8c\x9c_........", 0, 2},
+    {"9c inside osc title", "\x1b]0;\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\x1b\\y", 0, "y.........", 0, 1},
     {"csi ignore garbage", "\x1b[1:2:3mx", 0, "x.........", 0, 1},
     {"can aborts csi", "\x1b[3\x18x", 0, "x.........", 0, 1},
     {"rep", "ab\x1b[3b", 0, "abbbb.....", 0, 5},
