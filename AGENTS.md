@@ -163,11 +163,30 @@ This is the same mechanism the integration tests use — read
 
 ### Scrollback semantics
 
-`history -s name` prints only lines that have **scrolled off** the primary
-screen — not the current visible screen. With a 24-row PTY, 200 printed lines
-yield 177 recovered lines. It reads the on-disk log directly, so it works with
-**no daemon running** and for dead sessions. Lines become durable on the 1 s
-flush tick (or on detach), so allow ≥1 s before reading.
+While a session is **running**, `history -s name` prints only lines that have
+**scrolled off** the primary screen — not the current visible screen. With a
+24-row PTY, 200 printed lines yield 177 recovered lines.
+
+Once a session **ends**, the daemon flushes the still-visible screen to
+scrollback, so the same 200 lines all come back — 200 recovered, no
+duplicates. This is what makes a short crash message recoverable: it never
+scrolled off, so without the flush `history` returned **zero bytes**.
+
+Two exceptions:
+
+- A session ending on the **alternate screen** (inside vim, htop, …) is not
+  flushed at all — scrollback holds primary-screen content only. Its
+  already-scrolled-off lines are unaffected.
+- Trailing blank rows are trimmed, so an idle 24-row screen does not append
+  ~22 empty lines.
+
+`history` reads the on-disk log directly, so it works with **no daemon
+running** and for dead sessions. Lines become durable on the 1 s flush tick
+(or on detach/exit), so allow ≥1 s before reading.
+
+`ls` never reports a session as dead: the daemon frees the slot as soon as the
+child is reaped, so a finished session simply disappears. Use `history` — not
+`ls` — to recover it.
 
 ## 5. Working on the code
 

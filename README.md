@@ -144,6 +144,11 @@ record — and `history` reads it directly, no daemon required. Records
 store rendered ANSI text, so even a raw `less -R scrollback.log` is
 legible.
 
+When a session ends, the still-visible screen is flushed to the log as
+well, so a short crash message that never scrolled off is still
+recoverable with `history`. Sessions ending on the alternate screen
+(vim, htop) are not flushed — the log holds primary-screen content only.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report

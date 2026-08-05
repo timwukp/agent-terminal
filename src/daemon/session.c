@@ -42,9 +42,23 @@ session *session_find(const char *name) {
     return NULL;
 }
 
+static void session_flush_screen(session *s);
+
 void session_flush_all(void) {
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (g_sessions[i].in_use) sb_flush(g_sessions[i].sb);
+}
+
+/* Daemon shutdown (SIGTERM/SIGINT). The children die with us, so this is the
+ * last chance to preserve what is on their screens; without it a service
+ * restart silently discarded every session's visible output, unlike an
+ * explicit kill or a child exiting, which both flush via session_free_slot. */
+void session_flush_screens_all(void) {
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_sessions[i].in_use) {
+            session_flush_screen(&g_sessions[i]);
+            sb_flush(g_sessions[i].sb);
+        }
 }
 
 int session_count(void) {
@@ -101,7 +115,43 @@ session *session_new(const char *name, char *const argv[], uint16_t cols, uint16
     return s;
 }
 
+/* Push what is still on the visible screen into scrollback.
+ *
+ * scrollback only ever received lines that scrolled off, so anything still
+ * on screen when a session ended was lost outright: a child that printed a
+ * short fatal message and exited left `history` returning zero bytes, while
+ * the identical message survived if 100 filler lines had pushed it off. For
+ * this project that inverts the priority — the last screen of a crashed AI
+ * agent is the single most valuable thing to recover.
+ *
+ * Trailing blank lines are trimmed so an idle 24-row screen does not append
+ * 20 empty records per session. Sessions ending on the alternate screen are
+ * skipped: vt_line() exposes the active grid, and scrollback holds
+ * primary-screen content only (vt.h), so flushing vim's or htop's live UI
+ * here would both break that contract and bury the useful history. The cost
+ * is that a session dying inside vim also loses the primary lines still on
+ * screen — vt_line() cannot reach the inactive grid. Lines that had already
+ * scrolled off are unaffected either way. */
+static void session_flush_screen(session *s) {
+    if (!s->vt || !s->sb) return;
+    if (vt_get_modes(s->vt) & VT_MODE_ALTSCREEN) return;
+    uint16_t rows = 0, cols = 0;
+    vt_get_size(s->vt, &rows, &cols);
+    uint16_t last = 0; /* one past the final non-blank row */
+    for (uint16_t r = 0; r < rows; r++) {
+        const vt_cell *line = vt_line(s->vt, r);
+        if (!line) continue;
+        for (uint16_t c = 0; c < cols; c++)
+            if (line[c].cp != 0 && line[c].cp != ' ') { last = (uint16_t)(r + 1); break; }
+    }
+    for (uint16_t r = 0; r < last; r++) {
+        const vt_cell *line = vt_line(s->vt, r);
+        if (line) sb_push_line(s->sb, line, cols);
+    }
+}
+
 static void session_free_slot(session *s) {
+    session_flush_screen(s); /* before vt_free/sb_close destroy both sides */
     if (s->child.master_fd >= 0) {
         loop_del_fd(s->child.master_fd);
         close(s->child.master_fd);
@@ -140,8 +190,10 @@ void session_reap_children(void) {
             for (int j = 0; j < MAX_CLIENTS_PER_SESSION; j++)
                 if (s->clients[j])
                     client_send(s->clients[j], MSG_SESSION_EXITED, payload, 4);
-            /* Grid stays viewable until kill-session; but with no VT engine
-             * yet (M1) there is nothing to keep — free once drained. */
+            /* Freeing here means `ls` never reports a session as dead — the
+             * client's "dead (exit N)" branch is unreachable, and that is
+             * intentional for v1. session_free_slot flushes the final screen
+             * to scrollback first, so `history` still recovers it. */
             session_free_slot(s);
         }
     }
