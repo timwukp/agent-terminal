@@ -102,11 +102,16 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | `attach -s missing`, `agent-terminald` on `PATH` | 1 | `no such session` (daemon was autospawned) |
 | `attach -s missing`, daemon binary not on `PATH` | 1 | `cannot reach daemon at <socket path>` |
 | unknown verb / missing `-s` | 2 | usage block |
-| `kill -s name` | 0 | `killed 'name'` |
+| `kill -s name`, session exists | 0 | `killed 'name'` |
+| `kill -s name`, no such session | 1 | `no such session` (the daemon's own message) |
 
 `ls` exiting 0 with no daemon is deliberate — "no sessions" is a valid answer,
 not an error. **Do not** use `ls`'s exit code to test whether the daemon is up;
 grep the output or check the socket path.
+
+`kill`'s exit code *is* trustworthy: it comes from the daemon's reply, not from
+a local `write()`. It returns after the session is gone, so a following `ls`
+needs no sleep.
 
 ### The client autospawns the daemon
 
