@@ -91,20 +91,69 @@ static int cmd_history(const char *name) {
     return 0;
 }
 
+/* Must wait for the daemon's reply before closing. Closing straight after
+ * write() made the daemon see EOF and tear the connection down before it
+ * dispatched the buffered frame, so the session always survived while the
+ * client still printed "killed" and exited 0 — a race the client always lost.
+ * The reply is also the only thing that can tell us whether the session
+ * existed, so the exit code has to come from it rather than from write(). */
 static int cmd_kill(const char *name) {
     int fd = daemon_connect(0);
     if (fd < 0) return 1;
-    size_t nlen = strlen(name);
+    size_t nlen = strlen(name); /* main() already caps this at 63 */
     uint8_t frame[PROTO_HDR_SIZE + 1 + 255];
     put_u32(frame, (uint32_t)(1 + nlen));
     frame[4] = MSG_KILL_SESSION;
     frame[5] = (uint8_t)nlen;
     memcpy(frame + 6, name, nlen);
     ssize_t total = (ssize_t)(PROTO_HDR_SIZE + 1 + nlen);
-    int ok = write(fd, frame, (size_t)total) == total;
+    if (write(fd, frame, (size_t)total) != total) {
+        fprintf(stderr, "agent-terminal: failed to kill '%s'\n", name);
+        close(fd);
+        return 1;
+    }
+
+    /* The daemon answers a kill with a fresh SESSION_LIST, or ERR if the
+     * session was unknown. */
+    uint8_t rhdr[PROTO_HDR_SIZE];
+    size_t got = 0;
+    while (got < sizeof rhdr) {
+        ssize_t r = read(fd, rhdr + got, sizeof rhdr - got);
+        if (r <= 0) {
+            fprintf(stderr, "agent-terminal: no reply from daemon\n");
+            close(fd);
+            return 1;
+        }
+        got += (size_t)r;
+    }
+    uint8_t type = rhdr[4];
+    uint32_t plen = get_u32(rhdr);
+    if (plen > PROTO_MAX_PAYLOAD) { close(fd); return 1; }
+    uint8_t *p = xmalloc(plen ? plen : 1);
+    got = 0;
+    while (got < plen) {
+        ssize_t r = read(fd, p + got, plen - got);
+        if (r <= 0) { free(p); close(fd); return 1; }
+        got += (size_t)r;
+    }
     close(fd);
-    printf(ok ? "killed '%s'\n" : "failed to kill '%s'\n", name);
-    return ok ? 0 : 1;
+
+    if (type == MSG_ERR) {
+        uint16_t mlen = plen >= 4 ? get_u16(p + 2) : 0;
+        if (mlen && 4u + mlen <= plen)
+            fprintf(stderr, "agent-terminal: %.*s\n", (int)mlen, (char *)p + 4);
+        else
+            fprintf(stderr, "agent-terminal: cannot kill '%s'\n", name);
+        free(p);
+        return 1;
+    }
+    free(p);
+    if (type != MSG_SESSION_LIST) {
+        fprintf(stderr, "agent-terminal: unexpected reply killing '%s'\n", name);
+        return 1;
+    }
+    printf("killed '%s'\n", name);
+    return 0;
 }
 
 int main(int argc, char **argv) {
