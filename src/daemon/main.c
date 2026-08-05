@@ -89,6 +89,8 @@ int main(int argc, char **argv) {
     log_msg(LOG_INFO, "agent-terminald listening on %s", sock);
     loop_set_tick(1000, session_flush_all); /* 1s durability window */
     loop_run();
+    /* SIGTERM/SIGINT: children die with us, so preserve their screens first. */
+    session_flush_screens_all();
     server_shutdown();
     return 0;
 }

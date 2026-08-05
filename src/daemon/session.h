@@ -30,6 +30,7 @@ session *session_find(const char *name);
 void session_kill(session *s);            /* SIGHUP child, free slot */
 void session_reap_children(void);         /* SIGCHLD bottom half */
 void session_flush_all(void);             /* periodic scrollback flush */
+void session_flush_screens_all(void);     /* shutdown: preserve visible screens */
 int  session_count(void);
 session *session_at(int idx);             /* iterate 0..MAX_SESSIONS-1, may be NULL */
 
