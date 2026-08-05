@@ -53,6 +53,16 @@ dead sessions.
 .TP
 .B kill
 Terminate a session's child process and free the session.
+.SH SESSION NAMES
+A name becomes a single directory component under
+.IR ~/.agent-terminal/sessions/ ,
+so it must not contain
+.BR / ,
+must not begin with
+.BR . ,
+must contain no control characters, and is capped at 63 bytes. Interior dots
+(\fIbuild_2026.08\fR) and non-ASCII names are accepted. An invalid name is
+rejected \(em never rewritten \(em and the command exits 1.
 .SH KEY BINDINGS
 .TP
 .B Ctrl\-\\\\ Ctrl\-d

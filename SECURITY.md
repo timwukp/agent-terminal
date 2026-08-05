@@ -43,6 +43,14 @@ network listener of any kind.
    damaged data). Note that scrollback contains whatever your sessions
    displayed — treat the directory as sensitive.
 
+4. **Session names → filesystem paths.** A name becomes one path component
+   under `~/.agent-terminal/sessions/`, so it is validated by
+   `at_valid_session_name()` (no `/`, no leading `.`, no control bytes, not
+   empty) at three independent layers: the client CLI, the daemon's
+   `MSG_NEW_SESSION` handler, and — fail-closed — the `session_dir()` choke
+   point that every name-to-path conversion passes through. Names are rejected
+   rather than rewritten.
+
 **Explicit non-goals:**
 
 - Protecting one user from another user *with the same UID* (same trust

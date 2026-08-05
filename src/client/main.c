@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "attach.h"
+#include "common/path.h"
 #include "common/proto.h"
 #include "common/scrollback.h"
 #include "common/xutil.h"
@@ -173,6 +174,13 @@ int main(int argc, char **argv) {
         }
     }
     if (name && strlen(name) > 63) die("session name too long (max 63)");
+    /* Names index a directory under ~/.agent-terminal/sessions/, so a name
+     * with a '/' or a leading '.' escaped that tree or aliased another
+     * session: `history -s .` used to print a different session's output.
+     * Rejected here as well as in the daemon because `history` never talks to
+     * the daemon — it opens the log file itself. */
+    if (name && !at_valid_session_name(name))
+        die("invalid session name '%s': no '/', no leading '.'", name);
 
     if (strcmp(verb, "ls") == 0) return cmd_ls();
     if (strcmp(verb, "history") == 0) {

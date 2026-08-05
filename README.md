@@ -94,6 +94,10 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
 | `agent-terminal kill -s name` | Terminate a session. |
 
+A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
+must be a single path component: no `/`, no leading `.`, max 63 bytes. Interior
+dots (`build_2026.08`) and non-ASCII (`日本語`) are fine. Invalid names exit 1.
+
 ### Key bindings
 
 - **`Ctrl-\` then `Ctrl-d`** — detach, leaving the session running.

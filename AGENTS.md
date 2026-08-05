@@ -104,6 +104,26 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | unknown verb / missing `-s` | 2 | usage block |
 | `kill -s name`, session exists | 0 | `killed 'name'` |
 | `kill -s name`, no such session | 1 | `no such session` (the daemon's own message) |
+| any verb with an invalid `-s` name | 1 | `[fatal] invalid session name '<n>': no '/', no leading '.'` |
+
+### Session names are one path component
+
+A name becomes a directory under `~/.agent-terminal/sessions/`, so
+`at_valid_session_name()` (`src/common/path.c`) rejects an empty name, any `/`,
+any control byte, and a leading `.`. Enforced at three layers, for three
+different reasons:
+
+| Layer | Why it is separate |
+|---|---|
+| `src/client/main.c` (all verbs) | `history` never contacts the daemon — it opens the log file itself, so no daemon-side check can cover it |
+| `handle_new` (`src/daemon/server.c`) | a daemon must not trust a client; any process with the socket can send `MSG_NEW_SESSION` |
+| `session_dir` (`src/common/scrollback.c`) | fail-closed choke point: reaching it means a caller was added without a gate. Returns `-1`/`EINVAL` rather than `mkdir`ing outside the tree |
+
+A leading `.` is rejected as well as `.`/`..` because `sb_list_logs()` skips
+dotted dirents — such a session would exist on disk yet never appear in `ls`.
+Names are rejected, never sanitized: rewriting one would make `ls` disagree with
+the directory it names. Interior dots are fine (`build_2026.08`, `x..y`), as is
+any UTF-8 (`日本語`), since every byte there is ≥ 0x80.
 
 `ls` exiting 0 with no daemon is deliberate — "no sessions" is a valid answer,
 not an error. **Do not** use `ls`'s exit code to test whether the daemon is up;
