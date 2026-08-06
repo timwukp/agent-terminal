@@ -291,8 +291,15 @@ void vt_do_csi(vt *v, uint8_t final) {
         uint16_t col = v->cur.col ? (uint16_t)(v->cur.col - 1) : 0;
         vt_cell *prev = vt_cell_at(v, v->cur.row, col);
         if (prev && prev->cp) {
-            int w = vt_wcwidth(prev->cp);
-            for (int i = 0; i < n; i++) vt_screen_put(v, prev->cp, w);
+            /* Copy out of the grid before printing: vt_screen_put can scroll,
+             * which relocates cells under `prev` while the loop still runs. */
+            uint32_t cp = prev->cp, mark = prev->comb;
+            int w = vt_wcwidth(cp);
+            for (int i = 0; i < n; i++) {
+                vt_screen_put(v, cp, w);
+                /* Repeat the whole grapheme, not just the base. */
+                if (mark) vt_screen_put(v, mark, 0);
+            }
         }
         break;
     }

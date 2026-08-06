@@ -110,6 +110,9 @@ static void render_grid(sb *b, const vt *v) {
                 pen_dirty = false;
             }
             emit_utf8(b, cell->cp ? cell->cp : ' ');
+            /* The mark follows its base, which is how a terminal composes the
+             * grapheme; it is width-0, so the row still occupies `cols`. */
+            if (cell->comb) emit_utf8(b, cell->comb);
         }
     }
     sb_str(b, "\x1b[0m");

@@ -34,7 +34,33 @@ typedef struct {
     uint32_t cp; /* base codepoint; 0 = empty cell */
     uint32_t fg, bg;
     uint16_t attrs;
+    /* One combining mark applied to cp, as a BMP codepoint; 0 = none.
+     *
+     * A self-contained value, not an index into engine-side storage. Two
+     * properties depend on that. First, cells are relocated by six bitwise
+     * copies that treat them as POD (both scroll helpers, insert/delete chars,
+     * vt_resize, vt_screen_reset) plus a shallow struct copy in vt_snapshot; a
+     * value survives all of them with no aliasing and nothing to own. Second,
+     * on_scrollback_line hands cells to a serializer in libcommon, which does
+     * not link libvt and must be able to render a cell without asking the
+     * engine to decode anything.
+     *
+     * Restricted to the BMP so it fits 16 bits in vt_cell's existing tail
+     * padding, keeping sizeof(vt_cell) at 16 and grid memory unchanged. That
+     * covers 1005 of Unicode's 1378 combining marks — every modern living
+     * script; the 373 dropped are in supplementary planes (archaic scripts,
+     * musical notation, Duployan). Marks past the first on one base are also
+     * dropped, so a multi-mark Thai or Devanagari cluster keeps only its
+     * first mark. */
+    uint16_t comb;
 } vt_cell;
+
+/* The zero-memory-cost claim above, enforced rather than commented: comb has to
+ * land in the padding that attrs already left behind. Alignment is 4, so the
+ * next size up is 20 bytes — widening a field or adding one would silently cost
+ * 7.6 MiB per grid pair at the largest grid the engine allows (1000x1000).
+ * Fail the build instead. */
+_Static_assert(sizeof(vt_cell) == 16, "vt_cell grew: comb must fit in tail padding");
 
 /* Tracked DEC private modes — re-asserted by vt_snapshot() on reattach. */
 enum vt_mode {

@@ -121,6 +121,22 @@ static size_t serialize_line(const vt_cell *cells, uint16_t n, char *out, size_t
                          (char)(0x80 | ((cp >> 6) & 0x3f)), (char)(0x80 | (cp & 0x3f))};
             PUT(u, 4);
         }
+        /* Combining mark, if any, immediately after its base. vt_cell.comb is
+         * a BMP codepoint by construction, hence at most 3 bytes and no need
+         * for the 4-byte form. Decoding it here rather than calling libvt is
+         * deliberate: libcommon must not depend on libvt, because the client
+         * links libcommon alone. */
+        if (cell->comb) {
+            uint32_t m = cell->comb;
+            if (m < 0x800) {
+                char u[2] = {(char)(0xc0 | (m >> 6)), (char)(0x80 | (m & 0x3f))};
+                PUT(u, 2);
+            } else {
+                char u[3] = {(char)(0xe0 | (m >> 12)), (char)(0x80 | ((m >> 6) & 0x3f)),
+                             (char)(0x80 | (m & 0x3f))};
+                PUT(u, 3);
+            }
+        }
     }
     if (attrs || fg != VT_COLOR_DEFAULT || bg != VT_COLOR_DEFAULT) PUT("\x1b[0m", 4);
 #undef PUT

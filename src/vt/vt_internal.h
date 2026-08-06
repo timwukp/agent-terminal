@@ -76,6 +76,17 @@ struct vt {
     /* utf-8 decoder (Höhrmann DFA) — survives vt_feed boundaries */
     uint32_t u8_state, u8_cp;
 
+    /* Cell most recently written by vt_screen_put, which is where a following
+     * combining mark attaches. Cannot be derived from the cursor: cur.col has
+     * already advanced past the base (by 2 for a wide char), and at the right
+     * margin it stays put with pending_wrap set. Lives here rather than in
+     * vt_cursor so DECSC/DECRC do not save and restore it — a mark arriving
+     * after DECRC must not attach to whatever the cursor was parked on when
+     * the save happened. Must survive vt_feed boundaries, since a base and its
+     * mark can arrive in separate reads. */
+    uint16_t last_row, last_col;
+    bool last_valid;
+
     vt_callbacks cb;
     void *ud;
 };
@@ -87,6 +98,10 @@ uint32_t vt_utf8_step(uint32_t *state, uint32_t *cp, uint8_t byte);
 
 /* vt_width.c (generated) */
 int vt_wcwidth(uint32_t cp);
+/* A mark that attaches to a base character. Deliberately NOT the same test as
+ * vt_wcwidth(cp) == 0, which also holds for NUL, C0/C1 controls, ZWJ/ZWNJ,
+ * variation selectors, BiDi controls and U+FEFF. */
+bool vt_is_combining(uint32_t cp);
 
 /* vt_screen.c — grid primitives used by dispatch */
 vt_cell *vt_cell_at(vt *v, uint16_t row, uint16_t col);
