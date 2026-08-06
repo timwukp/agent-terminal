@@ -84,6 +84,11 @@ $(O)/tests/%: tests/unit/%.c $(LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $^
 
+# The pager is client code, not a library, so it is not in $(LIBS). Naming the
+# object as an extra prerequisite keeps the generic rule above unchanged ($^
+# picks it up) instead of duplicating the recipe.
+$(O)/tests/test_pager: $(O)/src/client/pager.o
+
 test: $(TEST_BIN)
 	@rc=0; for t in $(TEST_BIN); do echo "== $$t"; $$t || rc=1; done; exit $$rc
 
