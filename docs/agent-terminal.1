@@ -69,6 +69,38 @@ rejected \(em never rewritten \(em and the command exits 1.
 Detach from the session, leaving it running. A lone
 .B Ctrl\-\\\\
 is forwarded to the application after a 500 ms timeout.
+.TP
+.B Ctrl\-\\\\ [
+Enter copy-mode and page through the session's scrollback without
+detaching. The child keeps running; output produced while paging is
+skipped, and leaving copy-mode repaints from a fresh daemon snapshot.
+Copy-mode shows only what has scrolled
+.I off
+the screen \(em the current screenful is not part of scrollback.
+.SS Copy-mode keys
+.TP
+.BR j ", " k ", " \(daArrow ", " \(uaArrow
+Move one line.
+.TP
+.BR Space ", " Ctrl\-f ", " Ctrl\-b ", " PgDn ", " PgUp
+Move one page.
+.TP
+.BR Ctrl\-d ", " Ctrl\-u
+Move half a page.
+.TP
+.BR g ", " G ", " Home ", " End
+Jump to the oldest or newest line.
+.TP
+.BI / pattern
+Search forward; then
+.B n
+and
+.B N
+repeat forward and backward. Matching is on displayed text, ignoring SGR
+escapes, and does not wrap around.
+.TP
+.BR q ", " Esc
+Leave copy-mode.
 .SH SSH
 Run the system OpenSSH client inside a session:
 .IP

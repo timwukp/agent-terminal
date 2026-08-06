@@ -103,6 +103,25 @@ dots (`build_2026.08`) and non-ASCII (`日本語`) are fine. Invalid names exit 
 - **`Ctrl-\` then `Ctrl-d`** — detach, leaving the session running.
   A lone `Ctrl-\` is forwarded to the application after 500 ms, so the
   chord does not steal the key.
+- **`Ctrl-\` then `[`** — enter copy-mode to page through scrollback
+  without detaching. The session keeps running; output produced while
+  paging is skipped, and exiting repaints from a fresh daemon snapshot.
+
+Inside copy-mode:
+
+| Key | Action |
+| --- | ------ |
+| `j` / `k`, `↓` / `↑` | one line |
+| `Space` / `Ctrl-f`, `Ctrl-b`, `PgDn` / `PgUp` | one page |
+| `Ctrl-d` / `Ctrl-u` | half a page |
+| `g` / `G`, `Home` / `End` | oldest / newest line |
+| `/`*pattern*, then `n` / `N` | search forward / backward (no wraparound) |
+| `q` / `Esc` | leave copy-mode |
+
+Copy-mode shows what has **scrolled off** the screen, so a session that
+has printed 200 lines into a 24-row terminal offers 177 lines of history —
+the other 23 are still on screen. Search matches the text you see, not the
+colour escapes around it. The bottom row reports position and total.
 
 ### Scripted / non-interactive use
 
@@ -177,7 +196,6 @@ vulnerabilities. Highlights:
   — deliberately out of scope.
 - Standalone combining marks are dropped (base+combiner grapheme storage
   is a v2 item); CJK wide characters are fully supported.
-- No scrollback *paging UI* in the client yet — use `history | less -R`.
 
 ## Development
 

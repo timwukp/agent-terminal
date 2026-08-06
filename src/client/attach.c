@@ -22,6 +22,7 @@
 #include "common/proto.h"
 #include "common/ring.h"
 #include "common/xutil.h"
+#include "pager.h"
 #include "tty.h"
 
 static volatile sig_atomic_t g_winch = 0;
@@ -115,10 +116,11 @@ int daemon_connect(int auto_start) {
     return fd;
 }
 
-/* ---- input scanning: detach chord Ctrl-\ then Ctrl-d ---- */
+/* ---- input scanning: prefix Ctrl-\ then Ctrl-d (detach) or [ (copy-mode) ---- */
 
 #define KEY_CTRL_BACKSLASH 0x1c
 #define KEY_CTRL_D 0x04
+#define KEY_COPY_MODE '['
 #define CHORD_TIMEOUT_MS 500
 
 typedef struct {
@@ -126,15 +128,21 @@ typedef struct {
     uint64_t armed_at;
 } chord;
 
-/* Returns 1 if a detach was requested. Forwardable bytes land in fwd
- * (caller-sized >= 2*len). */
-static int scan_input(chord *ch, const uint8_t *in, size_t len, uint8_t *fwd, size_t *fwdlen) {
+typedef enum { SCAN_NONE, SCAN_DETACH, SCAN_COPY_MODE } scan_result;
+
+/* Forwardable bytes land in fwd (caller-sized >= 2*len). *fwdlen is always
+ * assigned, and bytes seen before a chord completes are kept: returning early
+ * without setting it silently dropped everything typed earlier in the same
+ * read() batch. */
+static scan_result scan_input(chord *ch, const uint8_t *in, size_t len, uint8_t *fwd,
+                              size_t *fwdlen, size_t *consumed) {
     size_t o = 0;
     for (size_t i = 0; i < len; i++) {
         uint8_t b = in[i];
         if (ch->armed) {
             ch->armed = 0;
-            if (b == KEY_CTRL_D) return 1;
+            if (b == KEY_CTRL_D) { *fwdlen = o; *consumed = i + 1; return SCAN_DETACH; }
+            if (b == KEY_COPY_MODE) { *fwdlen = o; *consumed = i + 1; return SCAN_COPY_MODE; }
             fwd[o++] = KEY_CTRL_BACKSLASH; /* forward the swallowed byte */
             fwd[o++] = b;
             continue;
@@ -147,7 +155,8 @@ static int scan_input(chord *ch, const uint8_t *in, size_t len, uint8_t *fwd, si
         fwd[o++] = b;
     }
     *fwdlen = o;
-    return 0;
+    *consumed = len;
+    return SCAN_NONE;
 }
 
 /* ---- attach pump ---- */
@@ -210,6 +219,22 @@ static int send_new(int fd, const char *name, char *const argv[], int argc,
     return send_frame(fd, MSG_NEW_SESSION, p, off + abytes);
 }
 
+static int send_scrollback_req(int fd, uint64_t start_seq, uint32_t max_lines) {
+    uint8_t p[12];
+    put_u64(p, start_seq);
+    put_u32(p + 8, max_lines);
+    return send_frame(fd, MSG_SCROLLBACK_REQ, p, sizeof p);
+}
+
+/* Copy-mode needs a fresh snapshot on exit, but session_attach() returns early
+ * for a client already in the session's client table and sends nothing. So
+ * detach first, then re-attach: without the DETACH the repaint never arrives
+ * and the terminal is left showing the pager's last frame. */
+static int send_repaint_request(int fd, const char *name, uint16_t cols, uint16_t rows) {
+    if (send_frame(fd, MSG_DETACH, NULL, 0) != 0) return -1;
+    return send_attach(fd, name, cols, rows);
+}
+
 static void pump_resize(int fd) {
     uint16_t cols, rows;
     if (tty_get_size(&cols, &rows) != 0) return;
@@ -231,6 +256,7 @@ int attach_run(const char *name, char *const argv[], int argc) {
 
     int first = 1;
     int backoff_ms = 250;
+    pager *pg = NULL; /* non-NULL only while copy-mode is open */
     for (;;) { /* reconnect loop */
         int fd = daemon_connect(first);
         if (fd < 0) {
@@ -258,6 +284,7 @@ int attach_run(const char *name, char *const argv[], int argc) {
         uint8_t *scratch = xmalloc(PROTO_MAX_PAYLOAD);
         chord ch = {0};
         int detached = 0, exited = 0, exit_code = 0, conn_lost = 0;
+        uint64_t sb_lines = 0; /* daemon's scrollback total, from MSG_SNAPSHOT */
 
         while (!detached && !exited && !conn_lost) {
             struct pollfd pfds[3] = {
@@ -265,7 +292,9 @@ int attach_run(const char *name, char *const argv[], int argc) {
                 {.fd = fd, .events = POLLIN},
                 {.fd = g_winch_pipe[0], .events = POLLIN},
             };
-            int timeout = ch.armed ? CHORD_TIMEOUT_MS : -1;
+            int timeout = -1;
+            if (ch.armed) timeout = CHORD_TIMEOUT_MS;
+            else if (pg && pager_esc_pending(pg)) timeout = PAGER_ESC_TIMEOUT_MS;
             int n = poll(pfds, 3, timeout);
             if (n < 0 && errno != EINTR) { conn_lost = 1; break; }
 
@@ -275,11 +304,25 @@ int attach_run(const char *name, char *const argv[], int argc) {
                 send_frame(fd, MSG_STDIN_DATA, &b, 1);
                 ch.armed = 0;
             }
-            if (n <= 0) continue;
+            if (n <= 0) {
+                /* A lone ESC in copy-mode means quit, but only once we know no
+                 * arrow-key bytes are following it. */
+                if (pg && pager_esc_pending(pg) && pager_esc_timeout(pg) == PAGER_EXIT) {
+                    pager_leave(pg);
+                    pager_free(pg);
+                    pg = NULL;
+                    if (send_repaint_request(fd, name, cols, rows) != 0) conn_lost = 1;
+                }
+                continue;
+            }
 
             if (pfds[2].revents & POLLIN) {
                 uint8_t drain[32];
                 while (read(g_winch_pipe[0], drain, sizeof drain) > 0) {}
+                /* The daemon still owns the child's geometry while paging, so
+                 * the resize is forwarded either way; the pager redraws itself
+                 * into the new size. */
+                if (tty_get_size(&cols, &rows) == 0 && pg) pager_resize(pg, cols, rows);
                 pump_resize(fd);
             }
 
@@ -287,12 +330,49 @@ int attach_run(const char *name, char *const argv[], int argc) {
                 uint8_t buf[4096], fwd[8192];
                 ssize_t r = read(0, buf, sizeof buf);
                 if (r > 0) {
-                    size_t fwdlen = 0;
-                    if (scan_input(&ch, buf, (size_t)r, fwd, &fwdlen)) {
-                        detached = 1;
+                    if (pg) {
+                        /* Copy-mode owns the keyboard: nothing reaches the
+                         * child. The session keeps running; its live output is
+                         * dropped and recovered by the exit repaint. */
+                        if (pager_input(pg, buf, (size_t)r) == PAGER_EXIT) {
+                            pager_leave(pg);
+                            pager_free(pg);
+                            pg = NULL;
+                            if (send_repaint_request(fd, name, cols, rows) != 0)
+                                conn_lost = 1;
+                        }
+                    } else {
+                        size_t fwdlen = 0, consumed = 0;
+                        scan_result sr = scan_input(&ch, buf, (size_t)r, fwd, &fwdlen, &consumed);
+                        if (fwdlen && send_frame(fd, MSG_STDIN_DATA, fwd, fwdlen) != 0)
+                            conn_lost = 1;
+                        if (sr == SCAN_DETACH) {
+                            detached = 1;
+                        } else if (sr == SCAN_COPY_MODE && !conn_lost) {
+                            pg = pager_new();
+                            /* The on-disk log holds all history including the
+                             * rotated generation; the daemon's ring holds only
+                             * the tail not yet flushed. Read disk first, then
+                             * ask for the remainder — pager_add_line drops the
+                             * overlap by seq. */
+                            pager_load_disk(pg, name);
+                            pager_enter(pg, cols, rows, sb_lines);
+                            uint64_t want = pager_want_from(pg);
+                            if (want != UINT64_MAX &&
+                                send_scrollback_req(fd, want, 1000) != 0)
+                                conn_lost = 1;
+                            /* Bytes typed after the chord in the same batch are
+                             * pager input, not child input. */
+                            if (consumed < (size_t)r && !conn_lost &&
+                                pager_input(pg, buf + consumed, (size_t)r - consumed) == PAGER_EXIT) {
+                                pager_leave(pg);
+                                pager_free(pg);
+                                pg = NULL;
+                                if (send_repaint_request(fd, name, cols, rows) != 0)
+                                    conn_lost = 1;
+                            }
+                        }
                     }
-                    if (fwdlen && send_frame(fd, MSG_STDIN_DATA, fwd, fwdlen) != 0)
-                        conn_lost = 1;
                 } else if (r == 0) {
                     detached = 1; /* stdin gone: treat as detach */
                 }
@@ -314,6 +394,11 @@ int attach_run(const char *name, char *const argv[], int argc) {
                         if (frc < 0) { conn_lost = 1; break; }
                         switch (type) {
                         case MSG_OUTPUT: {
+                            /* Dropped while paging: the child keeps running and
+                             * the daemon keeps its grid, so exiting copy-mode
+                             * repaints from a fresh snapshot. Writing these
+                             * bytes would corrupt the pager's screen instead. */
+                            if (pg) break;
                             size_t off = 0;
                             while (off < len) {
                                 ssize_t w = write(1, scratch + off, len - off);
@@ -324,6 +409,12 @@ int attach_run(const char *name, char *const argv[], int argc) {
                         }
                         case MSG_SNAPSHOT: {
                             if (len < 12) break;
+                            /* u16 cols, u16 rows, u64 sb_lines, then the blob.
+                             * sb_lines is the anchor copy-mode needs: it bounds
+                             * how much history exists, including lines the
+                             * daemon has not flushed to disk yet. */
+                            sb_lines = get_u64(scratch + 4);
+                            if (pg) break; /* a repaint arriving mid-page */
                             size_t off = 12;
                             while (off < len) {
                                 ssize_t w = write(1, scratch + off, len - off);
@@ -332,11 +423,36 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             }
                             break;
                         }
+                        case MSG_SCROLLBACK_DATA: {
+                            /* u64 first_seq, u32 nlines, then {u32 len, bytes}.
+                             * first_seq is 0 on an empty reply rather than the
+                             * requested start, so nlines is the only reliable
+                             * "nothing available" signal. */
+                            if (!pg || len < 12) break;
+                            uint32_t nlines = get_u32(scratch + 8);
+                            size_t off = 12;
+                            uint64_t seq = get_u64(scratch);
+                            uint32_t got = 0;
+                            for (uint32_t i = 0; i < nlines && off + 4 <= len; i++) {
+                                uint32_t llen = get_u32(scratch + off);
+                                if (off + 4 + llen > len) break;
+                                pager_add_line(pg, seq + i, (const char *)scratch + off + 4, llen);
+                                off += 4 + llen;
+                                got++;
+                            }
+                            pager_add_batch_done(pg, got);
+                            uint64_t want = pager_want_from(pg);
+                            if (want != UINT64_MAX && send_scrollback_req(fd, want, 1000) != 0)
+                                conn_lost = 1;
+                            pager_draw(pg);
+                            break;
+                        }
                         case MSG_SESSION_EXITED:
                             exited = 1;
                             exit_code = len >= 4 ? (int)get_u32(scratch) : 0;
                             break;
                         case MSG_ERR: {
+                            if (pg) { pager_leave(pg); pager_free(pg); pg = NULL; }
                             tty_raw_leave();
                             if (len >= 4) {
                                 uint16_t mlen = get_u16(scratch + 2);
@@ -354,6 +470,9 @@ int attach_run(const char *name, char *const argv[], int argc) {
             }
         }
 
+        /* Copy-mode cannot outlive the connection: refilling it needs the
+         * daemon, and the reconnect path re-attaches and repaints anyway. */
+        if (pg) { pager_leave(pg); pager_free(pg); pg = NULL; }
         ring_free(&in);
         free(scratch);
         close(fd);

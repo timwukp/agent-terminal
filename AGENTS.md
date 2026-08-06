@@ -200,6 +200,27 @@ Two exceptions:
 - Trailing blank rows are trimmed, so an idle 24-row screen does not append
   ~22 empty lines.
 
+The client's copy-mode (`Ctrl-\ [`) reads the same scrollback, so it shows the
+same 177 lines and not the 23 still on screen. Two properties are easy to get
+wrong and both have tests:
+
+- Lines are durable only on the 1 s flush tick, so copy-mode reads the on-disk
+  log **and** requests the un-flushed tail over `MSG_SCROLLBACK_REQ`. Entering
+  immediately after a burst, the log can hold **0** of the scrolled-off lines —
+  measured at 0 of 77 for a 100-line burst, every one arriving over the wire
+  (`tests/integration/test_pager_ring.sh`, which asserts the log is short first
+  so the test cannot pass by the daemon having flushed early).
+- That ring reply lands *after* the first draw, so the view follows the tail
+  while it sits at the bottom. Without that, copy-mode opens showing older
+  history than it holds, with a status line that says otherwise.
+
+The client does **not** link `libvt`, so it has no `wcwidth` and cannot measure
+display width. Copy-mode therefore disables autowrap (`\x1b[?7l`) and emits each
+stored line verbatim, letting the terminal clip: one stored line is always
+exactly one display row. Leaving copy-mode sends `MSG_DETACH` before
+re-`MSG_ATTACH`, because `session_attach` returns early for a client already in
+the session's table and would send no snapshot at all.
+
 `history` reads the on-disk log directly, so it works with **no daemon
 running** and for dead sessions. Lines become durable on the 1 s flush tick
 (or on detach/exit), so allow ≥1 s before reading.
@@ -216,7 +237,7 @@ child is reaped, so a finished session simply disappears. Use `history` — not
 |---|---|
 | `src/vt/` | VT engine → `libvt.a`. **No I/O, no syscalls**; effects only via `vt_callbacks`. The untrusted-input surface. |
 | `src/daemon/` | event loop, unix socket server, sessions, PTY |
-| `src/client/` | thin client, termios raw mode, attach loop |
+| `src/client/` | thin client, termios raw mode, attach loop, scrollback copy-mode (`pager.c` — the only client code with a view of its own) |
 | `src/common/` | wire protocol, ring buffer, scrollback, paths |
 | `tests/unit/` | table-driven; `runner.h` is the whole framework |
 | `tests/integration/` | end-to-end bash; `lib.sh` holds shared guards |
