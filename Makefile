@@ -80,13 +80,19 @@ $(O)/agent-terminal: $(CLIENT_OBJ) $(O)/libcommon.a
 TEST_SRC := $(wildcard tests/unit/*.c)
 TEST_BIN := $(TEST_SRC:tests/unit/%.c=$(O)/tests/%)
 
+# Archives go LAST on the link line, after every object. GNU ld resolves static
+# libraries in command-line order and does not revisit an archive it has already
+# passed, so an extra object appended by a target-specific prerequisite (below)
+# would fail to find xmalloc/sb_read_log. Apple's ld64 resolves regardless of
+# order, so getting this wrong builds clean on macOS and fails only on Linux.
 $(O)/tests/%: tests/unit/%.c $(LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ \
+	    $(filter-out $(LIBS),$^) $(LIBS)
 
 # The pager is client code, not a library, so it is not in $(LIBS). Naming the
-# object as an extra prerequisite keeps the generic rule above unchanged ($^
-# picks it up) instead of duplicating the recipe.
+# object as an extra prerequisite keeps the generic rule above unchanged (the
+# recipe picks it up) instead of duplicating the recipe.
 $(O)/tests/test_pager: $(O)/src/client/pager.o
 
 test: $(TEST_BIN)
