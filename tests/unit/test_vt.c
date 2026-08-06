@@ -10,30 +10,43 @@
 #define ROWS 6
 #define COLS 10
 
-/* Render a row as UTF-8 text (cp==0 → '.', spacer → '_') for assertions. */
+static size_t put_utf8(char *out, uint32_t cp) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xc0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3f));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xe0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[2] = (char)(0x80 | (cp & 0x3f));
+        return 3;
+    }
+    out[0] = (char)(0xf0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+    out[3] = (char)(0x80 | (cp & 0x3f));
+    return 4;
+}
+
+/* Render a row as UTF-8 text (cp==0 → '.', spacer → '_') for assertions.
+ * A cell's combining mark is emitted right after its base, so an expectation
+ * string shows the grapheme a terminal would draw. Without that, an assertion
+ * on a base character cannot tell an attached mark from a dropped one. */
 static void row_text(const vt *v, uint16_t row, char *out, size_t outsz) {
     const vt_cell *line = vt_line(v, row);
     size_t o = 0;
     uint16_t rows, cols;
     vt_get_size(v, &rows, &cols);
-    for (uint16_t c = 0; c < cols && o + 4 < outsz; c++) {
+    for (uint16_t c = 0; c < cols; c++) {
         uint32_t cp = line[c].cp;
+        /* Worst case for one cell: 4-byte base + 3-byte BMP mark, plus NUL. */
+        if (o + 8 > outsz) break;
         if (line[c].attrs & VT_ATTR_WIDE_SPACER) { out[o++] = '_'; continue; }
-        if (cp == 0) { out[o++] = '.'; continue; }
-        if (cp < 0x80) { out[o++] = (char)cp; continue; }
-        if (cp < 0x800) {
-            out[o++] = (char)(0xc0 | (cp >> 6));
-            out[o++] = (char)(0x80 | (cp & 0x3f));
-        } else if (cp < 0x10000) {
-            out[o++] = (char)(0xe0 | (cp >> 12));
-            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-            out[o++] = (char)(0x80 | (cp & 0x3f));
-        } else {
-            out[o++] = (char)(0xf0 | (cp >> 18));
-            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3f));
-            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3f));
-            out[o++] = (char)(0x80 | (cp & 0x3f));
-        }
+        if (cp == 0 && line[c].comb == 0) { out[o++] = '.'; continue; }
+        o += put_utf8(out + o, cp ? cp : ' ');
+        if (line[c].comb) o += put_utf8(out + o, line[c].comb);
     }
     out[o] = '\0';
 }
@@ -74,7 +87,39 @@ static const vt_case CASES[] = {
     {"dec graphics", "\x1b(0qqq\x1b(B", 0, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80.......", 0, 3},
     {"utf8 cjk wide", "\xe4\xb8\xad", 0, "\xe4\xb8\xad_........", 0, 2},
     {"wide at margin wraps", "\x1b[1;10H\xe4\xb8\xad", 1, "\xe4\xb8\xad_........", 1, 2},
-    {"combining dropped", "e\xcc\x81x", 0, "ex........", 0, 2},
+    /* Was "combining dropped" in v1: the mark now attaches to its base. The
+     * cursor still lands at column 2, because a mark advances nothing. */
+    {"combining attaches", "e\xcc\x81x", 0, "e\xcc\x81x........", 0, 2},
+    {"combining after wide char", "\xe4\xb8\xad\xcc\x81", 0,
+     "\xe4\xb8\xad\xcc\x81_........", 0, 2},
+    /* A mark with no base has nothing to attach to and is dropped. */
+    {"combining with no base", "\xcc\x81x", 0, "x.........", 0, 1},
+    /* Only the first mark on a base is stored; the second is dropped. */
+    {"second combiner dropped", "e\xcc\x81\xcc\x82x", 0, "e\xcc\x81x........", 0, 2},
+    /* At the right margin the cursor stays put with pending_wrap set, so
+     * cur.col does not identify the base — last-written-cell tracking does. */
+    {"combining at right margin", "012345678X\xcc\x81", 0, "012345678X\xcc\x81", 0, 9},
+    /* Marks outside the BMP do not fit a 16-bit cell field and are dropped;
+     * U+1D167 is a combining musical notation mark. */
+    {"non-bmp combiner dropped", "e\xf0\x9d\x85\xa7x", 0, "ex........", 0, 2},
+    /* Zero-width but not attachable: each is consumed and dropped, and must
+     * not detach a mark that follows it from the base before it. */
+    {"zwj not attached", "e\xe2\x80\x8dx", 0, "ex........", 0, 2},
+    {"variation selector not attached", "e\xef\xb8\x8fx", 0, "ex........", 0, 2},
+    {"bidi control not attached", "e\xe2\x80\xaax", 0, "ex........", 0, 2},
+    {"zwj between base and mark", "e\xe2\x80\x8d\xcc\x81x", 0, "e\xcc\x81x........", 0, 2},
+    /* Cursor movement between a base and a mark detaches it. */
+    {"cr detaches combiner", "e\r\xcc\x81", 0, "e.........", 0, 0},
+    {"cup detaches combiner", "e\x1b[1;5H\xcc\x81", 0, "e.........", 0, 4},
+    {"backspace detaches combiner", "e\b\xcc\x81", 0, "e.........", 0, 0},
+    {"tab detaches combiner", "e\t\xcc\x81", 0, "e.........", 0, 8},
+    /* Erasing a base drops the mark it carried. */
+    {"erase drops combiner", "e\xcc\x81\x1b[1;1H\x1b[K", 0, "..........", 0, 0},
+    /* Overwriting a base with a plain char must not inherit its mark. */
+    {"overwrite drops combiner", "e\xcc\x81\x1b[1;1Hz", 0, "z.........", 0, 1},
+    /* REP repeats the whole grapheme, not just the base. */
+    {"rep repeats grapheme", "e\xcc\x81\x1b[2b", 0,
+     "e\xcc\x81" "e\xcc\x81" "e\xcc\x81" ".......", 0, 3},
     {"invalid utf8 fffd", "\xff", 0, "\xef\xbf\xbd.........", 0, 1},
     {"overlong rejected", "\xc0\xafz", 0, "\xef\xbf\xbd\xef\xbf\xbdz.......", -1, -1},
     {"osc title ignored on grid", "\x1b]2;my title\x07x", 0, "x.........", 0, 1},
@@ -102,7 +147,7 @@ TEST(table_cases) {
         const vt_case *tc = &CASES[i];
         vt *v = vt_new(ROWS, COLS, NULL, NULL);
         vt_feed(v, (const uint8_t *)tc->input, strlen(tc->input));
-        char got[COLS * 4 + 1];
+        char got[COLS * 8 + 1];
         row_text(v, (uint16_t)tc->check_row, got, sizeof got);
         t_checks++;
         if (strcmp(got, tc->expect) != 0) {
@@ -136,7 +181,7 @@ TEST(chunking_property) {
         for (size_t j = 0; j < len; j++)
             vt_feed(split, (const uint8_t *)tc->input + j, 1);
         for (uint16_t r = 0; r < ROWS; r++) {
-            char a[COLS * 4 + 1], b[COLS * 4 + 1];
+            char a[COLS * 8 + 1], b[COLS * 8 + 1];
             row_text(whole, r, a, sizeof a);
             row_text(split, r, b, sizeof b);
             t_checks++;
@@ -156,7 +201,7 @@ TEST(alt_screen_roundtrip) {
     vt_feed(v, (const uint8_t *)"primary", 7);
     vt_feed(v, (const uint8_t *)"\x1b[?1049h", 8);
     ASSERT_TRUE(vt_get_modes(v) & VT_MODE_ALTSCREEN);
-    char row[COLS * 4 + 1];
+    char row[COLS * 8 + 1];
     row_text(v, 0, row, sizeof row);
     ASSERT_TRUE(strcmp(row, "..........") == 0); /* alt starts clear */
     vt_feed(v, (const uint8_t *)"alt!", 4);
@@ -250,6 +295,10 @@ TEST(snapshot_feeds_back_identically) {
     vt *v = vt_new(ROWS, COLS, NULL, NULL);
     const char *scene =
         "\x1b[2J\x1b[1;1Hone\x1b[2;3H\x1b[1;32mtwo\x1b[0m\x1b[4;1H\xe4\xb8\xad文"
+        /* A combining mark on a narrow base and one on a wide base: the
+         * snapshot must re-emit both after their base, or the restored grid
+         * loses the mark while row_text still compares equal on the base. */
+        "\x1b[5;1He\xcc\x81" "x\xe4\xb8\xad\xcc\x82"
         "\x1b[2;4r\x1b[?2004h\x1b[3;2H";
     vt_feed(v, (const uint8_t *)scene, strlen(scene));
     char *blob = NULL;
@@ -259,7 +308,7 @@ TEST(snapshot_feeds_back_identically) {
     vt *w = vt_new(ROWS, COLS, NULL, NULL);
     vt_feed(w, (const uint8_t *)blob, n);
     for (uint16_t r = 0; r < ROWS; r++) {
-        char a[COLS * 4 + 1], b[COLS * 4 + 1];
+        char a[COLS * 8 + 1], b[COLS * 8 + 1];
         row_text(v, r, a, sizeof a);
         row_text(w, r, b, sizeof b);
         /* Empty cell (never written) and painted space are visually

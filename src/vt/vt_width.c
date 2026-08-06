@@ -1,13 +1,24 @@
 /* vt_width.c — character cell width: 0 (combining), 1, or 2 (East Asian
  * wide/fullwidth). Range tables per Unicode 15 EastAsianWidth.txt (W/F) and
  * combining categories; binary search over sorted intervals.
- * tools/mkwidth.py can regenerate finer-grained tables later. */
+ * tools/mkwidth.py can regenerate finer-grained tables later.
+ *
+ * The zero-width set is PARTITIONED into two tables rather than kept as one
+ * union, because width 0 conflates two things that must be treated
+ * differently: marks that attach to a preceding base character, and format
+ * controls (ZWJ/ZWNJ, variation selectors, BiDi overrides, U+FEFF) that
+ * attach to nothing and stay dropped. Partitioning rather than duplicating
+ * matters because these tables are hand-maintained — tools/mkwidth.py named
+ * above does not exist — so a codepoint listed in two tables would be a
+ * standing drift hazard. Every codepoint appears in exactly one table, and
+ * vt_wcwidth consults both, so the width of every codepoint is unchanged. */
 #include "vt_internal.h"
 
 typedef struct { uint32_t lo, hi; } range;
 
-/* Zero-width: combining marks, ZWJ/ZWNJ, variation selectors. */
-static const range zero_ranges[] = {
+/* Marks that attach to a base character (Unicode Mn/Mc/Me, minus the format
+ * controls split out into fmt_ranges below). */
+static const range comb_ranges[] = {
     {0x0300, 0x036F}, {0x0483, 0x0489}, {0x0591, 0x05BD}, {0x05BF, 0x05BF},
     {0x05C1, 0x05C2}, {0x05C4, 0x05C5}, {0x05C7, 0x05C7}, {0x0610, 0x061A},
     {0x064B, 0x065F}, {0x0670, 0x0670}, {0x06D6, 0x06DC}, {0x06DF, 0x06E4},
@@ -36,7 +47,7 @@ static const range zero_ranges[] = {
     {0x1071, 0x1074}, {0x1082, 0x1082}, {0x1085, 0x1086}, {0x108D, 0x108D},
     {0x109D, 0x109D}, {0x135D, 0x135F}, {0x1712, 0x1714}, {0x1732, 0x1734},
     {0x1752, 0x1753}, {0x1772, 0x1773}, {0x17B4, 0x17B5}, {0x17B7, 0x17BD},
-    {0x17C6, 0x17C6}, {0x17C9, 0x17D3}, {0x17DD, 0x17DD}, {0x180B, 0x180D},
+    {0x17C6, 0x17C6}, {0x17C9, 0x17D3}, {0x17DD, 0x17DD},
     {0x1885, 0x1886}, {0x18A9, 0x18A9}, {0x1920, 0x1922}, {0x1927, 0x1928},
     {0x1932, 0x1932}, {0x1939, 0x193B}, {0x1A17, 0x1A18}, {0x1A1B, 0x1A1B},
     {0x1A56, 0x1A56}, {0x1A58, 0x1A5E}, {0x1A60, 0x1A60}, {0x1A62, 0x1A62},
@@ -47,7 +58,7 @@ static const range zero_ranges[] = {
     {0x1BED, 0x1BED}, {0x1BEF, 0x1BF1}, {0x1C2C, 0x1C33}, {0x1C36, 0x1C37},
     {0x1CD0, 0x1CD2}, {0x1CD4, 0x1CE0}, {0x1CE2, 0x1CE8}, {0x1CED, 0x1CED},
     {0x1CF4, 0x1CF4}, {0x1CF8, 0x1CF9}, {0x1DC0, 0x1DF9}, {0x1DFB, 0x1DFF},
-    {0x200B, 0x200F}, {0x202A, 0x202E}, {0x2060, 0x2064}, {0x20D0, 0x20F0},
+    {0x20D0, 0x20F0},
     {0x2CEF, 0x2CF1}, {0x2D7F, 0x2D7F}, {0x2DE0, 0x2DFF}, {0x302A, 0x302D},
     {0x3099, 0x309A}, {0xA66F, 0xA672}, {0xA674, 0xA67D}, {0xA69E, 0xA69F},
     {0xA6F0, 0xA6F1}, {0xA802, 0xA802}, {0xA806, 0xA806}, {0xA80B, 0xA80B},
@@ -57,8 +68,8 @@ static const range zero_ranges[] = {
     {0xAA43, 0xAA43}, {0xAA4C, 0xAA4C}, {0xAA7C, 0xAA7C}, {0xAAB0, 0xAAB0},
     {0xAAB2, 0xAAB4}, {0xAAB7, 0xAAB8}, {0xAABE, 0xAABF}, {0xAAC1, 0xAAC1},
     {0xAAEC, 0xAAED}, {0xAAF6, 0xAAF6}, {0xABE5, 0xABE5}, {0xABE8, 0xABE8},
-    {0xABED, 0xABED}, {0xFB1E, 0xFB1E}, {0xFE00, 0xFE0F}, {0xFE20, 0xFE2F},
-    {0xFEFF, 0xFEFF}, {0x101FD, 0x101FD}, {0x10A01, 0x10A03}, {0x10A05, 0x10A06},
+    {0xABED, 0xABED}, {0xFB1E, 0xFB1E}, {0xFE20, 0xFE2F},
+    {0x101FD, 0x101FD}, {0x10A01, 0x10A03}, {0x10A05, 0x10A06},
     {0x10A0C, 0x10A0F}, {0x10A38, 0x10A3A}, {0x10A3F, 0x10A3F},
     {0x11001, 0x11001}, {0x11038, 0x11046}, {0x1107F, 0x11081},
     {0x110B3, 0x110B6}, {0x110B9, 0x110BA}, {0x11100, 0x11102},
@@ -80,7 +91,7 @@ static const range zero_ranges[] = {
     {0x1DA84, 0x1DA84}, {0x1DA9B, 0x1DA9F}, {0x1DAA1, 0x1DAAF},
     {0x1E000, 0x1E006}, {0x1E008, 0x1E018}, {0x1E01B, 0x1E021},
     {0x1E023, 0x1E024}, {0x1E026, 0x1E02A}, {0x1E8D0, 0x1E8D6},
-    {0x1E944, 0x1E94A}, {0xE0100, 0xE01EF},
+    {0x1E944, 0x1E94A},
 };
 
 /* Wide (W) + Fullwidth (F). */
@@ -138,6 +149,16 @@ static const range wide_ranges[] = {
     {0x20000, 0x2FFFD}, {0x30000, 0x3FFFD}, /* CJK Ext B+ */
 };
 
+/* Zero-width but NOT attachable: ZWJ/ZWNJ and other joiners, variation
+ * selectors, BiDi embedding/override controls, and U+FEFF. Consumed and
+ * dropped: a cell stores one mark that the renderer must be able to draw on
+ * a base by itself, which none of these are. */
+static const range fmt_ranges[] = {
+    {0x180B, 0x180D}, {0x200B, 0x200F}, {0x202A, 0x202E},
+    {0x2060, 0x2064}, {0xFE00, 0xFE0F}, {0xFEFF, 0xFEFF},
+    {0xE0100, 0xE01EF},
+};
+
 static bool in_ranges(const range *r, size_t n, uint32_t cp) {
     size_t lo = 0, hi = n;
     while (lo < hi) {
@@ -149,10 +170,20 @@ static bool in_ranges(const range *r, size_t n, uint32_t cp) {
     return false;
 }
 
+#define NRANGES(t) (sizeof(t) / sizeof(*(t)))
+
+/* True for a mark that attaches to a base character. Distinct from
+ * vt_wcwidth(cp) == 0, which is also true for NUL, for C0/C1 controls, and for
+ * every entry of fmt_ranges — none of which may be attached to anything. */
+bool vt_is_combining(uint32_t cp) {
+    return in_ranges(comb_ranges, NRANGES(comb_ranges), cp);
+}
+
 int vt_wcwidth(uint32_t cp) {
     if (cp == 0) return 0;
     if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0; /* never printed */
-    if (in_ranges(zero_ranges, sizeof zero_ranges / sizeof *zero_ranges, cp)) return 0;
-    if (in_ranges(wide_ranges, sizeof wide_ranges / sizeof *wide_ranges, cp)) return 2;
+    if (in_ranges(comb_ranges, NRANGES(comb_ranges), cp)) return 0;
+    if (in_ranges(fmt_ranges, NRANGES(fmt_ranges), cp)) return 0;
+    if (in_ranges(wide_ranges, NRANGES(wide_ranges), cp)) return 2;
     return 1;
 }

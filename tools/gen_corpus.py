@@ -14,6 +14,13 @@ TOKENS = [
     b'\xe4\xb8\xad', b'\xf0\x9f\x98\x80', b'\xc0\xaf', b'\xff', b'\x1b[999999@',
     b'hello', b'\r\n', b'\x1b[K', b'\x1b[L', b'\x1b[M', b'\x18', b'\x1b[;;;m',
     b'\x1b(0', b'qqq', b'\x1b(B', b'\x1bM', b'\x1b7', b'\x1b8', b'\x1b#8',
+    # Combining marks. Random bytes do hit 0xCC/0xCD, but only these produce
+    # the structured base-then-mark sequences the attach path is about: a mark
+    # on a narrow base, on a wide base, with no base at all, two in a row, and
+    # a non-BMP mark that must be dropped.
+    b'e\xcc\x81', b'\xe4\xb8\xad\xcc\x82', b'\xcc\x81',
+    b'\xcc\x81\xcc\x82', b'\xf0\x9d\x85\xa7',
+    b'\xe2\x80\x8d', b'\xef\xb8\x8f',  # ZWJ, variation selector: never attach
 ]
 
 def main():

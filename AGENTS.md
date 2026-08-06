@@ -244,6 +244,46 @@ child is reaped, so a finished session simply disappears. Use `history` — not
 | `fuzz/` | libFuzzer targets + standalone ASan replay driver |
 | `tools/` | `vtdump`, corpus generator, `check_svg.py` |
 
+### Grapheme storage
+
+A cell holds a base codepoint plus **at most one** combining mark, as a bare
+BMP codepoint in `vt_cell.comb`. Three constraints shaped that, and a change
+here has to answer all three:
+
+- **It is a value, not an index into engine-side storage.** Cells are relocated
+  by six bitwise copies that treat them as POD — both scroll helpers,
+  `vt_screen_insert_chars`, `vt_screen_delete_chars`, `vt_resize`, and the
+  `memset` in `vt_screen_reset` — plus the shallow `vt tmp = *v;` in
+  `vt_snapshot`. A value survives all seven with nothing to own and no
+  aliasing; a pointer or arena index would leak or dangle at every one.
+- **`libcommon` must not depend on `libvt`,** because the client links
+  `libcommon` alone. `serialize_line()` in `scrollback.c` receives cells
+  through `on_scrollback_line`, whose signature passes no `vt *`, so it has to
+  render a mark without asking the engine to decode anything.
+- **`uint16_t` at offset 14 lands in existing tail padding,** keeping
+  `sizeof(vt_cell)` at 16 — measured, and asserted at compile time in `vt.h`.
+  Grid memory is unchanged: a 1000×1000 grid pair is 30.5 MiB either way.
+
+`width == 0` is **not** the attach test. `vt_wcwidth` also returns 0 for NUL,
+for C0/C1 controls, and for ZWJ/ZWNJ, variation selectors, BiDi controls and
+U+FEFF — none of which may attach to anything. `vt_width.c` therefore keeps two
+disjoint tables: `comb_ranges` (262 ranges, 1378 codepoints, of which the 1005
+in the BMP can attach and the other 373 are dropped) and `fmt_ranges` (7 ranges,
+275 codepoints, dropped as before). Their union is what `zero_ranges` used to
+be — verified identical, sorted and disjoint — so
+`vt_wcwidth` returns the same width for every codepoint as it did. There is no
+generator to re-run: the comment naming `tools/mkwidth.py` is stale and the
+tables are hand-maintained, so **partition, never duplicate**.
+
+Attachment targets the cell `vt_screen_put` wrote last, tracked explicitly in
+`struct vt` as `last_row`/`last_col`/`last_valid`. The cursor cannot serve: it
+has already advanced past the base (by 2 for a wide char), and at the right
+margin it stays put with `pending_wrap` set. That state deliberately lives
+outside `vt_cursor` so DECSC/DECRC do not save and restore it, and every
+primitive that moves the cursor or relocates cells calls `forget_last()` — 16
+sites. Erring toward invalidation only drops a mark; missing one attaches a
+mark to an unrelated cell.
+
 ### Invariants — do not break these
 
 1. **`src/vt/` performs no I/O and no syscalls**, and never allocates

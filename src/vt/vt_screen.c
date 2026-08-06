@@ -7,9 +7,17 @@
 #include "vt_internal.h"
 
 static vt_cell blank_cell(const vt *v) {
-    /* Erased cells keep the current background (BCE, xterm behavior). */
+    /* Erased cells keep the current background (BCE, xterm behavior).
+     * Designated initializers zero .comb, so erasing drops any mark. */
     return (vt_cell){.cp = 0, .fg = VT_COLOR_DEFAULT, .bg = v->cur.pen.bg, .attrs = 0};
 }
+
+/* Forget where a combining mark would attach. Called by every primitive that
+ * moves the cursor or relocates cells, so a mark can only ever attach to a
+ * base printed immediately before it. Erring toward invalidation drops a mark;
+ * failing to invalidate would attach one to an unrelated cell, or to a cell
+ * that has since been scrolled or shifted elsewhere. */
+static void forget_last(vt *v) { v->last_valid = false; }
 
 vt_cell *vt_cell_at(vt *v, uint16_t row, uint16_t col) {
     if (row >= v->rows || col >= v->cols) return NULL;
@@ -30,11 +38,15 @@ static void unsplit_wide(vt *v, uint16_t row, uint16_t col) {
     if (!c) return;
     if ((c->attrs & VT_ATTR_WIDE_SPACER) && col > 0) {
         vt_cell *lead = vt_cell_at(v, row, (uint16_t)(col - 1));
-        if (lead && (lead->attrs & VT_ATTR_WIDE)) { lead->cp = 0; lead->attrs = 0; }
+        if (lead && (lead->attrs & VT_ATTR_WIDE)) {
+            lead->cp = 0; lead->attrs = 0; lead->comb = 0;
+        }
     }
     if ((c->attrs & VT_ATTR_WIDE) && col + 1 < v->cols) {
         vt_cell *sp = vt_cell_at(v, row, (uint16_t)(col + 1));
-        if (sp && (sp->attrs & VT_ATTR_WIDE_SPACER)) { sp->cp = 0; sp->attrs = 0; }
+        if (sp && (sp->attrs & VT_ATTR_WIDE_SPACER)) {
+            sp->cp = 0; sp->attrs = 0; sp->comb = 0;
+        }
     }
 }
 
@@ -42,6 +54,7 @@ static void unsplit_wide(vt *v, uint16_t row, uint16_t col) {
 
 static void scroll_region_up(vt *v, uint16_t top, uint16_t bot, int n) {
     if (n <= 0) return;
+    forget_last(v);
     int height = bot - top + 1;
     if (n > height) n = height;
     /* Lines leaving the top of the PRIMARY screen's full-height region go
@@ -58,6 +71,7 @@ static void scroll_region_up(vt *v, uint16_t top, uint16_t bot, int n) {
 
 static void scroll_region_down(vt *v, uint16_t top, uint16_t bot, int n) {
     if (n <= 0) return;
+    forget_last(v);
     int height = bot - top + 1;
     if (n > height) n = height;
     for (int r = bot; r - n >= top; r--)
@@ -82,19 +96,23 @@ void vt_screen_move_cursor(vt *v, int row, int col) {
     v->cur.row = (uint16_t)row;
     v->cur.col = (uint16_t)col;
     v->cur.pending_wrap = false;
+    forget_last(v);
 }
 
 void vt_screen_carriage_return(vt *v) {
     v->cur.col = 0;
     v->cur.pending_wrap = false;
+    forget_last(v);
 }
 
 void vt_screen_backspace(vt *v) {
+    forget_last(v);
     if (v->cur.pending_wrap) { v->cur.pending_wrap = false; return; }
     if (v->cur.col > 0) v->cur.col--;
 }
 
 void vt_screen_newline(vt *v) {
+    forget_last(v);
     v->cur.pending_wrap = false;
     if (v->cur.row == v->scroll_bot) {
         scroll_region_up(v, v->scroll_top, v->scroll_bot, 1);
@@ -104,6 +122,7 @@ void vt_screen_newline(vt *v) {
 }
 
 void vt_screen_reverse_index(vt *v) {
+    forget_last(v);
     v->cur.pending_wrap = false;
     if (v->cur.row == v->scroll_top) {
         scroll_region_down(v, v->scroll_top, v->scroll_bot, 1);
@@ -113,6 +132,7 @@ void vt_screen_reverse_index(vt *v) {
 }
 
 void vt_screen_tab(vt *v) {
+    forget_last(v);
     v->cur.pending_wrap = false;
     for (uint16_t c = v->cur.col + 1; c < v->cols; c++) {
         if (v->tabstops[c / 32] & (1u << (c % 32))) { v->cur.col = c; return; }
@@ -122,10 +142,25 @@ void vt_screen_tab(vt *v) {
 
 /* ---- printing ---- */
 
+/* Attach a combining mark to the cell vt_screen_put wrote last. Returns
+ * without effect if there is no such cell, if the mark is outside the BMP, or
+ * if that cell already carries one — each of those drops the mark, which is
+ * what v1 did with every mark. */
+static void attach_combining(vt *v, uint32_t cp) {
+    if (!v->last_valid || cp > 0xFFFF) return;
+    vt_cell *cell = vt_cell_at(v, v->last_row, v->last_col);
+    if (!cell || cell->cp == 0 || cell->comb != 0) return;
+    cell->comb = (uint16_t)cp;
+}
+
 void vt_screen_put(vt *v, uint32_t cp, int width) {
     if (width <= 0) {
-        /* Combining mark: v1 policy is to drop standalone combiners rather
-         * than track per-cell mark arrays. Documented limitation. */
+        /* A mark attaches to the preceding base; anything else zero-width
+         * (NUL, C0/C1, ZWJ/ZWNJ, variation selectors, BiDi controls, U+FEFF)
+         * still occupies no cell and is dropped. Note this must not call
+         * forget_last: a dropped format control between a base and its mark
+         * would otherwise detach the mark from a base still on screen. */
+        if (vt_is_combining(cp)) attach_combining(v, cp);
         return;
     }
 
@@ -156,6 +191,14 @@ void vt_screen_put(vt *v, uint32_t cp, int width) {
     cell->fg = v->cur.pen.fg;
     cell->bg = v->cur.pen.bg;
     cell->attrs = (uint16_t)(v->cur.pen.attrs | (width == 2 ? VT_ATTR_WIDE : 0));
+    cell->comb = 0; /* overwriting a base drops the mark it used to carry */
+
+    /* Remember the base for a mark that may follow. Recorded before the cursor
+     * advances, because after a wide char or at the right margin the cursor no
+     * longer identifies this cell. */
+    v->last_row = v->cur.row;
+    v->last_col = v->cur.col;
+    v->last_valid = true;
 
     if (width == 2) {
         unsplit_wide(v, v->cur.row, (uint16_t)(v->cur.col + 1));
@@ -165,6 +208,7 @@ void vt_screen_put(vt *v, uint32_t cp, int width) {
             sp->fg = v->cur.pen.fg;
             sp->bg = v->cur.pen.bg;
             sp->attrs = VT_ATTR_WIDE_SPACER;
+            sp->comb = 0; /* the mark lives on the lead cell, never the spacer */
         }
     }
 
@@ -180,6 +224,7 @@ void vt_screen_put(vt *v, uint32_t cp, int width) {
 /* ---- erase / insert / delete ---- */
 
 void vt_screen_erase_display(vt *v, int mode) {
+    forget_last(v);
     v->cur.pending_wrap = false;
     switch (mode) {
     case 0: /* cursor to end */
@@ -202,6 +247,7 @@ void vt_screen_erase_display(vt *v, int mode) {
 }
 
 void vt_screen_erase_line(vt *v, int mode) {
+    forget_last(v);
     v->cur.pending_wrap = false;
     switch (mode) {
     case 0: clear_row(v, v->cur.row, v->cur.col, v->cols); break;
@@ -225,6 +271,7 @@ void vt_screen_delete_lines(vt *v, int n) {
 
 void vt_screen_insert_chars(vt *v, int n) {
     if (n <= 0) return;
+    forget_last(v);
     int avail = v->cols - v->cur.col;
     if (n > avail) n = avail;
     vt_cell *row = vt_cell_at(v, v->cur.row, 0);
@@ -236,6 +283,7 @@ void vt_screen_insert_chars(vt *v, int n) {
 
 void vt_screen_delete_chars(vt *v, int n) {
     if (n <= 0) return;
+    forget_last(v);
     int avail = v->cols - v->cur.col;
     if (n > avail) n = avail;
     vt_cell *row = vt_cell_at(v, v->cur.row, 0);
@@ -247,6 +295,7 @@ void vt_screen_delete_chars(vt *v, int n) {
 
 void vt_screen_erase_chars(vt *v, int n) {
     if (n <= 0) return;
+    forget_last(v);
     int end = v->cur.col + n;
     if (end > v->cols) end = v->cols;
     clear_row(v, v->cur.row, v->cur.col, (uint16_t)end);
@@ -268,6 +317,7 @@ void vt_screen_set_scroll_region(vt *v, int top, int bot) {
 void vt_screen_switch_alt(vt *v, bool alt, bool save_cursor, bool clear) {
     bool cur_alt = (v->modes & VT_MODE_ALTSCREEN) != 0;
     if (alt == cur_alt) return;
+    forget_last(v);
     if (alt) {
         if (save_cursor) v->saved_cur[0] = v->cur;
         v->active = 1;
@@ -290,6 +340,7 @@ static void reset_tabstops(vt *v) {
 }
 
 void vt_screen_reset(vt *v) {
+    forget_last(v);
     v->modes = VT_MODE_DECAWM | VT_MODE_DECTCEM;
     v->active = 0;
     v->scroll_top = 0;
@@ -305,12 +356,14 @@ void vt_screen_reset(vt *v) {
 }
 
 void vt_screen_align_test(vt *v) { /* DECALN: fill with E */
+    forget_last(v);
     vt_pen saved = v->cur.pen;
     v->cur.pen = (vt_pen){.fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT, .attrs = 0};
     for (uint16_t r = 0; r < v->rows; r++)
         for (uint16_t c = 0; c < v->cols; c++)
             *vt_cell_at(v, r, c) = (vt_cell){.cp = 'E', .fg = VT_COLOR_DEFAULT,
-                                             .bg = VT_COLOR_DEFAULT, .attrs = 0};
+                                             .bg = VT_COLOR_DEFAULT, .attrs = 0,
+                                             .comb = 0};
     v->cur.pen = saved;
     v->scroll_top = 0;
     v->scroll_bot = (uint16_t)(v->rows - 1);
@@ -381,6 +434,7 @@ void vt_resize(vt *v, uint16_t rows, uint16_t cols) {
         if (v->saved_cur[i].col >= cols) v->saved_cur[i].col = (uint16_t)(cols - 1);
     }
     v->cur.pending_wrap = false;
+    forget_last(v);
     reset_tabstops(v);
 }
 

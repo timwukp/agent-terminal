@@ -194,8 +194,12 @@ vulnerabilities. Highlights:
   `history` recovers it; the service unit restarts the daemon). Keeping
   children alive across daemon restarts would need fd-passing supervision
   — deliberately out of scope.
-- Standalone combining marks are dropped (base+combiner grapheme storage
-  is a v2 item); CJK wide characters are fully supported.
+- **One** combining mark per cell, and only from the BMP (U+0000–U+FFFF).
+  That covers every modern living script; a cluster with two or more marks
+  keeps the first, and marks in the supplementary planes (archaic scripts,
+  musical notation) are still dropped. ZWJ sequences are not clusters here,
+  so a multi-person emoji splits into its component glyphs. CJK wide
+  characters are fully supported.
 
 ## Development
 

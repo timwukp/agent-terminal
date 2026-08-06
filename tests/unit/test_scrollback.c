@@ -181,6 +181,42 @@ TEST(sgr_survives_roundtrip) {
     ASSERT_TRUE(strstr(got.lines[0], "\x1b[0m") != NULL);        /* reset at end */
 }
 
+TEST(combining_survives_roundtrip) {
+    /* serialize_line() in scrollback.c is a SECOND, independent serializer
+     * alongside vt_render.c's render_grid(). A combining mark emitted by one
+     * and dropped by the other means scrollback silently loses marks that the
+     * live screen shows, so this must be asserted here and not only in
+     * test_vt.c. */
+    scrollback *sb = sb_open("t-comb", 100, 0);
+    vt_cell cells[8];
+    memset(cells, 0, sizeof cells);
+    /* e + U+0301 (2-byte mark), and a wide base + U+032D (2-byte mark) with
+     * its spacer, which serialize_line skips. */
+    cells[0] = (vt_cell){.cp = 'e', .fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT,
+                         .comb = 0x0301};
+    cells[1] = (vt_cell){.cp = 0x4E2D, .fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT,
+                         .attrs = VT_ATTR_WIDE, .comb = 0x032D};
+    cells[2] = (vt_cell){.cp = 0, .fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT,
+                         .attrs = VT_ATTR_WIDE_SPACER};
+    /* A 3-byte mark, to cover the other encoding branch. U+1AB0 is a
+     * combining doubled circumflex. */
+    cells[3] = (vt_cell){.cp = 'z', .fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT,
+                         .comb = 0x1AB0};
+    sb_push_line(sb, cells, 8);
+    sb_close(sb);
+
+    collect got = {0};
+    ASSERT_EQ_INT((long long)sb_read_log("t-comb", collect_cb, &got), 1);
+    /* Each mark must appear immediately after its own base, so assert on the
+     * base+mark byte pair rather than on the mark alone. */
+    ASSERT_TRUE(strstr(got.lines[0], "e\xcc\x81") != NULL);           /* U+0301 */
+    ASSERT_TRUE(strstr(got.lines[0], "\xe4\xb8\xad\xcc\xad") != NULL); /* U+032D on wide */
+    ASSERT_TRUE(strstr(got.lines[0], "z\xe1\xaa\xb0") != NULL);        /* U+1AB0, 3-byte */
+    /* The spacer contributes no bytes of its own: the wide base's mark is
+     * followed directly by the next cell's base. */
+    ASSERT_TRUE(strstr(got.lines[0], "\xcc\xad" "z") != NULL);
+}
+
 TEST(list_logs) {
     char buf[4096];
     int n = sb_list_logs(buf, sizeof buf);
@@ -195,6 +231,7 @@ int main(void) {
     RUN(rotation_caps_disk);
     RUN(fetch_from_ring);
     RUN(sgr_survives_roundtrip);
+    RUN(combining_survives_roundtrip);
     RUN(list_logs);
     TEST_MAIN_END();
 }
