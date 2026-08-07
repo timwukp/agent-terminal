@@ -29,12 +29,18 @@
 
 enum proto_type {
     MSG_HELLO          = 0x01, /* C→D: u16 ver, u16 flags */
-    MSG_HELLO_OK       = 0x02, /* D→C: u16 ver, u32 daemon_pid */
+    /* MSG_HELLO_OK's u32 generation is an additive append (a v1 client reads
+     * only the type byte and ignores the tail). It counts in-place restarts,
+     * and it exists because the pid deliberately does NOT change across one:
+     * with a re-exec handoff, the pid is the wrong thing to compare and the
+     * generation is the only observable that moves. */
+    MSG_HELLO_OK       = 0x02, /* D→C: u16 ver, u32 daemon_pid, u32 generation */
     MSG_ERR            = 0x03, /* D→C: u16 code, u16 msg_len, utf8 msg */
     MSG_LIST_SESSIONS  = 0x10, /* C→D: empty */
     MSG_SESSION_LIST   = 0x11, /* D→C: u16 count, entries */
     MSG_NEW_SESSION    = 0x12, /* C→D: u16 cols, u16 rows, u8 nlen, name, u16 argv_bytes, argv */
     MSG_KILL_SESSION   = 0x13, /* C→D: u8 nlen, name */
+    MSG_RELOAD         = 0x19, /* C→D: empty — re-exec the daemon in place */
     MSG_ATTACH         = 0x14, /* C→D: u16 cols, u16 rows, u8 pane_id(=0), u8 nlen, name */
     MSG_DETACH         = 0x15, /* C→D: empty */
     MSG_STDIN_DATA     = 0x20, /* C→D: raw bytes for the PTY */

@@ -226,7 +226,36 @@ static void feed_byte(vt *v, uint8_t b) {
     }
 }
 
+/* Record a byte as part of an in-flight sequence, for vt_snapshot to replay.
+ *
+ * Done here, around the single entry point, rather than at each transition:
+ * feed_byte has ~30 returns across 14 states and recurses (ST_MAX re-dispatch),
+ * so per-transition bookkeeping would be missed somewhere. The test is a
+ * property of the state *after* the byte, which needs no per-state knowledge:
+ * ground with an idle UTF-8 decoder means nothing is pending.
+ *
+ * C0 controls other than ESC and NUL are deliberately *not* recorded. In every
+ * non-ground state they either dispatch immediately and leave the parser state
+ * untouched (`if (b < 0x20) { vt_do_execute(...); return; }`, repeated in each
+ * state) or terminate the sequence and land in ground, which clears the buffer.
+ * So they never contribute to the state being reproduced, while replaying them
+ * would re-run a side effect the snapshot's grid already reflects — a LF inside
+ * a half-typed CSI would scroll the restored screen a second time. NUL is kept
+ * because ST_OSC_STRING collects it into the string body. */
+static void record_pending(vt *v, uint8_t b) {
+    if (v->state == ST_GROUND && v->u8_state == UTF8_ACCEPT) {
+        v->pending_len = 0;
+        v->pending_lost = false;
+        return;
+    }
+    if (b < 0x20 && b != 0x1b && b != 0x00) return;
+    if (v->pending_len < VT_PENDING_MAX) v->pending[v->pending_len++] = b;
+    else v->pending_lost = true;
+}
+
 void vt_feed(vt *v, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++) {
         feed_byte(v, data[i]);
+        record_pending(v, data[i]);
+    }
 }

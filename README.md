@@ -93,6 +93,7 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal ls` | List sessions (size, pid, attached clients). |
 | `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
 | `agent-terminal kill -s name` | Terminate a session. |
+| `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves. |
 
 A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
 must be a single path component: no `/`, no leading `.`, max 63 bytes. Interior
@@ -190,10 +191,27 @@ vulnerabilities. Highlights:
 
 - One child process per session — no panes/windows/splits (the protocol
   reserves a `pane_id` byte for a future v2).
-- A daemon crash kills child processes (scrollback survives on disk and
-  `history` recovers it; the service unit restarts the daemon). Keeping
-  children alive across daemon restarts would need fd-passing supervision
-  — deliberately out of scope.
+- A daemon **crash** still kills child processes. A daemon **restart** no
+  longer does: `agent-terminal reload` (or `SIGHUP`) re-execs the daemon in
+  place, so the pid never changes, no PTY master fd is ever closed, no child
+  sees a carrier-loss `SIGHUP`, and the daemon is still each child's parent
+  afterwards. Screens and scrollback carry across; attached clients
+  reconnect on their own. That is what upgrading the binary under a live
+  session needs, and it is tested (`tests/integration/test_restart.sh`).
+
+  Crash survival is a different problem and is **not** solved. On `SIGSEGV`
+  or `kill -9` no code of ours runs, so nothing can hold the master fds open
+  — and it is the fd closing, not the daemon exiting, that hangs up the
+  children. Fixing that means a second process that is both the fd holder
+  and the child's parent, i.e. inverting the architecture so a supervisor
+  spawns PTYs and the daemon becomes a stateless renderer. Deliberately out
+  of scope. Scrollback still survives on disk and `history` recovers it.
+
+  Note for `systemd` users: `systemctl --user restart` does **not** preserve
+  sessions — stopping the daemon closes its fds. Use `reload`. The shipped
+  unit also sets `KillMode=mixed`, without which `stop` would `SIGTERM`
+  every process in the cgroup, children included, no matter what the daemon
+  does; `setsid` does not leave a cgroup.
 - **One** combining mark per cell, and only from the BMP (U+0000–U+FFFF).
   That covers every modern living script; a cluster with two or more marks
   keeps the first, and marks in the supplementary planes (archaic scripts,

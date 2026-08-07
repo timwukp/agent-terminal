@@ -21,6 +21,7 @@
 #include "common/proto.h"
 #include "common/ring.h"
 #include "common/xutil.h"
+#include "handoff.h"
 #include "loop.h"
 #include "session.h"
 
@@ -211,9 +212,13 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
             client_disconnect(c);
             return;
         }
-        uint8_t ok[6];
+        uint8_t ok[10];
         put_u16(ok, PROTO_VERSION);
         put_u32(ok + 2, (uint32_t)getpid());
+        /* The pid is stable across an in-place restart by design, so it cannot
+         * tell a client (or a test) that a reload happened. The generation
+         * counter can. Appended, so a v1 client that reads 6 bytes is fine. */
+        put_u32(ok + 6, handoff_generation());
         c->hello_done = true;
         client_send(c, MSG_HELLO_OK, ok, sizeof ok);
         return;
@@ -223,6 +228,16 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
     case MSG_NEW_SESSION:   handle_new(c, p, len); break;
     case MSG_ATTACH:        handle_attach(c, p, len); break;
     case MSG_KILL_SESSION:  handle_kill(c, p, len); break;
+    case MSG_RELOAD:
+        /* Answered before the restart, not after: the reply must reach the
+         * client while its socket is still open, and every socket closes as the
+         * handoff begins. So this acknowledges "accepted", not "completed" —
+         * the client confirms completion by reconnecting and comparing the
+         * generation in HELLO_OK. */
+        log_msg(LOG_INFO, "reload requested by client fd %d", c->fd);
+        client_send(c, MSG_PONG, NULL, 0);
+        handoff_request();
+        break;
     case MSG_DETACH:
         if (c->attached) { session_detach(c->attached, c); c->attached = NULL; }
         break;
@@ -384,8 +399,74 @@ static void server_accept(int fd, short revents, void *ud) {
     loop_add_fd(cfd, POLLIN, client_io, c);
 }
 
-int server_init(const char *socket_path) {
+/* Is this fd in the listening state?
+ *
+ * SO_ACCEPTCONN is the direct question and is read-only, but on macOS it returns
+ * ENOPROTOOPT for AF_UNIX — measured, not assumed — so it cannot be the only
+ * check. The portable fallback is listen() itself: it succeeds on a socket that
+ * is already listening and fails EINVAL on a connected one, verified identically
+ * on macOS/arm64 and Linux/x86_64. Re-listening is idempotent here because the
+ * backlog is the same value server_init passes; it does not drop connections
+ * already queued.
+ *
+ * The fallback is not just belt-and-braces: an *accepted* client fd reports the
+ * same bound sun_path as the listener on both platforms, so without a
+ * listening-state check the path comparison below would accept a client
+ * connection as the listener. */
+static bool fd_is_listening(int fd) {
+    int acc = 0;
+    socklen_t alen = sizeof acc;
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &acc, &alen) == 0) return acc != 0;
+    if (errno != ENOPROTOOPT) return false;
+    return listen(fd, 16) == 0;
+}
+
+/* Confirm an fd carried across execv really is our listening socket. The fd
+ * number alone proves nothing — numbers are reused, so a stale state file could
+ * name the fd that is now our own stderr. Three checks, cheapest first: it is a
+ * socket, it is listening, and its bound name is the path we were asked for. */
+static bool inherited_listener_ok(int fd, const char *socket_path) {
+    if (fd <= 2) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISSOCK(st.st_mode)) return false;
+
+    if (!fd_is_listening(fd)) return false;
+
+    struct sockaddr_un sa;
+    socklen_t slen = sizeof sa;
+    memset(&sa, 0, sizeof sa);
+    if (getsockname(fd, (struct sockaddr *)&sa, &slen) != 0) return false;
+    if (sa.sun_family != AF_UNIX) return false;
+    /* sun_path is not guaranteed NUL-terminated by getsockname; bound it. */
+    char bound[sizeof sa.sun_path + 1];
+    memcpy(bound, sa.sun_path, sizeof sa.sun_path);
+    bound[sizeof sa.sun_path] = '\0';
+    return strcmp(bound, socket_path) == 0;
+}
+
+int server_init(const char *socket_path, int inherited_fd) {
     strncpy(g_socket_path, socket_path, sizeof g_socket_path - 1);
+
+    if (inherited_fd >= 0) {
+        if (!inherited_listener_ok(inherited_fd, socket_path)) {
+            log_msg(LOG_WARN, "inherited fd %d is not the listener for %s; rebinding",
+                    inherited_fd, socket_path);
+            close(inherited_fd);
+            inherited_fd = -1;
+        } else {
+            int ifl = fcntl(inherited_fd, F_GETFL);
+            if (ifl >= 0) fcntl(inherited_fd, F_SETFL, ifl | O_NONBLOCK);
+            fcntl(inherited_fd, F_SETFD, FD_CLOEXEC);
+            if (loop_add_fd(inherited_fd, POLLIN, server_accept, NULL) != 0) {
+                close(inherited_fd);
+                errno = ENOSPC;
+                return -1;
+            }
+            g_listen_fd = inherited_fd;
+            log_msg(LOG_INFO, "adopted inherited listener fd %d", inherited_fd);
+            return 0;
+        }
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -394,7 +475,13 @@ int server_init(const char *socket_path) {
     if (strlen(socket_path) >= sizeof sa.sun_path) { close(fd); errno = ENAMETOOLONG; return -1; }
     strcpy(sa.sun_path, socket_path);
 
-    /* Stale socket: only unlink if nothing answers. */
+    /* Stale socket: only unlink if nothing answers.
+     *
+     * This is a courtesy, not the mutual exclusion — it is racy (two daemons
+     * can both find nothing answering, both unlink, both bind) and the real
+     * guarantee is the flock in lockfile.c, which main.c takes before calling
+     * here. Keeping the probe means a daemon that was SIGKILLed leaves a socket
+     * its successor can clean up without operator action. */
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
         close(fd);
         errno = EADDRINUSE;
@@ -410,9 +497,26 @@ int server_init(const char *socket_path) {
     int fl = fcntl(fd, F_GETFL);
     if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (loop_add_fd(fd, POLLIN, server_accept, NULL) != 0) {
+        close(fd);
+        unlink(socket_path);
+        errno = ENOSPC;
+        return -1;
+    }
     g_listen_fd = fd;
-    loop_add_fd(fd, POLLIN, server_accept, NULL);
     return 0;
+}
+
+int server_prepare_handoff(void) {
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].in_use) client_disconnect(&g_clients[i]);
+    /* The listener stays bound and stays in the event loop. loop state does not
+     * survive execv, but leaving the fd registered here is harmless and means a
+     * failed handoff needs no re-registration to keep serving. The socket path
+     * is not unlinked: the next image adopts this same fd, so unlinking would
+     * remove the name clients reconnect to while the socket kept working only
+     * for connections already made. */
+    return g_listen_fd;
 }
 
 void server_shutdown(void) {
