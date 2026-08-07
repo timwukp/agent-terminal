@@ -263,6 +263,70 @@ TEST(scrollback_emitted) {
     (void)sb_lines;
 }
 
+static int g_sb_calls;
+static void sb_count_cb(void *ud, const vt_cell *cells, uint16_t n) {
+    (void)ud; (void)cells; (void)n;
+    g_sb_calls++;
+}
+
+/* Replaying a snapshot must be inert: it may not provoke a device response and
+ * may not push scrollback.
+ *
+ * Both matter for the restart handoff. A response would be an answer to a query
+ * the app made *before* the restart and already received, so the duplicate
+ * arrives as unsolicited keyboard input — a literal `[12;40R` typed into a shell
+ * prompt. A scrollback push would duplicate history that the pre-restart engine
+ * already stored and `history`/copy-mode both read.
+ *
+ * The daemon does guard both callbacks during import (handoff_importing() in
+ * session.c), but that guard is defense in depth and cannot be observed by an
+ * integration test: with the guard removed, a full restart still shows zero
+ * invocations of either callback and identical scrollback counts. This test pins
+ * the reason why — the property lives in vt_snapshot, and it is the property
+ * that would silently regress. A snapshot that started emitting a query, or one
+ * whose row painting scrolled the grid instead of addressing rows absolutely,
+ * would break the handoff and nothing else in the suite would notice.
+ *
+ * The scene deliberately includes a query and enough rows to overflow the grid
+ * so that both mechanisms are live in the source engine. */
+TEST(snapshot_replay_is_inert) {
+    vt_callbacks cb = {.on_response = resp_cb, .on_scrollback_line = sb_count_cb};
+    vt *v = vt_new(4, 10, &cb, NULL);
+
+    g_resp_len = 0;
+    g_sb_calls = 0;
+    /* strlen, not a hand-counted literal: a count one byte short silently ate
+     * the `n` that completes the CPR query, so the precondition below failed for
+     * a reason that had nothing to do with the property under test. */
+    const char *scene = "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\x1b[6n";
+    vt_feed(v, (const uint8_t *)scene, strlen(scene));
+    /* Precondition: the scene really did exercise both callbacks, or the
+     * assertions below would hold for a snapshot of an empty screen. */
+    ASSERT_TRUE(g_resp_len > 0);
+    ASSERT_TRUE(g_sb_calls > 0);
+
+    char *blob = NULL;
+    size_t n = vt_snapshot(v, &blob);
+    ASSERT_TRUE(n > 0);
+
+    vt *w = vt_new(4, 10, &cb, NULL);
+    g_resp_len = 0;
+    g_sb_calls = 0;
+    vt_feed(w, (const uint8_t *)blob, n);
+    ASSERT_EQ_INT((long long)g_resp_len, 0);
+    ASSERT_EQ_INT(g_sb_calls, 0);
+
+    /* Feeding the same blob twice must also be inert: a failed handoff that
+     * retried would otherwise duplicate history. */
+    vt_feed(w, (const uint8_t *)blob, n);
+    ASSERT_EQ_INT((long long)g_resp_len, 0);
+    ASSERT_EQ_INT(g_sb_calls, 0);
+
+    free(blob);
+    vt_free(v);
+    vt_free(w);
+}
+
 TEST(resize_preserves_content) {
     vt *v = vt_new(ROWS, COLS, NULL, NULL);
     vt_feed(v, (const uint8_t *)"keepme", 6);
@@ -289,10 +353,73 @@ TEST(snapshot_contains_content_and_modes) {
     vt_free(v);
 }
 
+/* Compare two engines cell-by-cell and mode-by-mode after a snapshot
+ * round-trip. Shared by the scene cases below.
+ *
+ * Row text alone is far too weak an oracle: it renders codepoints and marks but
+ * not colours, attributes, tabstops, charset selection or the saved-cursor
+ * slot, so a snapshot that dropped every one of those still compared equal.
+ * This walks the public cell fields instead, and probes the state that has no
+ * getter by feeding a follow-up sequence into both engines and comparing the
+ * observable effect. */
+static void expect_round_trip(const char *scene, size_t scene_len, const char *probe) {
+    vt *v = vt_new(ROWS, COLS, NULL, NULL);
+    vt_feed(v, (const uint8_t *)scene, scene_len);
+    char *blob = NULL;
+    size_t n = vt_snapshot(v, &blob);
+    ASSERT_TRUE(n > 0);
+
+    vt *w = vt_new(ROWS, COLS, NULL, NULL);
+    vt_feed(w, (const uint8_t *)blob, n);
+
+    /* A follow-up sequence exercises state no getter exposes: a TAB lands on a
+     * restored tabstop, a printed character carries the restored pen and
+     * charset, ESC 8 loads the restored DECSC slot. Fed to both engines, any
+     * divergence shows up in the cell comparison below. */
+    if (probe) {
+        vt_feed(v, (const uint8_t *)probe, strlen(probe));
+        vt_feed(w, (const uint8_t *)probe, strlen(probe));
+    }
+
+    for (uint16_t r = 0; r < ROWS; r++) {
+        for (uint16_t c = 0; c < COLS; c++) {
+            const vt_cell *a = &vt_line(v, r)[c];
+            const vt_cell *b = &vt_line(w, r)[c];
+            /* An untouched cell holds cp 0; the snapshot paints it as a space.
+             * Visually identical, so normalize rather than demand equality. */
+            uint32_t acp = a->cp ? a->cp : ' ', bcp = b->cp ? b->cp : ' ';
+            t_checks++;
+            if (acp != bcp || a->fg != b->fg || a->bg != b->bg ||
+                a->attrs != b->attrs || a->comb != b->comb) {
+                t_failures++;
+                fprintf(stderr,
+                        "FAIL round-trip cell %u,%u: cp %u/%u fg %u/%u bg %u/%u "
+                        "attrs %u/%u comb %u/%u\n",
+                        r, c, acp, bcp, a->fg, b->fg, a->bg, b->bg, a->attrs,
+                        b->attrs, a->comb, b->comb);
+            }
+        }
+    }
+
+    uint16_t r1, c1, r2, c2;
+    bool vis1, vis2;
+    vt_get_cursor(v, &r1, &c1, &vis1);
+    vt_get_cursor(w, &r2, &c2, &vis2);
+    ASSERT_EQ_INT(r1, r2);
+    ASSERT_EQ_INT(c1, c2);
+    ASSERT_EQ_INT(vis1, vis2);
+    /* Every tracked mode bit, not just one: re-arming DECAWM but losing
+     * bracketed paste or mouse reporting is silent breakage on reattach. */
+    ASSERT_EQ_INT((long long)vt_get_modes(v), (long long)vt_get_modes(w));
+
+    free(blob);
+    vt_free(v);
+    vt_free(w);
+}
+
 TEST(snapshot_feeds_back_identically) {
     /* Feed a busy screen, snapshot it, feed the snapshot into a fresh vt:
      * grids must match. This is the reattach correctness property. */
-    vt *v = vt_new(ROWS, COLS, NULL, NULL);
     const char *scene =
         "\x1b[2J\x1b[1;1Hone\x1b[2;3H\x1b[1;32mtwo\x1b[0m\x1b[4;1H\xe4\xb8\xad文"
         /* A combining mark on a narrow base and one on a wide base: the
@@ -300,37 +427,117 @@ TEST(snapshot_feeds_back_identically) {
          * loses the mark while row_text still compares equal on the base. */
         "\x1b[5;1He\xcc\x81" "x\xe4\xb8\xad\xcc\x82"
         "\x1b[2;4r\x1b[?2004h\x1b[3;2H";
-    vt_feed(v, (const uint8_t *)scene, strlen(scene));
+    expect_round_trip(scene, strlen(scene), NULL);
+}
+
+TEST(snapshot_restores_pen) {
+    /* The pen the app left set must apply to the NEXT character it prints.
+     * Without it the character arrives in default colours — and every existing
+     * grid assertion still passes, because the cells already on screen carry
+     * their own colours. */
+    const char *scene = "\x1b[1;4;38;5;196;48;2;10;20;30mred";
+    expect_round_trip(scene, strlen(scene), "Z");
+}
+
+TEST(snapshot_restores_tabstops) {
+    /* TBC(3) clears all, then HTS plants stops at columns 3 and 6 (1-based).
+     * The probe TABs twice from home, so a restored engine with default
+     * every-8 stops lands in a different column. */
+    const char *scene = "\x1b[3g\x1b[1;3H\x1bH\x1b[1;6H\x1bH\x1b[1;1H";
+    expect_round_trip(scene, strlen(scene), "\tA\tB");
+}
+
+TEST(snapshot_restores_charset) {
+    /* G1 designated as DEC graphics and selected with SO. The probe prints
+     * 'q', which must render as a horizontal line, not the letter q. */
+    const char *scene = "\x1b)0\x0e";
+    expect_round_trip(scene, strlen(scene), "qqq");
+}
+
+TEST(snapshot_restores_saved_cursor) {
+    /* DECSC at 3,5 with a distinctive pen, then the cursor moves away. The
+     * probe DECRCs: a restored engine with an empty save slot jumps to 1,1 and
+     * prints in default colours instead. */
+    const char *scene = "\x1b[3;5H\x1b[33m\x1b\x37\x1b[0m\x1b[6;1H";
+    expect_round_trip(scene, strlen(scene), "\x1b\x38QQ");
+}
+
+TEST(snapshot_restores_pending_wrap) {
+    /* Cursor parked on the last column with a deferred wrap. The probe prints
+     * one character, which must wrap to the next row. A restored engine
+     * without pending_wrap overwrites the last column instead — one character
+     * in the wrong place, and the row below stays blank. */
+    const char *scene = "0123456789";
+    expect_round_trip(scene, strlen(scene), "W");
+}
+
+TEST(snapshot_mid_sequence_completes) {
+    /* Snapshot taken with a CSI half-parsed. The remaining bytes arrive from
+     * the child after the restart, so the restored parser must be mid-CSI for
+     * the sequence to complete. Without the pending-byte replay the receiver is
+     * in ground: it would print "2;3Hmid" as literal text across row 1. */
+    const char *scene = "abc\x1b[";
+    expect_round_trip(scene, strlen(scene), "2;3Hmid");
+}
+
+TEST(snapshot_mid_utf8_completes) {
+    /* Same property one layer down: two of the three bytes of U+4E2D have
+     * arrived. The restored UTF-8 DFA must be mid-character, or the trailing
+     * byte decodes as U+FFFD and the wide char never appears. */
+    const char *scene = "ab\xe4\xb8";
+    expect_round_trip(scene, strlen(scene), "\xad");
+}
+
+TEST(snapshot_pending_bytes_bounded) {
+    /* A sequence longer than the pending buffer must not be replayed at all:
+     * a truncated prefix can decode as a different sequence. Feed an absurd
+     * parameter run, snapshot, and assert the blob does not end mid-CSI by
+     * checking the restored engine prints the follow-up as ordinary text. */
+    vt *v = vt_new(ROWS, COLS, NULL, NULL);
+    vt_feed(v, (const uint8_t *)"\x1b[", 2);
+    for (int i = 0; i < 6000; i++) vt_feed(v, (const uint8_t *)"1;", 2);
     char *blob = NULL;
     size_t n = vt_snapshot(v, &blob);
     ASSERT_TRUE(n > 0);
-
+    /* The overflowed tail is dropped, so the blob carries no unterminated CSI
+     * introducer of its own making. */
+    ASSERT_TRUE(memmem(blob, n, "1;1;1;", 6) == NULL);
     vt *w = vt_new(ROWS, COLS, NULL, NULL);
     vt_feed(w, (const uint8_t *)blob, n);
-    for (uint16_t r = 0; r < ROWS; r++) {
-        char a[COLS * 8 + 1], b[COLS * 8 + 1];
-        row_text(v, r, a, sizeof a);
-        row_text(w, r, b, sizeof b);
-        /* Empty cell (never written) and painted space are visually
-         * identical; the snapshot paints spaces. Normalize for compare. */
-        for (char *p = a; *p; p++) if (*p == ' ') *p = '.';
-        for (char *p = b; *p; p++) if (*p == ' ') *p = '.';
-        t_checks++;
-        if (strcmp(a, b) != 0) {
-            t_failures++;
-            fprintf(stderr, "FAIL snapshot row %u: '%s' != '%s'\n", r, a, b);
-        }
-    }
-    uint16_t r1, c1, r2, c2;
-    vt_get_cursor(v, &r1, &c1, NULL);
-    vt_get_cursor(w, &r2, &c2, NULL);
-    ASSERT_EQ_INT(r1, r2);
-    ASSERT_EQ_INT(c1, c2);
-    ASSERT_EQ_INT((long long)(vt_get_modes(v) & VT_MODE_PASTE),
-                  (long long)(vt_get_modes(w) & VT_MODE_PASTE));
+    vt_feed(w, (const uint8_t *)"ok", 2);
+    char row[COLS * 8 + 1];
+    row_text(w, 0, row, sizeof row);
+    for (char *p = row; *p; p++) if (*p == ' ') *p = '.';
+    ASSERT_TRUE(strncmp(row, "ok", 2) == 0);
     free(blob);
     vt_free(v);
     vt_free(w);
+}
+
+TEST(snapshot_replays_partial_osc) {
+    /* An unterminated OSC must be replayed, so the restored parser is still
+     * inside the string and swallows the rest of the body. The probe must NOT
+     * terminate the OSC: a terminator converges both engines back to ground and
+     * the assertion holds either way. With the replay dropped, the restored
+     * engine sits in ground and prints the tail as visible text — the measured
+     * failure is `hiMORE` on row 0 where the original shows `hi`. */
+    const char *scene = "hi\x1b]0;never ends";
+    expect_round_trip(scene, strlen(scene), "MORE");
+}
+
+TEST(snapshot_omits_c0_from_replay) {
+    /* A C0 control arriving mid-sequence dispatches immediately and leaves the
+     * parser state untouched, so it is not part of the state being restored —
+     * but its effect is already baked into the snapshotted grid. Replaying it
+     * would re-run that effect: the LF inside this half-typed CSI moves the
+     * cursor down a second time (measured: restored cursor row 3 instead of 2).
+     *
+     * The probe must complete the CSI *relatively* — `m` is SGR, which consumes
+     * the parameters without touching the cursor — and then print. An absolute
+     * CUP would overwrite the drifted cursor and hide the divergence entirely,
+     * which is how the first version of this test passed against the mutation. */
+    const char *scene = "top\r\nsecond\x1b[1;\n";
+    expect_round_trip(scene, strlen(scene), "31mZ");
 }
 
 TEST(hostile_input_no_crash) {
@@ -358,9 +565,20 @@ int main(void) {
     RUN(alt_screen_roundtrip);
     RUN(query_responses);
     RUN(scrollback_emitted);
+    RUN(snapshot_replay_is_inert);
     RUN(resize_preserves_content);
     RUN(snapshot_contains_content_and_modes);
     RUN(snapshot_feeds_back_identically);
+    RUN(snapshot_restores_pen);
+    RUN(snapshot_restores_tabstops);
+    RUN(snapshot_restores_charset);
+    RUN(snapshot_restores_saved_cursor);
+    RUN(snapshot_restores_pending_wrap);
+    RUN(snapshot_mid_sequence_completes);
+    RUN(snapshot_mid_utf8_completes);
+    RUN(snapshot_pending_bytes_bounded);
+    RUN(snapshot_replays_partial_osc);
+    RUN(snapshot_omits_c0_from_replay);
     RUN(hostile_input_no_crash);
     TEST_MAIN_END();
 }

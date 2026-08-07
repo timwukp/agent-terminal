@@ -10,7 +10,15 @@ struct client;
 void client_send(struct client *c, uint8_t type, const void *payload, uint32_t len);
 void client_disconnect(struct client *c); /* slow-consumer / protocol errors */
 
-int server_init(const char *socket_path);
+/* Bind and listen. If inherited_fd >= 0 it is an already-bound listener passed
+ * across the daemon's own re-exec: adopt it instead of rebinding, so the socket
+ * name is never unlinked and a client connecting during the handoff sees a
+ * refused connection at worst, never a socket owned by nobody. */
+int server_init(const char *socket_path, int inherited_fd);
 void server_shutdown(void);
+
+/* Disconnect every client and hand back the listen fd for the next image to
+ * inherit. The socket path is deliberately NOT unlinked. */
+int server_prepare_handoff(void);
 
 #endif

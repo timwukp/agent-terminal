@@ -46,6 +46,11 @@ static int try_connect(const char *path) {
     return fd;
 }
 
+static uint32_t g_daemon_gen, g_daemon_pid;
+
+uint32_t daemon_generation(void) { return g_daemon_gen; }
+uint32_t daemon_pid(void) { return g_daemon_pid; }
+
 static int hello(int fd) {
     ring out;
     ring_init(&out, 64, 0);
@@ -82,7 +87,13 @@ static int hello(int fd) {
         }
         return -1;
     }
-    return hdr[4] == MSG_HELLO_OK ? 0 : -1;
+    if (hdr[4] != MSG_HELLO_OK) return -1;
+    /* Both fields are optional tail: a daemon older than this client sends 6
+     * bytes, and the protocol's additive rule means a short payload is not an
+     * error. */
+    if (plen >= 6) g_daemon_pid = get_u32(payload + 2);
+    g_daemon_gen = plen >= 10 ? get_u32(payload + 6) : 0;
+    return 0;
 }
 
 int daemon_connect(int auto_start) {

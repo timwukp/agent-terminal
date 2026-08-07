@@ -18,6 +18,7 @@ static void usage(void) {
             "  agent-terminal ls                                  list sessions\n"
             "  agent-terminal history -s name                     dump scrollback (works for dead sessions)\n"
             "  agent-terminal kill    -s name                     kill session\n"
+            "  agent-terminal reload                              restart the daemon, keep sessions\n"
             "\ndetach without killing: Ctrl-\\ then Ctrl-d\n");
     exit(2);
 }
@@ -157,6 +158,59 @@ static int cmd_kill(const char *name) {
     return 0;
 }
 
+/* Ask the daemon to re-exec itself in place, then prove it worked.
+ *
+ * "Prove" is the whole difficulty. The daemon's pid does not change — that is
+ * the mechanism, not a bug — so the usual evidence is unavailable, and the reply
+ * to MSG_RELOAD necessarily arrives *before* the restart because every socket
+ * closes as it begins. So: record the generation counter, send the request, then
+ * reconnect until HELLO reports a higher one. A daemon that failed to re-exec
+ * keeps serving with the old generation and this reports the failure rather than
+ * a cheerful nothing. */
+static int cmd_reload(void) {
+    int fd = daemon_connect(0);
+    if (fd < 0) return 1;
+    uint32_t before_gen = daemon_generation();
+    uint32_t before_pid = daemon_pid();
+
+    uint8_t frame[PROTO_HDR_SIZE] = {0, 0, 0, 0, MSG_RELOAD};
+    if (write(fd, frame, sizeof frame) != (ssize_t)sizeof frame) {
+        fprintf(stderr, "agent-terminal: cannot send reload\n");
+        close(fd);
+        return 1;
+    }
+    /* Read until the connection drops. The ack may or may not arrive before the
+     * daemon closes us; either way EOF is the signal that the handoff started. */
+    uint8_t drain[64];
+    while (read(fd, drain, sizeof drain) > 0) { /* discard */ }
+    close(fd);
+
+    /* Re-exec plus replaying every session's screen is milliseconds, but a
+     * loaded machine with many sessions can take longer, so poll for 5 s. */
+    for (int i = 0; i < 50; i++) {
+        usleep(100 * 1000);
+        int nfd = daemon_connect(0);
+        if (nfd < 0) continue;
+        uint32_t gen = daemon_generation();
+        uint32_t pid = daemon_pid();
+        close(nfd);
+        if (gen > before_gen) {
+            if (pid != before_pid)
+                /* Not the failure mode this command guards against, but worth
+                 * saying: a different pid means something restarted the daemon
+                 * from outside, so children were not preserved. */
+                printf("daemon reloaded, but pid changed %u → %u: sessions were "
+                       "not preserved\n", before_pid, pid);
+            else
+                printf("daemon reloaded in place (pid %u, generation %u)\n", pid, gen);
+            return 0;
+        }
+    }
+    fprintf(stderr, "agent-terminal: daemon did not report a reload "
+                    "(still generation %u); check its log\n", before_gen);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     /* Before anything that can allocate a descriptor: attach_run() creates a
      * SIGWINCH self-pipe, and pipe() takes the lowest free fds, so a missing
@@ -187,6 +241,7 @@ int main(int argc, char **argv) {
         die("invalid session name '%s': no '/', no leading '.'", name);
 
     if (strcmp(verb, "ls") == 0) return cmd_ls();
+    if (strcmp(verb, "reload") == 0) return cmd_reload();
     if (strcmp(verb, "history") == 0) {
         if (!name) usage();
         return cmd_history(name);

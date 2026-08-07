@@ -6,11 +6,27 @@
 
   Install:
     cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
+
+  Upgrade the binary without killing your sessions:
+    launchctl kill SIGHUP gui/$(id -u)/dev.agentterminal.daemon
+  or equivalently, and preferred because it does not need the label:
+    agent-terminal reload
+
+  `reload` re-execs the daemon in place, so the pid never changes and no PTY
+  master fd is ever closed — no child sees a SIGHUP. Measured against launchd
+  itself, not assumed: after `launchctl kill SIGHUP` the job's reported PID is
+  unchanged, LastExitStatus stays 0, and launchd keeps supervising the same
+  process. `launchctl kickstart -k` does NOT do this — it SIGKILLs the job and
+  starts a new one, which closes every master fd and hangs up every child.
 
   Notes:
-  - Runs in the foreground (-f); launchd owns the lifecycle and restarts
-    the daemon if it ever dies (KeepAlive), so `new`/`attach` always work.
+  - Runs in the foreground (-f); launchd owns the lifecycle.
+  - Unlike systemd, launchd needs no KillMode equivalent. Measured: on
+    `launchctl bootout`, only the main process is signalled — a setsid
+    grandchild keeps running and reparents to pid 1. So PTY children survive
+    an unload here, whereas systemd's default KillMode=control-group would
+    kill them (see contrib/systemd/agent-terminald.service).
   - For SSH sessions to inherit your agent, launchd must know
     SSH_AUTH_SOCK. On macOS the system launchd sets it for user agents by
     default; if you use a custom agent path, add it to EnvironmentVariables.
@@ -28,10 +44,30 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+
+    <!-- Matches systemd's Restart=on-failure. A bare `KeepAlive true`
+         respawns even after a clean exit, and SIGTERM *is* a clean exit here
+         (main.c calls loop_quit and returns 0), so a deliberate `kill` of the
+         daemon came straight back — and the two shipped units disagreed about
+         what stopping the daemon means.
+
+         Measured rather than read off the manual: with SuccessfulExit=false,
+         a job exiting 3 was started 3 times in 26 s — launchd throttles
+         respawns to roughly 10 s — while a job exiting 0 was started exactly
+         once and left alone. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
     <key>ProcessType</key>
     <string>Background</string>
+
+    <!-- The daemon logs to stderr. Not a private PrivateTmp as on systemd:
+         this really is the shared /tmp, so the path is predictable and
+         world-readable by default. Nothing secret is logged, but session
+         names appear here. -->
     <key>StandardErrorPath</key>
     <string>/tmp/agent-terminald.log</string>
 </dict>

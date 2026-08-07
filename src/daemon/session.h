@@ -2,7 +2,9 @@
 #define AT_SESSION_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "pty.h"
 #include "common/scrollback.h"
@@ -26,6 +28,13 @@ typedef struct session {
 } session;
 
 session *session_new(const char *name, char *const argv[], uint16_t cols, uint16_t rows);
+
+/* Rebuild a session around a PTY master and child inherited across the daemon's
+ * own re-exec, replaying `blob` (a vt_snapshot) to restore the screen. Does not
+ * spawn anything. Returns NULL with errno set. */
+session *session_import(const char *name, int master_fd, pid_t pid, uint16_t cols,
+                        uint16_t rows, const uint8_t *blob, size_t blob_len);
+
 session *session_find(const char *name);
 void session_kill(session *s);            /* SIGHUP child, free slot */
 void session_reap_children(void);         /* SIGCHLD bottom half */
