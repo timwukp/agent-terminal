@@ -6,10 +6,12 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "common/path.h"
@@ -41,6 +43,41 @@ static void sigpipe_readable(int fd, short revents, void *ud) {
          * dispatch would return into state the exec never comes back from. */
         if (sigs[i] == SIGHUP) handoff_request();
     }
+}
+
+/* Raise RLIMIT_NOFILE's soft limit to the hard limit. The soft limit is 256
+ * under launchd (`launchctl limit maxfiles`: 256 soft / unlimited hard) while
+ * an interactive shell here shows ~1M — so a daemon that tested fine from a
+ * terminal cannot even posix_openpt its 65th PTY once launchd starts it, and
+ * the failure surfaces as ERR_INTERNAL on session 65 with nothing in the unit
+ * to explain it. Best-effort: on failure the old limit stands and the count
+ * below says so. */
+static void raise_nofile_limit(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        log_msg(LOG_WARN, "getrlimit(RLIMIT_NOFILE): %s", strerror(errno));
+        return;
+    }
+    rlim_t want = rl.rlim_max;
+#ifdef __APPLE__
+    /* macOS setrlimit rejects RLIM_INFINITY for NOFILE (EINVAL); the kernel
+     * ceiling is OPEN_MAX. Ask for the smaller of the two. */
+    if (want == RLIM_INFINITY || want > OPEN_MAX) want = OPEN_MAX;
+#endif
+    if (rl.rlim_cur >= want) {
+        log_msg(LOG_INFO, "RLIMIT_NOFILE soft limit already %llu",
+                (unsigned long long)rl.rlim_cur);
+        return;
+    }
+    rlim_t old = rl.rlim_cur;
+    rl.rlim_cur = want;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        log_msg(LOG_WARN, "setrlimit(RLIMIT_NOFILE %llu -> %llu): %s",
+                (unsigned long long)old, (unsigned long long)want, strerror(errno));
+        return;
+    }
+    log_msg(LOG_INFO, "RLIMIT_NOFILE soft limit raised %llu -> %llu",
+            (unsigned long long)old, (unsigned long long)want);
 }
 
 /* Every disposition below is reset to SIG_DFL by execve — the signal *mask*
@@ -101,6 +138,7 @@ int main(int argc, char **argv) {
     if (at_socket_path(sock, sizeof sock) != 0)
         die("cannot resolve runtime dir: %s", strerror(errno));
 
+    raise_nofile_limit();
     setup_signals();
     handoff_init(rundir, argv[0], verbose);
 

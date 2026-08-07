@@ -71,6 +71,8 @@ void client_send(struct client *c, uint8_t type, const void *payload, uint32_t l
     client_flush(c);
 }
 
+bool client_alive(const struct client *c) { return c->in_use; }
+
 void client_disconnect(struct client *c) {
     if (!c->in_use) return;
     if (c->attached) session_detach(c->attached, c);
@@ -396,7 +398,18 @@ static void server_accept(int fd, short revents, void *ud) {
     c->attached = NULL;
     ring_init(&c->in, 4096, 2 * PROTO_MAX_PAYLOAD);
     ring_init(&c->out, 4096, CLIENT_OUT_MAX);
-    loop_add_fd(cfd, POLLIN, client_io, c);
+    if (loop_add_fd(cfd, POLLIN, client_io, c) != 0) {
+        /* Out of poll slots: nothing would ever read this fd, so the client
+         * would hang forever on a connection the daemon has silently shelved.
+         * Closing makes it retry or fail visibly instead. client_disconnect
+         * is wrong here — it calls loop_del_fd on an fd that was never added,
+         * and there is no session to detach from yet. */
+        log_msg(LOG_ERR, "no event-loop slot for client fd %d, closing", cfd);
+        close(cfd);
+        ring_free(&c->in);
+        ring_free(&c->out);
+        c->in_use = false;
+    }
 }
 
 /* Is this fd in the listening state?

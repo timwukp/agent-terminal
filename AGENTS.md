@@ -236,6 +236,16 @@ running** and for dead sessions. Lines become durable on the 1 s flush tick
 child is reaped, so a finished session simply disappears. Use `history` — not
 `ls` — to recover it.
 
+A repaint larger than the snapshot ceiling (`SNAPSHOT_BODY_MAX`, 768 KB) is
+split: `MSG_SNAPSHOT` carries the first chunk and the rest follows as
+`MSG_OUTPUT` frames on the same socket. The client concatenates both message
+types to the same fd, so the split is invisible; do not add client logic that
+assumes one attach produces exactly one frame. Before this, a screen whose
+serialization crossed `PROTO_MAX_PAYLOAD` (1 MiB — reachable with truecolor
+SGR changing per cell) made `client_send` disconnect the very client it was
+repainting, which the reconnect loop turned into an attach loop
+(`tests/integration/test_snapshot_large.sh`).
+
 ## 5. Working on the code
 
 ### Layout

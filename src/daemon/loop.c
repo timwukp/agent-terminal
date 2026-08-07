@@ -7,7 +7,12 @@
 
 #include "common/xutil.h"
 
-#define LOOP_MAX_FDS 256
+/* Sized for panes: 64 sessions × 6 panes + 32 clients + listener + signal
+ * pipe = 418 fds, where the old 256 was silently too small — loop_add_fd
+ * returns -1 past the cap and three call sites used to ignore it, leaving a
+ * child whose output nobody would ever read. 1024 static pollfd+slot pairs
+ * cost 20 KB, so round up rather than size exactly. */
+#define LOOP_MAX_FDS 1024
 
 typedef struct {
     loop_cb cb;
