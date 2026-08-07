@@ -264,16 +264,48 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
 
 /* ---- socket plumbing ---- */
 
+/* POLLHUP must NOT short-circuit the read: a hangup means the peer will send
+ * nothing more, not that what it already sent is void. The kernel reports
+ * POLLIN|POLLHUP together when bytes are still queued on a closed socket, so
+ * returning early here threw away complete frames that had already arrived.
+ *
+ * That was a real, reproducible data loss, not a theoretical one. A client that
+ * writes MSG_NEW_SESSION and closes immediately — which is exactly what
+ * `agent-terminal new` does when stdin is already at EOF, because attach.c
+ * treats an instant stdin EOF as a detach — had its request dropped. Measured on
+ * two runs putting identical bytes on the wire and differing only in a 250 ms
+ * sleep before close(): 20 of 20 sessions lost on Linux and 9 of 20 on macOS
+ * when closing at once, 0 of 20 on both when lingering. It surfaced as a 3-in-8
+ * flake in the integration suite, where a *later* test finds a session missing
+ * that `new` had reported as created.
+ *
+ * So: drain, dispatch, and only then honor the hangup. POLLERR/POLLNVAL still
+ * disconnect at once — those say the fd itself is unusable, not just finished.
+ *
+ * Two details here are deliberately NOT load-bearing for that fix, and were
+ * confirmed so by mutation (test_close_race.sh still passes with either one
+ * reverted), so do not read them as the mechanism:
+ *  - Accepting a POLLHUP-only wakeup. A socket at EOF sets POLLIN as well, so
+ *    this branch does not fire in practice; it is there so a platform that
+ *    reports the hangup alone cannot spin on an fd nobody reads.
+ *  - The exact position of the eof disconnect below. What the measurement
+ *    turns on is only that the read and dispatch happen at all; the read loop
+ *    breaks on a short read before it ever sees 0, so on the very poll round
+ *    that carries the frame, eof is usually still false and the disconnect
+ *    lands on a later round. Deferring it cannot leak the fd either way,
+ *    because POLLHUP is level-triggered and poll() keeps re-reporting it. */
 static void client_io(int fd, short revents, void *ud) {
     client *c = ud;
-    if (revents & (POLLERR | POLLHUP | POLLNVAL)) { client_disconnect(c); return; }
+    if (revents & (POLLERR | POLLNVAL)) { client_disconnect(c); return; }
     if (revents & POLLOUT) client_flush(c);
-    if (!(revents & POLLIN) || !c->in_use) return;
+    if (!c->in_use) return;
+    if (!(revents & (POLLIN | POLLHUP))) return;
 
+    bool eof = false;
     uint8_t buf[16384];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof buf);
-        if (n == 0) { client_disconnect(c); return; }
+        if (n == 0) { eof = true; break; }
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -297,6 +329,18 @@ static void client_io(int fd, short revents, void *ud) {
         dispatch(c, type, c->scratch, len);
         if (!c->in_use) return; /* dispatch may disconnect */
     }
+
+    /* A half-open peer that shut down only its write side gets the same
+     * treatment as a full close: this protocol has no request whose reply the
+     * daemon may keep streaming after the client stops talking, and a session
+     * created here keeps running without any client attached.
+     *
+     * This IS load-bearing, just for reaping rather than for the fix above:
+     * POLLHUP no longer disconnects on its own, so without this a peer that
+     * shuts down its write side and lingers holds a client slot forever. At
+     * MAX_CLIENTS such peers the daemon stops accepting entirely — which is
+     * what part 4 of test_close_race.sh measures. */
+    if (eof) client_disconnect(c);
 }
 
 static bool peer_uid_ok(int fd) {

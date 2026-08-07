@@ -51,6 +51,11 @@ static void setup_signals(void) {
 }
 
 int main(int argc, char **argv) {
+    /* Same hazard as the client, and worse here: setup_signals() creates the
+     * signal self-pipe, and a daemon started with fd 0 closed would make it
+     * fd 0. See fd_sanitize_std(). */
+    int fd_fixed = fd_sanitize_std();
+
     bool foreground = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--foreground") == 0)
@@ -60,6 +65,13 @@ int main(int argc, char **argv) {
         else
             die("usage: agent-terminald [-f] [-v]");
     }
+
+    /* Logged rather than silent: being started with a std fd closed says
+     * something is wrong with the supervisor, and the symptom it causes
+     * otherwise looks like a daemon bug. */
+    if (fd_fixed > 0)
+        log_msg(LOG_WARN, "reopened %d closed std fd(s) onto /dev/null at startup",
+                fd_fixed);
 
     char sock[512];
     if (at_socket_path(sock, sizeof sock) != 0)

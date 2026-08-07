@@ -1,9 +1,12 @@
 #include "xutil.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
@@ -67,4 +70,26 @@ uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+int fd_sanitize_std(void) {
+    int fixed = 0;
+    for (int fd = 0; fd <= 2; fd++) {
+        /* F_GETFD is the cheapest liveness test and touches no file state. */
+        if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) continue;
+        /* O_RDWR for all three: fd 0 wants a reader, 1 and 2 want writers, and
+         * /dev/null serves both. open() returns the lowest free fd, which is
+         * exactly the one being repaired, since lower ones are already open. */
+        int nfd = open("/dev/null", O_RDWR);
+        if (nfd < 0) return fixed;   /* nothing better to do this early */
+        if (nfd != fd) {
+            /* Only reachable if an even lower fd was closed and reopened out of
+             * order, which the ascending loop prevents; handle it anyway rather
+             * than leaking a descriptor at a mismatched number. */
+            if (dup2(nfd, fd) < 0) { close(nfd); return fixed; }
+            close(nfd);
+        }
+        fixed++;
+    }
+    return fixed;
 }

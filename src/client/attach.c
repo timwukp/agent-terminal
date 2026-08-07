@@ -326,7 +326,41 @@ int attach_run(const char *name, char *const argv[], int argc) {
                 pump_resize(fd);
             }
 
-            if (pfds[0].revents & POLLIN) {
+            /* Any revents on stdin must lead to a read(), not just POLLIN, or
+             * this loop spins at 100% CPU forever.
+             *
+             * A POLLIN-only test looks obviously right and is wrong on three of
+             * the four cases that matter, because the platforms report an
+             * exhausted stdin completely differently. Measured directly with a
+             * one-file poll() probe rather than inferred:
+             *
+             *   stdin        Linux            macOS              read()
+             *   /dev/null    POLLIN           POLLNVAL           0
+             *   empty pipe   POLLHUP          POLLIN|POLLHUP     0
+             *   a directory  POLLNVAL         POLLNVAL          -1 EISDIR
+             *
+             * A directory, not a closed fd, is the third row on purpose. fd 0
+             * cannot actually be closed here: main() reopens it onto /dev/null
+             * before anything else, because pipe() hands out the lowest free
+             * descriptors and the SIGWINCH self-pipe would otherwise land on
+             * stdin. A directory is the reachable way to get a POLLNVAL that
+             * read() rejects, and test_close_race.sh uses exactly that.
+             *
+             * Only Linux + /dev/null sets POLLIN. In the other cases poll()
+             * still returned n=1, no branch below matched, and the loop went
+             * straight back to poll() — a busy spin measured at 99.6% CPU,
+             * indefinitely, for `agent-terminal new ... < /dev/null` on macOS
+             * and for a piped stdin on Linux.
+             *
+             * POLLNVAL is included deliberately. Normally it means "not a
+             * pollable fd" and would be a bug to retry, but macOS returns it for
+             * /dev/null, where read() cleanly returns 0. So let read() classify
+             * the fd instead of trusting revents to: 0 is the detach path below,
+             * and a genuinely bad fd returns -1 EBADF, which the errno branch
+             * also turns into a detach. Every one of the six cells above then
+             * terminates. Nothing here can block, since stdin is only read once
+             * poll() has said something about it. */
+            if (pfds[0].revents & (POLLIN | POLLHUP | POLLNVAL)) {
                 uint8_t buf[4096], fwd[8192];
                 ssize_t r = read(0, buf, sizeof buf);
                 if (r > 0) {
@@ -375,6 +409,15 @@ int attach_run(const char *name, char *const argv[], int argc) {
                     }
                 } else if (r == 0) {
                     detached = 1; /* stdin gone: treat as detach */
+                } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    /* A hard read error on stdin is permanent, and poll() will
+                     * keep reporting the fd ready, so ignoring it here spins the
+                     * loop exactly as a missed POLLHUP did. Treat it as stdin
+                     * being gone — the same outcome as EOF, since there is no
+                     * way to get keystrokes from it again. EINTR/EAGAIN fall
+                     * through to the next poll(), which is correct: those are
+                     * retryable and poll() is what should do the waiting. */
+                    detached = 1;
                 }
             }
 

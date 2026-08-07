@@ -158,6 +158,10 @@ static int cmd_kill(const char *name) {
 }
 
 int main(int argc, char **argv) {
+    /* Before anything that can allocate a descriptor: attach_run() creates a
+     * SIGWINCH self-pipe, and pipe() takes the lowest free fds, so a missing
+     * fd 0 would turn stdin into that pipe. See fd_sanitize_std(). */
+    fd_sanitize_std();
     if (argc < 2) usage();
     const char *verb = argv[1];
     const char *name = NULL;
