@@ -21,6 +21,8 @@ agent-terminal \- crash-proof terminal session multiplexer
 .B agent-terminal kill
 .B \-s
 .I name
+.br
+.B agent-terminal reload
 .SH DESCRIPTION
 .B agent-terminal
 keeps long-running terminal programs (AI agents such as Claude Code CLI,
@@ -53,6 +55,31 @@ dead sessions.
 .TP
 .B kill
 Terminate a session's child process and free the session.
+.TP
+.B reload
+Restart the daemon in place to pick up a new binary, without killing
+sessions. The daemon snapshots every screen, then
+.BR execv (3)s
+its own executable: the pid is unchanged, so no PTY master descriptor is
+ever closed, no child receives a carrier-loss
+.BR SIGHUP ,
+and the daemon remains each child's parent. Screens and scrollback are
+preserved and attached clients reconnect on their own. Sending
+.B SIGHUP
+to the daemon does the same thing.
+.IP
+This covers a graceful restart, not a crash: after
+.B SIGSEGV
+or
+.BR "kill \-9" ,
+no code runs to hold the descriptors open and the children are hung up.
+Under
+.BR systemd ,
+use
+.B "systemctl \-\-user reload"
+rather than
+.BR restart ,
+which stops the daemon and therefore closes its descriptors.
 .SH SESSION NAMES
 A name becomes a single directory component under
 .IR ~/.agent-terminal/sessions/ ,

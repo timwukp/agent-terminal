@@ -21,6 +21,7 @@
 #include "common/proto.h"
 #include "common/ring.h"
 #include "common/xutil.h"
+#include "handoff.h"
 #include "loop.h"
 #include "session.h"
 
@@ -211,9 +212,13 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
             client_disconnect(c);
             return;
         }
-        uint8_t ok[6];
+        uint8_t ok[10];
         put_u16(ok, PROTO_VERSION);
         put_u32(ok + 2, (uint32_t)getpid());
+        /* The pid is stable across an in-place restart by design, so it cannot
+         * tell a client (or a test) that a reload happened. The generation
+         * counter can. Appended, so a v1 client that reads 6 bytes is fine. */
+        put_u32(ok + 6, handoff_generation());
         c->hello_done = true;
         client_send(c, MSG_HELLO_OK, ok, sizeof ok);
         return;
@@ -223,6 +228,16 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
     case MSG_NEW_SESSION:   handle_new(c, p, len); break;
     case MSG_ATTACH:        handle_attach(c, p, len); break;
     case MSG_KILL_SESSION:  handle_kill(c, p, len); break;
+    case MSG_RELOAD:
+        /* Answered before the restart, not after: the reply must reach the
+         * client while its socket is still open, and every socket closes as the
+         * handoff begins. So this acknowledges "accepted", not "completed" —
+         * the client confirms completion by reconnecting and comparing the
+         * generation in HELLO_OK. */
+        log_msg(LOG_INFO, "reload requested by client fd %d", c->fd);
+        client_send(c, MSG_PONG, NULL, 0);
+        handoff_request();
+        break;
     case MSG_DETACH:
         if (c->attached) { session_detach(c->attached, c); c->attached = NULL; }
         break;
@@ -264,16 +279,48 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
 
 /* ---- socket plumbing ---- */
 
+/* POLLHUP must NOT short-circuit the read: a hangup means the peer will send
+ * nothing more, not that what it already sent is void. The kernel reports
+ * POLLIN|POLLHUP together when bytes are still queued on a closed socket, so
+ * returning early here threw away complete frames that had already arrived.
+ *
+ * That was a real, reproducible data loss, not a theoretical one. A client that
+ * writes MSG_NEW_SESSION and closes immediately — which is exactly what
+ * `agent-terminal new` does when stdin is already at EOF, because attach.c
+ * treats an instant stdin EOF as a detach — had its request dropped. Measured on
+ * two runs putting identical bytes on the wire and differing only in a 250 ms
+ * sleep before close(): 20 of 20 sessions lost on Linux and 9 of 20 on macOS
+ * when closing at once, 0 of 20 on both when lingering. It surfaced as a 3-in-8
+ * flake in the integration suite, where a *later* test finds a session missing
+ * that `new` had reported as created.
+ *
+ * So: drain, dispatch, and only then honor the hangup. POLLERR/POLLNVAL still
+ * disconnect at once — those say the fd itself is unusable, not just finished.
+ *
+ * Two details here are deliberately NOT load-bearing for that fix, and were
+ * confirmed so by mutation (test_close_race.sh still passes with either one
+ * reverted), so do not read them as the mechanism:
+ *  - Accepting a POLLHUP-only wakeup. A socket at EOF sets POLLIN as well, so
+ *    this branch does not fire in practice; it is there so a platform that
+ *    reports the hangup alone cannot spin on an fd nobody reads.
+ *  - The exact position of the eof disconnect below. What the measurement
+ *    turns on is only that the read and dispatch happen at all; the read loop
+ *    breaks on a short read before it ever sees 0, so on the very poll round
+ *    that carries the frame, eof is usually still false and the disconnect
+ *    lands on a later round. Deferring it cannot leak the fd either way,
+ *    because POLLHUP is level-triggered and poll() keeps re-reporting it. */
 static void client_io(int fd, short revents, void *ud) {
     client *c = ud;
-    if (revents & (POLLERR | POLLHUP | POLLNVAL)) { client_disconnect(c); return; }
+    if (revents & (POLLERR | POLLNVAL)) { client_disconnect(c); return; }
     if (revents & POLLOUT) client_flush(c);
-    if (!(revents & POLLIN) || !c->in_use) return;
+    if (!c->in_use) return;
+    if (!(revents & (POLLIN | POLLHUP))) return;
 
+    bool eof = false;
     uint8_t buf[16384];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof buf);
-        if (n == 0) { client_disconnect(c); return; }
+        if (n == 0) { eof = true; break; }
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -297,6 +344,18 @@ static void client_io(int fd, short revents, void *ud) {
         dispatch(c, type, c->scratch, len);
         if (!c->in_use) return; /* dispatch may disconnect */
     }
+
+    /* A half-open peer that shut down only its write side gets the same
+     * treatment as a full close: this protocol has no request whose reply the
+     * daemon may keep streaming after the client stops talking, and a session
+     * created here keeps running without any client attached.
+     *
+     * This IS load-bearing, just for reaping rather than for the fix above:
+     * POLLHUP no longer disconnects on its own, so without this a peer that
+     * shuts down its write side and lingers holds a client slot forever. At
+     * MAX_CLIENTS such peers the daemon stops accepting entirely — which is
+     * what part 4 of test_close_race.sh measures. */
+    if (eof) client_disconnect(c);
 }
 
 static bool peer_uid_ok(int fd) {
@@ -340,8 +399,74 @@ static void server_accept(int fd, short revents, void *ud) {
     loop_add_fd(cfd, POLLIN, client_io, c);
 }
 
-int server_init(const char *socket_path) {
+/* Is this fd in the listening state?
+ *
+ * SO_ACCEPTCONN is the direct question and is read-only, but on macOS it returns
+ * ENOPROTOOPT for AF_UNIX — measured, not assumed — so it cannot be the only
+ * check. The portable fallback is listen() itself: it succeeds on a socket that
+ * is already listening and fails EINVAL on a connected one, verified identically
+ * on macOS/arm64 and Linux/x86_64. Re-listening is idempotent here because the
+ * backlog is the same value server_init passes; it does not drop connections
+ * already queued.
+ *
+ * The fallback is not just belt-and-braces: an *accepted* client fd reports the
+ * same bound sun_path as the listener on both platforms, so without a
+ * listening-state check the path comparison below would accept a client
+ * connection as the listener. */
+static bool fd_is_listening(int fd) {
+    int acc = 0;
+    socklen_t alen = sizeof acc;
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &acc, &alen) == 0) return acc != 0;
+    if (errno != ENOPROTOOPT) return false;
+    return listen(fd, 16) == 0;
+}
+
+/* Confirm an fd carried across execv really is our listening socket. The fd
+ * number alone proves nothing — numbers are reused, so a stale state file could
+ * name the fd that is now our own stderr. Three checks, cheapest first: it is a
+ * socket, it is listening, and its bound name is the path we were asked for. */
+static bool inherited_listener_ok(int fd, const char *socket_path) {
+    if (fd <= 2) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISSOCK(st.st_mode)) return false;
+
+    if (!fd_is_listening(fd)) return false;
+
+    struct sockaddr_un sa;
+    socklen_t slen = sizeof sa;
+    memset(&sa, 0, sizeof sa);
+    if (getsockname(fd, (struct sockaddr *)&sa, &slen) != 0) return false;
+    if (sa.sun_family != AF_UNIX) return false;
+    /* sun_path is not guaranteed NUL-terminated by getsockname; bound it. */
+    char bound[sizeof sa.sun_path + 1];
+    memcpy(bound, sa.sun_path, sizeof sa.sun_path);
+    bound[sizeof sa.sun_path] = '\0';
+    return strcmp(bound, socket_path) == 0;
+}
+
+int server_init(const char *socket_path, int inherited_fd) {
     strncpy(g_socket_path, socket_path, sizeof g_socket_path - 1);
+
+    if (inherited_fd >= 0) {
+        if (!inherited_listener_ok(inherited_fd, socket_path)) {
+            log_msg(LOG_WARN, "inherited fd %d is not the listener for %s; rebinding",
+                    inherited_fd, socket_path);
+            close(inherited_fd);
+            inherited_fd = -1;
+        } else {
+            int ifl = fcntl(inherited_fd, F_GETFL);
+            if (ifl >= 0) fcntl(inherited_fd, F_SETFL, ifl | O_NONBLOCK);
+            fcntl(inherited_fd, F_SETFD, FD_CLOEXEC);
+            if (loop_add_fd(inherited_fd, POLLIN, server_accept, NULL) != 0) {
+                close(inherited_fd);
+                errno = ENOSPC;
+                return -1;
+            }
+            g_listen_fd = inherited_fd;
+            log_msg(LOG_INFO, "adopted inherited listener fd %d", inherited_fd);
+            return 0;
+        }
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -350,7 +475,13 @@ int server_init(const char *socket_path) {
     if (strlen(socket_path) >= sizeof sa.sun_path) { close(fd); errno = ENAMETOOLONG; return -1; }
     strcpy(sa.sun_path, socket_path);
 
-    /* Stale socket: only unlink if nothing answers. */
+    /* Stale socket: only unlink if nothing answers.
+     *
+     * This is a courtesy, not the mutual exclusion — it is racy (two daemons
+     * can both find nothing answering, both unlink, both bind) and the real
+     * guarantee is the flock in lockfile.c, which main.c takes before calling
+     * here. Keeping the probe means a daemon that was SIGKILLed leaves a socket
+     * its successor can clean up without operator action. */
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
         close(fd);
         errno = EADDRINUSE;
@@ -366,9 +497,26 @@ int server_init(const char *socket_path) {
     int fl = fcntl(fd, F_GETFL);
     if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (loop_add_fd(fd, POLLIN, server_accept, NULL) != 0) {
+        close(fd);
+        unlink(socket_path);
+        errno = ENOSPC;
+        return -1;
+    }
     g_listen_fd = fd;
-    loop_add_fd(fd, POLLIN, server_accept, NULL);
     return 0;
+}
+
+int server_prepare_handoff(void) {
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].in_use) client_disconnect(&g_clients[i]);
+    /* The listener stays bound and stays in the event loop. loop state does not
+     * survive execv, but leaving the fd registered here is harmless and means a
+     * failed handoff needs no re-registration to keep serving. The socket path
+     * is not unlinked: the next image adopts this same fd, so unlinking would
+     * remove the name clients reconnect to while the socket kept working only
+     * for connections already made. */
+    return g_listen_fd;
 }
 
 void server_shutdown(void) {

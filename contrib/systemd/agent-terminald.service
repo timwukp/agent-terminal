@@ -3,10 +3,18 @@
 # Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp contrib/systemd/agent-terminald.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
 #   systemctl --user enable --now agent-terminald
 #
 # For sessions that must survive logout, also run:
 #   loginctl enable-linger $USER
+#
+# To upgrade the binary without killing your sessions:
+#   systemctl --user reload agent-terminald     # or: agent-terminal reload
+#
+# `reload` re-execs the daemon in place: same pid, same PTY master fds, so no
+# child ever sees a SIGHUP. `restart` does NOT preserve sessions — it stops the
+# daemon, and stopping closes every master fd and hangs up every child.
 
 [Unit]
 Description=agent-terminal session daemon
@@ -15,15 +23,57 @@ Documentation=https://github.com/timwukp/agent-terminal
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/agent-terminald -f
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1
 
-# Hardening: the daemon needs only its runtime dir, session logs, and PTYs.
+# KillMode=mixed is load-bearing, not hardening.
+#
+# The default, control-group, sends the stop signal to EVERY process in the
+# cgroup. PTY children are forked by the daemon and call setsid(), but setsid
+# does not leave a cgroup — membership is inherited by fork and nothing short of
+# an explicit move changes it. Measured directly rather than assumed: a setsid
+# grandchild is still listed in its parent's cgroup.procs and is killed by a
+# cgroup-wide kill.
+#
+# So under the default, `systemctl --user stop` or `restart` SIGTERMs (then
+# SIGKILLs) every shell, editor and agent in every session, no matter what the
+# daemon's own code does. mixed sends the stop signal to the main process only,
+# letting the daemon flush screens and exit on its own terms.
+#
+# SIGKILL on timeout still goes to the whole cgroup, which is correct: a daemon
+# that will not exit must not leave children orphaned and unreachable.
+KillMode=mixed
+
+# Hardening: the daemon needs its runtime dir, its session logs, and PTYs.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.agent-terminal
+
+# ProtectHome=read-only makes all of $HOME read-only, so the state directory has
+# to be carved back out explicitly. The `-` prefix means "do not fail if it does
+# not exist yet": without it a clean first install refuses to start, because
+# ~/.agent-terminal is created by the daemon on its first run while systemd
+# resolves ReadWritePaths before ExecStart.
+ReadWritePaths=-%h/.agent-terminal
+
+# %t is $XDG_RUNTIME_DIR, which at_runtime_dir() prefers over $HOME whenever it
+# is set — and it is always set for a user unit. So this, not %h, is where the
+# socket, the lock and the reload state file actually live.
+#
+# Without it, ProtectSystem=strict leaves %t read-only and the daemon dies before
+# it ever reaches bind(): at_runtime_dir() cannot mkdir %t/agent-terminal.
+# Measured under a read-only bind mount, which is what strict amounts to:
+#   [fatal] cannot resolve runtime dir: Read-only file system
+# then exit 1 — which Restart=on-failure + RestartSec=1 turns into a 1 Hz
+# crash loop. Remounting the same directory read-write makes it bind on the
+# first try.
+ReadWritePaths=-%t
+
+# Safe only because nothing here uses /tmp: the runtime dir is under %t and the
+# state file written across a reload lives beside the socket. Keep it that way.
 PrivateTmp=true
+
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

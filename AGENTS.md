@@ -87,6 +87,7 @@ agent-terminal attach  -s name                     attach to session
 agent-terminal ls                                  list sessions
 agent-terminal history -s name                     dump scrollback
 agent-terminal kill    -s name                     kill session
+agent-terminal reload                              restart the daemon, keep sessions
 ```
 
 `a` is an alias for `attach`. Default session name is `main`; default command
@@ -105,6 +106,12 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | `kill -s name`, session exists | 0 | `killed 'name'` |
 | `kill -s name`, no such session | 1 | `no such session` (the daemon's own message) |
 | any verb with an invalid `-s` name | 1 | `[fatal] invalid session name '<n>': no '/', no leading '.'` |
+| `reload`, daemon running | 0 | `daemon reloaded in place (pid N, generation G)` |
+| `reload`, no daemon running | 1 | `cannot reach daemon at <socket path>` |
+
+`reload` deliberately does **not** autospawn the daemon, unlike `new`/`attach`:
+"restart what is running" has no meaning when nothing is running, and starting a
+daemon would be a surprising side effect of asking to reload one.
 
 ### Session names are one path component
 
@@ -236,7 +243,7 @@ child is reaped, so a finished session simply disappears. Use `history` — not
 | Path | Contents |
 |---|---|
 | `src/vt/` | VT engine → `libvt.a`. **No I/O, no syscalls**; effects only via `vt_callbacks`. The untrusted-input surface. |
-| `src/daemon/` | event loop, unix socket server, sessions, PTY |
+| `src/daemon/` | event loop, unix socket server, sessions, PTY, plus the in-place restart handoff (`handoff.c`) and single-instance lock (`lockfile.c`) |
 | `src/client/` | thin client, termios raw mode, attach loop, scrollback copy-mode (`pager.c` — the only client code with a view of its own) |
 | `src/common/` | wire protocol, ring buffer, scrollback, paths |
 | `tests/unit/` | table-driven; `runner.h` is the whole framework |
@@ -283,6 +290,95 @@ outside `vt_cursor` so DECSC/DECRC do not save and restore it, and every
 primitive that moves the cursor or relocates cells calls `forget_last()` — 16
 sites. Erring toward invalidation only drops a mark; missing one attaches a
 mark to an unrelated cell.
+
+### Graceful restart (`reload` / `SIGHUP`)
+
+The daemon re-execs **itself**, in place. There is no fd passing and no
+`SCM_RIGHTS` anywhere in the tree, because `execve` already preserves the pid,
+the parent-child relationship, the session and controlling terminal, the signal
+mask, and every descriptor without `FD_CLOEXEC` (`O_NONBLOCK` lives on the open
+file description and survives too). Nothing closes a PTY master, so no child
+ever sees carrier loss, and `waitpid` still works afterwards because the daemon
+is still the parent.
+
+What the new image must redo, because `execve` does **not** preserve it: every
+signal handler is reset to `SIG_DFL`, so `setup_signals()` runs again.
+
+State crosses in a 0600 file under the runtime dir — **not `/tmp`**, which the
+systemd unit makes private (`PrivateTmp=true`). It names raw descriptor numbers,
+so `handoff_import` proves identity rather than trusting them; fd numbers are
+reused across `execv`, and adopting the wrong one means treating stderr as a PTY
+master:
+
+| Claimed fd | Proof required |
+|---|---|
+| lock | `st_dev` + `st_ino` match the lock path |
+| PTY master | `TIOCGWINSZ` succeeds |
+| listener | `S_ISSOCK`, *in the listening state*, and `getsockname` path matches |
+
+`fd_is_listening()` needs two mechanisms, both measured: `SO_ACCEPTCONN` answers
+directly on Linux but returns `ENOPROTOOPT` for `AF_UNIX` on macOS, so the
+fallback is `listen()` itself — it succeeds on an already-listening socket and
+fails `EINVAL` on a connected one, identically on macOS/arm64 and Linux/x86_64.
+The fallback is load-bearing, not belt-and-braces: an *accepted client* fd
+reports the **same** bound `sun_path` as the listener on both platforms, so the
+path check alone would adopt a client connection as the listener.
+
+Any fd ≤ 2 is refused outright, and a state file that fails any check makes the
+daemon start **clean** — never exit. An operator with a daemon and no sessions
+is better off than one with neither.
+
+Screens cross as `vt_snapshot()` blobs replayed with `vt_feed()`, the same
+round-trip a reattaching client already uses, so there is no second
+serialization format to keep correct or fuzz. Replay is inert — it emits no
+query responses and pushes nothing to scrollback — which is pinned by
+`snapshot_replay_is_inert` in `tests/unit/test_vt.c`, not by the
+`handoff_importing()` guards in `session.c`; those guards are defense in depth
+against a future `vt_snapshot` that probes or scrolls, and were **measured** to
+be unreachable today.
+
+The pid deliberately does not change, so the **generation counter** in
+`MSG_HELLO_OK` is the only observable that moves. One reload must advance it by
+exactly one: the writer stores `g_generation + 1` and the reader adopts that
+value verbatim. (Both incrementing was a real bug; nothing caught it because the
+client only ever compared for an increase.)
+
+Attached clients are simply disconnected. `attach.c`'s existing 250 ms→4 s
+reconnect loop re-`ATTACH`es and re-snapshots, which is far less state to
+serialize than the alternative and exercises a path that was already tested.
+
+A single-instance `flock` on `daemon.lock` guards all of this. It must be
+`flock`, not `fcntl(F_SETLK)`: record locks are per-process and dropped when the
+process closes *any* descriptor on the file, so the double-fork daemonize would
+release it, while `flock` belongs to the open file description and survives both
+daemonize and `execve`. `lock_release` unlinks **before** `LOCK_UN`, or a waiter
+can lock the inode we then unlink. The pre-existing probe-`connect()` in
+`server_init` is not a substitute — it is racy, and it cannot exclude a second
+daemon at all once the socket file is removed.
+
+**Service units.** Both shipped units needed fixing, in opposite directions, and
+the difference is measured:
+
+- systemd's default `KillMode=control-group` signals every process in the
+  cgroup, so `stop`/`restart` would kill every PTY child regardless of daemon
+  code. `setsid` does **not** leave a cgroup — a `setsid` grandchild is still
+  listed in its parent's `cgroup.procs` and is killed by `cgroup.kill`. Hence
+  `KillMode=mixed`. `systemctl --user restart` still does not preserve
+  sessions; only `reload` does.
+- launchd needs no equivalent: on `bootout` only the main process is signalled
+  and a `setsid` grandchild keeps running, reparented to pid 1. Its bug was the
+  other way round — a bare `KeepAlive true` respawns even after a clean exit,
+  and SIGTERM *is* a clean exit here. `KeepAlive={SuccessfulExit:false}` matches
+  `Restart=on-failure`: a job exiting 3 started 3 times in 26 s (launchd
+  throttles respawns to ~10 s), a job exiting 0 started once.
+- `launchctl kill SIGHUP` keeps the same pid across the in-place `execv` and
+  launchd goes on supervising it (`PID` unchanged, `LastExitStatus` 0).
+  `launchctl kickstart -k` does not — it `SIGKILL`s the job.
+
+**Crash survival is still not delivered**, and the README says so. On `SIGSEGV`
+or `kill -9` no code runs to hold the descriptors, and it is the descriptor
+closing, not the exit, that hangs up children. That needs a supervisor that is
+both fd holder and parent, i.e. inverting the architecture.
 
 ### Invariants — do not break these
 

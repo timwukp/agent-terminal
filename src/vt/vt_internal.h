@@ -26,6 +26,10 @@ typedef enum {
 #define VT_PARAMS_MAX 16
 #define VT_INTER_MAX  2
 #define VT_OSC_MAX    4096  /* fixed buffer; excess discarded (xterm) */
+/* Longest in-progress sequence whose raw bytes are retained for replay. Sized
+ * off VT_OSC_MAX, the largest sequence body the parser stores, plus room for
+ * the ESC ] introducer, a Ps;Pt prefix and the terminator. */
+#define VT_PENDING_MAX (VT_OSC_MAX + 64)
 #define VT_ROWS_MAX   1000
 #define VT_COLS_MAX   1000
 #define VT_TABSTOP_WORDS ((VT_COLS_MAX + 31) / 32)
@@ -75,6 +79,23 @@ struct vt {
 
     /* utf-8 decoder (Höhrmann DFA) — survives vt_feed boundaries */
     uint32_t u8_state, u8_cp;
+
+    /* Raw bytes of the sequence currently being parsed, for vt_snapshot.
+     *
+     * A snapshot can be taken at any byte boundary, including halfway through
+     * a CSI or a multibyte character. Neither the Williams state machine's
+     * state nor the UTF-8 DFA's has an ANSI representation, so rather than
+     * serialize either, the snapshot replays the bytes that got us here and
+     * lets the receiving parser re-derive both. That keeps the entire mechanism
+     * inside the existing vt_feed contract with no new format to fuzz.
+     *
+     * Reset whenever the parser reaches ground with nothing pending, and
+     * capped: past the cap the tail is dropped and `pending_lost` is set, so a
+     * snapshot re-feeds nothing rather than a truncated prefix that would
+     * decode as a different sequence. */
+    uint8_t pending[VT_PENDING_MAX];
+    size_t pending_len;
+    bool pending_lost;
 
     /* Cell most recently written by vt_screen_put, which is where a following
      * combining mark attaches. Cannot be derived from the cursor: cur.col has

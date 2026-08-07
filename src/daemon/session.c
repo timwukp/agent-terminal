@@ -9,6 +9,7 @@
 
 #include "common/proto.h"
 #include "common/xutil.h"
+#include "handoff.h"
 #include "loop.h"
 #include "server.h"
 
@@ -18,13 +19,35 @@ static void session_pty_readable(int fd, short revents, void *ud);
 
 /* ---- VT callbacks ---- */
 
+/* Both callbacks below are suppressed while a restart handoff replays a screen.
+ *
+ * Measured, so the strength of the claim is not overstated: with both guards
+ * removed, a full reload invokes neither callback even once, and scrollback line
+ * counts are identical before and after. The blob addresses rows absolutely and
+ * never scrolls, and vt_snapshot emits no queries, so neither side effect is
+ * reachable today — `snapshot_replay_is_inert` in tests/unit/test_vt.c pins that
+ * property where it actually lives.
+ *
+ * These are therefore defense in depth, kept because the failure modes are
+ * severe and silent, and because a future change to vt_snapshot (say, emitting a
+ * DA1 to re-probe, or painting rows by scrolling) would otherwise turn a screen
+ * restore into corrupted history and injected keystrokes. */
+
 static void vt_cb_response(void *ud, const char *buf, size_t len) {
-    /* Query answers (DA/DSR/CPR) go back to the application via the PTY. */
+    /* Query answers (DA/DSR/CPR) go back to the application via the PTY. A
+     * duplicate would answer a question the app asked before the restart and
+     * already received, arriving as unsolicited keyboard input — a literal
+     * `[12;40R` typed into a shell prompt. */
+    if (handoff_importing()) return;
     session *s = ud;
     session_stdin(s, (const uint8_t *)buf, (uint32_t)len);
 }
 
 static void vt_cb_scrollback(void *ud, const vt_cell *cells, uint16_t n) {
+    /* Any line a replay pushed off the top would be a line the pre-restart
+     * engine already stored, duplicating history that `history` and copy-mode
+     * both read. */
+    if (handoff_importing()) return;
     session *s = ud;
     sb_push_line(s->sb, cells, n);
 }
@@ -72,7 +95,12 @@ session *session_at(int idx) {
     return (idx >= 0 && idx < MAX_SESSIONS && g_sessions[idx].in_use) ? &g_sessions[idx] : NULL;
 }
 
-session *session_new(const char *name, char *const argv[], uint16_t cols, uint16_t rows) {
+/* Claim a slot and build everything that does not involve the child: the
+ * screen engine and scrollback. Shared by session_new and session_import so a
+ * restored session is indistinguishable from a fresh one afterwards — the
+ * alternative, a second copy of this setup in handoff.c, is how a restored
+ * session ends up with subtly different callbacks or no scrollback at all. */
+static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
     if (session_find(name)) { errno = EEXIST; return NULL; }
     session *s = NULL;
     for (int i = 0; i < MAX_SESSIONS; i++)
@@ -93,25 +121,86 @@ session *session_new(const char *name, char *const argv[], uint16_t cols, uint16
     };
     s->vt = vt_new(s->rows, s->cols, &cb, s);
     if (!s->vt) { errno = ENOMEM; return NULL; }
-    /* Best-effort: a session without persistent scrollback still works. */
+    /* Best-effort: a session without persistent scrollback still works.
+     * sb_open resumes line_seq from what is on disk, which is what makes
+     * scrollback numbering continuous across a restart. */
     s->sb = sb_open(s->name, 0, 0);
     if (!s->sb)
         log_msg(LOG_WARN, "session '%s': scrollback disabled (%s)", s->name,
                 strerror(errno));
+    return s;
+}
+
+static void session_alloc_undo(session *s) {
+    vt_free(s->vt);
+    s->vt = NULL;
+    sb_close(s->sb);
+    s->sb = NULL;
+    s->in_use = false;
+}
+
+session *session_new(const char *name, char *const argv[], uint16_t cols, uint16_t rows) {
+    session *s = session_alloc(name, cols, rows);
+    if (!s) return NULL;
 
     if (pty_spawn(&s->child, argv, s->cols, s->rows, "xterm-256color") != 0) {
         int saved = errno;
-        vt_free(s->vt);
-        s->vt = NULL;
-        sb_close(s->sb);
-        s->sb = NULL;
+        session_alloc_undo(s);
         errno = saved;
         return NULL;
     }
     s->in_use = true;
-    loop_add_fd(s->child.master_fd, POLLIN, session_pty_readable, s);
+    if (loop_add_fd(s->child.master_fd, POLLIN, session_pty_readable, s) != 0) {
+        /* Out of poll slots. The child exists but nothing would ever read its
+         * output, so it would fill the PTY buffer and block forever with no
+         * visible cause. Kill it and report, rather than hand back a session
+         * that silently does not work. */
+        int saved = errno;
+        log_msg(LOG_ERR, "session '%s': no event-loop slot for fd %d", s->name,
+                s->child.master_fd);
+        kill(s->child.pid, SIGHUP);
+        close(s->child.master_fd);
+        s->child.master_fd = -1;
+        session_alloc_undo(s);
+        errno = saved ? saved : ENOSPC;
+        return NULL;
+    }
     log_msg(LOG_INFO, "session '%s': pid %d on fd %d", s->name, (int)s->child.pid,
             s->child.master_fd);
+    return s;
+}
+
+session *session_import(const char *name, int master_fd, pid_t pid, uint16_t cols,
+                        uint16_t rows, const uint8_t *blob, size_t blob_len) {
+    session *s = session_alloc(name, cols, rows);
+    if (!s) return NULL;
+
+    s->child.master_fd = master_fd;
+    s->child.pid = pid;
+    s->in_use = true;
+
+    /* Replay the pre-restart screen. vt_feed on a snapshot blob is the same
+     * round-trip a reattaching client already relies on, so there is no second
+     * serialization format here to keep correct. */
+    if (blob_len && s->vt) vt_feed(s->vt, blob, blob_len);
+
+    if (loop_add_fd(master_fd, POLLIN, session_pty_readable, s) != 0) {
+        int saved = errno;
+        /* Do NOT kill the child or close the master here. The child is alive
+         * and predates us; dropping the fd is what sends it SIGHUP. Better to
+         * leak the slot and say so than to kill a session the operator was
+         * explicitly trying to preserve. */
+        log_msg(LOG_ERR, "session '%s': no event-loop slot for inherited fd %d; "
+                         "child %d is alive but unattended", s->name, master_fd, (int)pid);
+        errno = saved ? saved : ENOSPC;
+        return s;
+    }
+    /* Re-apply geometry: the state file's cols/rows are authoritative, and the
+     * PTY already has them, but a client that resized during the gap did not
+     * reach us. Harmless when they match — pty_resize is idempotent. */
+    pty_resize(master_fd, s->cols, s->rows);
+    log_msg(LOG_INFO, "session '%s': restored pid %d on fd %d (%ux%u, %zu-byte screen)",
+            s->name, (int)pid, master_fd, s->cols, s->rows, blob_len);
     return s;
 }
 
