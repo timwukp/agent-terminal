@@ -10,6 +10,8 @@
 #include "common/scrollback.h"
 #include "common/xutil.h"
 
+#include "at_version.h" /* generated into $(O)/include by the Makefile */
+
 static void usage(void) {
     fprintf(stderr,
             "usage:\n"
@@ -19,6 +21,7 @@ static void usage(void) {
             "  agent-terminal history -s name                     dump scrollback (works for dead sessions)\n"
             "  agent-terminal kill    -s name                     kill session\n"
             "  agent-terminal reload                              restart the daemon, keep sessions\n"
+            "  agent-terminal version                             client + daemon versions\n"
             "\ndetach without killing: Ctrl-\\ then Ctrl-d\n");
     exit(2);
 }
@@ -240,6 +243,25 @@ int main(int argc, char **argv) {
     if (name && !at_valid_session_name(name))
         die("invalid session name '%s': no '/', no leading '.'", name);
 
+    if (strcmp(verb, "version") == 0 || strcmp(verb, "--version") == 0) {
+        /* Client version from the build; daemon identity from a live HELLO.
+         * Exists because a version skew is otherwise invisible: a stale
+         * daemon answers the socket and silently lacks newer messages. The
+         * daemon line reuses what HELLO_OK already carries — pid, restart
+         * generation, capability bits — so this needs no protocol change
+         * and works against any daemon back to v1. */
+        printf("agent-terminal %s\n", AT_VERSION);
+        int fd = daemon_connect(-1);
+        if (fd < 0) {
+            printf("daemon: not running\n");
+            return 0;
+        }
+        printf("daemon: pid %u, generation %u, panes %s\n",
+               daemon_pid(), daemon_generation(),
+               daemon_has_panes() ? "yes" : "no");
+        close(fd);
+        return 0;
+    }
     if (strcmp(verb, "ls") == 0) return cmd_ls();
     if (strcmp(verb, "reload") == 0) return cmd_reload();
     if (strcmp(verb, "history") == 0) {

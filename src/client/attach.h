@@ -1,6 +1,7 @@
 #ifndef AT_ATTACH_H
 #define AT_ATTACH_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Connect to the daemon socket. auto_start: fork/exec agent-terminald if
@@ -16,6 +17,8 @@ uint32_t daemon_generation(void);
 /* Daemon pid from the most recent successful HELLO. Stable across an in-place
  * restart, which is the point: it is the generation that moves. */
 uint32_t daemon_pid(void);
+/* True when the connected daemon's HELLO_OK advertised pane support. */
+bool daemon_has_panes(void);
 
 /* Attach to (or create, if argv != NULL) a session and pump until detach,
  * session exit, or unrecoverable connection loss. Returns exit code. */

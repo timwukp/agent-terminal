@@ -16,6 +16,8 @@
 
 #include "common/path.h"
 #include "common/xutil.h"
+
+#include "at_version.h" /* generated into $(O)/include by the Makefile */
 #include "handoff.h"
 #include "lockfile.h"
 #include "loop.h"
@@ -133,8 +135,11 @@ int main(int argc, char **argv) {
             verbose = true;
         } else if (strcmp(argv[i], "--handoff") == 0 && i + 1 < argc) {
             state_path = argv[++i];
+        } else if (strcmp(argv[i], "--version") == 0) {
+            printf("agent-terminald %s\n", AT_VERSION);
+            return 0;
         } else {
-            die("usage: agent-terminald [-f] [-v]");
+            die("usage: agent-terminald [-f] [-v] [--version]");
         }
     }
     if (verbose) log_set_level(LOG_DEBUG);

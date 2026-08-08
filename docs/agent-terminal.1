@@ -23,6 +23,8 @@ agent-terminal \- crash-proof terminal session multiplexer
 .I name
 .br
 .B agent-terminal reload
+.br
+.B agent-terminal version
 .SH DESCRIPTION
 .B agent-terminal
 keeps long-running terminal programs (AI agents such as Claude Code CLI,
@@ -55,6 +57,12 @@ dead sessions.
 .TP
 .B kill
 Terminate a session's child process and free the session.
+.TP
+.B version
+Print the client's build hash and, when a daemon is running, its pid,
+restart generation, and whether it supports panes. Never starts a daemon.
+Useful when key chords appear to do nothing: an older daemon answering the
+socket skips messages it predates, and this command makes the skew visible.
 .TP
 .B reload
 Restart the daemon in place to pick up a new binary, without killing

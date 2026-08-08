@@ -90,6 +90,7 @@ agent-terminal ls                                  list sessions
 agent-terminal history -s name                     dump scrollback
 agent-terminal kill    -s name                     kill session
 agent-terminal reload                              restart the daemon, keep sessions
+agent-terminal version                             client + daemon versions
 ```
 
 `a` is an alias for `attach`. Default session name is `main`; default command
@@ -112,6 +113,8 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | any verb with an invalid `-s` name | 1 | `[fatal] invalid session name '<n>': no '/', no leading '.'` |
 | `reload`, daemon running | 0 | `daemon reloaded in place (pid N, generation G)` |
 | `reload`, no daemon running | 1 | `cannot reach daemon at <socket path>` |
+| `version`, daemon running | 0 | client hash line, then `daemon: pid N, generation G, panes yes\|no` |
+| `version`, no daemon | 0 | client hash line, then `daemon: not running` (deliberately rc 0: asking is not an error) |
 
 `reload` deliberately does **not** autospawn the daemon, unlike `new`/`attach`:
 "restart what is running" has no meaning when nothing is running, and starting a
@@ -143,6 +146,12 @@ grep the output or check the socket path.
 `kill`'s exit code *is* trustworthy: it comes from the daemon's reply, not from
 a local `write()`. It returns after the session is gone, so a following `ls`
 needs no sleep.
+
+`version` is the skew probe: the client's own build hash comes from the
+binary; the daemon line is read from a live `MSG_HELLO_OK` (pid, restart
+generation, capability bits), so it needs no new protocol and answers for
+any daemon back to v1. `version` never autospawns — observing must not
+mutate.
 
 ### The client autospawns the daemon
 

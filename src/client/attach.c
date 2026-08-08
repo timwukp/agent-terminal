@@ -51,9 +51,11 @@ static int try_connect(const char *path) {
 }
 
 static uint32_t g_daemon_gen, g_daemon_pid;
+static bool g_daemon_panes;
 
 uint32_t daemon_generation(void) { return g_daemon_gen; }
 uint32_t daemon_pid(void) { return g_daemon_pid; }
+bool daemon_has_panes(void) { return g_daemon_panes; }
 
 static int hello(int fd) {
     ring out;
@@ -105,6 +107,7 @@ static int hello(int fd) {
      * binary on PATH, or a daemon from before the last upgrade that was
      * never `reload`ed). */
     uint16_t server_flags = plen >= 12 ? get_u16(payload + 10) : 0;
+    g_daemon_panes = (server_flags & SERVER_CAP_PANES) != 0;
     if (!(server_flags & SERVER_CAP_PANES)) {
         static bool warned;
         if (!warned) {
@@ -144,6 +147,9 @@ static bool sibling_daemon_path(char *out, size_t outsz) {
     return access(out, X_OK) == 0;
 }
 
+/* auto_start: 1 = spawn the daemon if absent, 0 = don't, -1 = don't and be
+ * quiet about failure (the `version` verb reports "not running" itself —
+ * a stderr complaint would turn its normal output into noise). */
 int daemon_connect(int auto_start) {
     char path[512];
     if (at_socket_path(path, sizeof path) != 0) {
@@ -151,7 +157,7 @@ int daemon_connect(int auto_start) {
         return -1;
     }
     int fd = try_connect(path);
-    if (fd < 0 && auto_start) {
+    if (fd < 0 && auto_start > 0) {
         char sibling[1088];
         bool have_sibling = sibling_daemon_path(sibling, sizeof sibling);
         pid_t pid = fork();
@@ -173,7 +179,8 @@ int daemon_connect(int auto_start) {
         }
     }
     if (fd < 0) {
-        fprintf(stderr, "agent-terminal: cannot reach daemon at %s\n", path);
+        if (auto_start >= 0)
+            fprintf(stderr, "agent-terminal: cannot reach daemon at %s\n", path);
         return -1;
     }
     if (hello(fd) != 0) { close(fd); return -1; }
