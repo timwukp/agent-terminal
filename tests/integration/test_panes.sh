@@ -197,14 +197,17 @@ ROW=$(echo "$GRID" | grep -n "RIGHT-MARKER" | head -1 | cut -d: -f1)
 COL=$(echo "$GRID" | sed -n "${ROW}p" | awk -v m="RIGHT-MARKER" '{print index($0, m)}')
 [ "$COL" -gt "$((X1))" ] || fail "RIGHT-MARKER at column $COL is left of pane boundary $X1"
 
-# Pane 0's rectangle must contain no RIGHT-MARKER fragment.
-if echo "$GRID" | cut -c1-"$C0" | grep -q "RIGHT-MARKER"; then
+# Pane 0's rectangle must contain no RIGHT-MARKER fragment. Character-sliced
+# in python for the same byte-vs-character reason as the divider check.
+if echo "$GRID" | python3 -c "import sys; [print(l[:$C0]) for l in sys.stdin.read().splitlines()]" | grep -q "RIGHT-MARKER"; then
     fail "active pane's output bled into pane 0's rectangle"
 fi
 
-# The divider column renders between the panes on the marker row.
+# The divider column renders between the panes on the marker row. Indexed in
+# CHARACTERS via python: GNU cut -c counts bytes, and the divider glyph is
+# 3 UTF-8 bytes, so cut sliced it mid-sequence on Linux while passing on macOS.
 DIV_COL=$((C0 + 1))
-DIV_CHAR=$(echo "$GRID" | sed -n "$((Y0 + 1))p" | cut -c"$DIV_COL")
+DIV_CHAR=$(echo "$GRID" | sed -n "$((Y0 + 1))p" | python3 -c "import sys; line = sys.stdin.readline().rstrip('\n'); print(line[$DIV_COL - 1] if len(line) >= $DIV_COL else '')")
 [ "$DIV_CHAR" = "│" ] || fail "no divider at column $DIV_COL on row $((Y0+1)): got '$DIV_CHAR'"
 
 # After the close, a fresh attach renders pane 0's content at full width.
