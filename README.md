@@ -18,12 +18,14 @@ with it. agent-terminal splits the two:
 
 - **`agent-terminald`** — a per-user daemon that owns PTYs, the emulated
   screen state, and disk-persisted scrollback. It never dies with the
-  front-end.
+  front-end, and `reload` re-execs it in place under live sessions — a
+  binary upgrade with every child process kept alive.
 - **`agent-terminal`** — a thin client that runs inside any terminal
   (Terminal.app, iTerm2, Ghostty, over SSH), attaches via a unix socket,
   and renders. Kill the client — or force-quit the whole hosting
   terminal — then reattach: exact screen, cursor, and terminal modes
-  restored; the child process never noticed.
+  restored; the child process never noticed. Panes, scrollback paging,
+  and multi-client attach ride the same socket.
 
 <p align="center">
   <img src="docs/architecture.svg" alt="Architecture: a thin client inside the hosting terminal talks to agent-terminald over a unix socket. The client can crash freely; the daemon owns the PTY, the VT screen state and the on-disk scrollback, and survives. The animation walks through normal operation, the terminal dying, the daemon continuing, and a new client reattaching to a snapshot repaint." width="900">
@@ -173,6 +175,10 @@ agent-terminal history -s agent | less -R
 agent-terminal new -s build -- make -j8
 agent-terminal new -s logs  -- tail -f /var/log/system.log
 agent-terminal ls
+
+# Or split one session instead: agent in the left pane,
+# Ctrl-\ % then tail the log on the right.
+agent-terminal new -s work -- claude
 ```
 
 ## Scrollback persistence
@@ -204,7 +210,11 @@ vulnerabilities. Highlights:
 - No crypto code in this repo: SSH is delegated to the system OpenSSH
   binary.
 
-## Limitations (v1, by design)
+## Limitations
+
+The original v1 release documented four deliberate gaps — no scrollback
+paging, dropped combining marks, children dying on daemon restart, and no
+panes. All four are implemented. What remains:
 
 - Panes have no directional (arrow-key) selection, no zoom, and do not
   appear in `ls`; there are no windows/tabs — one session is one visible
