@@ -194,12 +194,20 @@ static uint64_t scan_log(const char *path, uint64_t *valid_size) {
 }
 
 scrollback *sb_open(const char *session_name, uint32_t mem_lines, uint32_t file_max) {
+    return sb_open_pane(session_name, 0, mem_lines, file_max);
+}
+
+scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
+                         uint32_t mem_lines, uint32_t file_max) {
     scrollback *sb = xcalloc(1, sizeof *sb);
     if (session_dir(session_name, sb->dir, sizeof sb->dir) != 0) {
         free(sb);
         return NULL;
     }
-    snprintf(sb->log_path, sizeof sb->log_path, "%s/scrollback.log", sb->dir);
+    if (pane_id == 0)
+        snprintf(sb->log_path, sizeof sb->log_path, "%s/scrollback.log", sb->dir);
+    else
+        snprintf(sb->log_path, sizeof sb->log_path, "%s/pane%u.log", sb->dir, pane_id);
     sb->mem_lines = mem_lines ? mem_lines : SB_MEM_LINES_DEFAULT;
     sb->file_max = file_max ? file_max : SB_FILE_MAX_DEFAULT;
     sb->ring = xcalloc(sb->mem_lines, sizeof(mem_line));

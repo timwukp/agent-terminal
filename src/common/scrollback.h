@@ -31,6 +31,15 @@ typedef struct scrollback scrollback;
 /* Open (creating dir/file as needed) the scrollback for a session name.
  * Resumes line_seq from what's already on disk. Returns NULL on error. */
 scrollback *sb_open(const char *session_name, uint32_t mem_lines, uint32_t file_max);
+
+/* Per-pane variant. Pane 0 is byte-identical to sb_open — same
+ * scrollback.log, so every existing log and every tool that reads one keeps
+ * working. Other panes get pane<id>.log in the same session directory: the
+ * pane lands in the *filename* rather than a path component because session
+ * names are validated to be exactly one component, and a uint8_t rendered
+ * with %u cannot smuggle a separator. */
+scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
+                         uint32_t mem_lines, uint32_t file_max);
 void sb_close(scrollback *sb); /* flush + close */
 
 /* Append one line of cells (serialized to ANSI text internally). */

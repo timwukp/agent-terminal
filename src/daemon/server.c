@@ -107,15 +107,21 @@ static void handle_list(client *c) {
         int ncli = 0;
         for (int j = 0; j < MAX_CLIENTS_PER_SESSION; j++)
             if (s->clients[j]) ncli++;
+        /* MSG_SESSION_LIST is positional with no per-entry length, so it can
+         * never grow per-pane fields (a parser mis-reads the *next* entry).
+         * The active pane's child stands for the session here, which is exact
+         * while sessions have one pane; `ls` showing panes needs a new
+         * message, not an extension of this one. */
+        pane *ap = session_active_pane(s);
         payload[off++] = (uint8_t)nlen;
         memcpy(payload + off, s->name, nlen);
         off += nlen;
-        put_u16(payload + off, s->cols); off += 2;
-        put_u16(payload + off, s->rows); off += 2;
-        payload[off++] = s->child.pid > 0 ? 1 : 0;
+        put_u16(payload + off, s->view_cols); off += 2;
+        put_u16(payload + off, s->view_rows); off += 2;
+        payload[off++] = (ap && ap->child.pid > 0) ? 1 : 0;
         payload[off++] = (uint8_t)ncli;
-        put_u32(payload + off, (uint32_t)s->child.pid); off += 4;
-        put_u32(payload + off, (uint32_t)s->exit_status); off += 4;
+        put_u32(payload + off, (uint32_t)(ap ? ap->child.pid : -1)); off += 4;
+        put_u32(payload + off, (uint32_t)(ap ? ap->exit_status : 0)); off += 4;
         count++;
     }
     put_u16(payload, count);
@@ -255,7 +261,11 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
         uint32_t maxn = get_u32(p + 8);
         if (maxn > 1000) maxn = 1000;
         static sb_line_ref refs[1000];
-        uint32_t got = sb_fetch(c->attached->sb, start, maxn, refs, 1000);
+        /* Active pane's ring. Copy-mode learns to name a pane in 5c (a true
+         * append to this fixed 12-byte payload); until then active == pane 0
+         * == what sb_read_log reads from disk, so the two sources agree. */
+        pane *ap = session_active_pane(c->attached);
+        uint32_t got = ap ? sb_fetch(ap->sb, start, maxn, refs, 1000) : 0;
         /* payload: u64 first_seq, u32 nlines, then {u32 len, bytes}... */
         static uint8_t payload[PROTO_MAX_PAYLOAD];
         size_t off = 12;

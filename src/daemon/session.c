@@ -15,7 +15,7 @@
 
 static session g_sessions[MAX_SESSIONS];
 
-static void session_pty_readable(int fd, short revents, void *ud);
+static void pane_pty_readable(int fd, short revents, void *ud);
 
 /* ---- VT callbacks ---- */
 
@@ -33,14 +33,21 @@ static void session_pty_readable(int fd, short revents, void *ud);
  * DA1 to re-probe, or painting rows by scrolling) would otherwise turn a screen
  * restore into corrupted history and injected keystrokes. */
 
+static void pane_stdin(pane *p, const uint8_t *data, uint32_t len);
+
 static void vt_cb_response(void *ud, const char *buf, size_t len) {
     /* Query answers (DA/DSR/CPR) go back to the application via the PTY. A
      * duplicate would answer a question the app asked before the restart and
      * already received, arriving as unsolicited keyboard input — a literal
-     * `[12;40R` typed into a shell prompt. */
+     * `[12;40R` typed into a shell prompt.
+     *
+     * ud is the pane, NOT the session: a background pane's DSR must be
+     * answered into that pane's own PTY. Routing through the session would
+     * answer it into whichever pane holds the keyboard, injecting the reply
+     * into the focused app as typed input. */
     if (handoff_importing()) return;
-    session *s = ud;
-    session_stdin(s, (const uint8_t *)buf, (uint32_t)len);
+    pane *p = ud;
+    pane_stdin(p, (const uint8_t *)buf, (uint32_t)len);
 }
 
 static void vt_cb_scrollback(void *ud, const vt_cell *cells, uint16_t n) {
@@ -48,8 +55,8 @@ static void vt_cb_scrollback(void *ud, const vt_cell *cells, uint16_t n) {
      * engine already stored, duplicating history that `history` and copy-mode
      * both read. */
     if (handoff_importing()) return;
-    session *s = ud;
-    sb_push_line(s->sb, cells, n);
+    pane *p = ud;
+    sb_push_line(p->sb, cells, n);
 }
 
 static void vt_cb_bell(void *ud) { (void)ud; }
@@ -65,23 +72,37 @@ session *session_find(const char *name) {
     return NULL;
 }
 
-static void session_flush_screen(session *s);
+pane *session_active_pane(session *s) {
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use) return &s->panes[i];
+    return NULL; /* unreachable for an in-use session; callers may assume */
+}
+
+static void pane_flush_screen(pane *p);
 
 void session_flush_all(void) {
-    for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_sessions[i].in_use) sb_flush(g_sessions[i].sb);
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session *s = &g_sessions[i];
+        if (!s->in_use) continue;
+        for (int j = 0; j < MAX_PANES_PER_SESSION; j++)
+            if (s->panes[j].in_use) sb_flush(s->panes[j].sb);
+    }
 }
 
 /* Daemon shutdown (SIGTERM/SIGINT). The children die with us, so this is the
  * last chance to preserve what is on their screens; without it a service
  * restart silently discarded every session's visible output, unlike an
- * explicit kill or a child exiting, which both flush via session_free_slot. */
+ * explicit kill or a child exiting, which both flush via pane_free_slot. */
 void session_flush_screens_all(void) {
-    for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_sessions[i].in_use) {
-            session_flush_screen(&g_sessions[i]);
-            sb_flush(g_sessions[i].sb);
-        }
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session *s = &g_sessions[i];
+        if (!s->in_use) continue;
+        for (int j = 0; j < MAX_PANES_PER_SESSION; j++)
+            if (s->panes[j].in_use) {
+                pane_flush_screen(&s->panes[j]);
+                sb_flush(s->panes[j].sb);
+            }
+    }
 }
 
 int session_count(void) {
@@ -95,11 +116,109 @@ session *session_at(int idx) {
     return (idx >= 0 && idx < MAX_SESSIONS && g_sessions[idx].in_use) ? &g_sessions[idx] : NULL;
 }
 
-/* Claim a slot and build everything that does not involve the child: the
- * screen engine and scrollback. Shared by session_new and session_import so a
- * restored session is indistinguishable from a fresh one afterwards — the
- * alternative, a second copy of this setup in handoff.c, is how a restored
- * session ends up with subtly different callbacks or no scrollback at all. */
+/* ---- pane lifecycle ---- */
+
+/* Build a pane's engine and scrollback; everything except the child. Shared
+ * by the spawn and import paths so a restored pane is indistinguishable from
+ * a fresh one afterwards — the alternative, a second copy of this setup in
+ * handoff.c, is how a restored session ends up with subtly different
+ * callbacks or no scrollback at all. */
+static pane *pane_alloc(session *s, uint16_t cols, uint16_t rows) {
+    pane *p = NULL;
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (!s->panes[i].in_use) { p = &s->panes[i]; break; }
+    if (!p) { errno = ENOSPC; return NULL; }
+
+    memset(p, 0, sizeof *p);
+    p->sess = s;
+    /* Wire id: pane 0 is the session's first pane forever; the round-robin
+     * allocator for 1..254 arrives with the split messages (5c). Today only
+     * one pane ever exists, and its id must be 0 so its scrollback file is
+     * byte-identical to what every existing log reader expects. */
+    p->id = 0;
+    p->cols = cols;
+    p->rows = rows;
+    p->child.master_fd = -1;
+    p->child.pid = -1;
+
+    vt_callbacks cb = {
+        .on_response = vt_cb_response,
+        .on_scrollback_line = vt_cb_scrollback,
+        .on_title = vt_cb_title,
+        .on_bell = vt_cb_bell,
+        .on_passthrough = NULL, /* raw tee already forwards everything live */
+    };
+    p->vt = vt_new(p->rows, p->cols, &cb, p);
+    if (!p->vt) { errno = ENOMEM; return NULL; }
+    /* Best-effort: a pane without persistent scrollback still works.
+     * sb_open_pane resumes line_seq from what is on disk, which is what makes
+     * scrollback numbering continuous across a restart. */
+    p->sb = sb_open_pane(s->name, p->id, 0, 0);
+    if (!p->sb)
+        log_msg(LOG_WARN, "session '%s': scrollback disabled (%s)", s->name,
+                strerror(errno));
+    return p;
+}
+
+static void pane_alloc_undo(pane *p) {
+    vt_free(p->vt);
+    p->vt = NULL;
+    sb_close(p->sb);
+    p->sb = NULL;
+    p->in_use = false;
+}
+
+/* Push what is still on the visible screen into scrollback.
+ *
+ * scrollback only ever received lines that scrolled off, so anything still
+ * on screen when a session ended was lost outright: a child that printed a
+ * short fatal message and exited left `history` returning zero bytes, while
+ * the identical message survived if 100 filler lines had pushed it off. For
+ * this project that inverts the priority — the last screen of a crashed AI
+ * agent is the single most valuable thing to recover.
+ *
+ * Trailing blank lines are trimmed so an idle 24-row screen does not append
+ * 20 empty records per session. Panes ending on the alternate screen are
+ * skipped: vt_line() exposes the active grid, and scrollback holds
+ * primary-screen content only (vt.h), so flushing vim's or htop's live UI
+ * here would both break that contract and bury the useful history. The cost
+ * is that a pane dying inside vim also loses the primary lines still on
+ * screen — vt_line() cannot reach the inactive grid. Lines that had already
+ * scrolled off are unaffected either way. */
+static void pane_flush_screen(pane *p) {
+    if (!p->vt || !p->sb) return;
+    if (vt_get_modes(p->vt) & VT_MODE_ALTSCREEN) return;
+    uint16_t rows = 0, cols = 0;
+    vt_get_size(p->vt, &rows, &cols);
+    uint16_t last = 0; /* one past the final non-blank row */
+    for (uint16_t r = 0; r < rows; r++) {
+        const vt_cell *line = vt_line(p->vt, r);
+        if (!line) continue;
+        for (uint16_t c = 0; c < cols; c++)
+            if (line[c].cp != 0 && line[c].cp != ' ') { last = (uint16_t)(r + 1); break; }
+    }
+    for (uint16_t r = 0; r < last; r++) {
+        const vt_cell *line = vt_line(p->vt, r);
+        if (line) sb_push_line(p->sb, line, cols);
+    }
+}
+
+static void pane_free_slot(pane *p) {
+    pane_flush_screen(p); /* before vt_free/sb_close destroy both sides */
+    if (p->child.master_fd >= 0) {
+        loop_del_fd(p->child.master_fd);
+        close(p->child.master_fd);
+        p->child.master_fd = -1;
+    }
+    vt_free(p->vt);
+    p->vt = NULL;
+    sb_close(p->sb);
+    p->sb = NULL;
+    p->in_use = false;
+}
+
+/* ---- session lifecycle ---- */
+
 static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
     if (session_find(name)) { errno = EEXIST; return NULL; }
     session *s = NULL;
@@ -109,33 +228,32 @@ static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
 
     memset(s, 0, sizeof *s);
     strncpy(s->name, name, SESSION_NAME_MAX);
-    s->cols = cols ? cols : 80;
-    s->rows = rows ? rows : 24;
-
-    vt_callbacks cb = {
-        .on_response = vt_cb_response,
-        .on_scrollback_line = vt_cb_scrollback,
-        .on_title = vt_cb_title,
-        .on_bell = vt_cb_bell,
-        .on_passthrough = NULL, /* raw tee already forwards everything live */
-    };
-    s->vt = vt_new(s->rows, s->cols, &cb, s);
-    if (!s->vt) { errno = ENOMEM; return NULL; }
-    /* Best-effort: a session without persistent scrollback still works.
-     * sb_open resumes line_seq from what is on disk, which is what makes
-     * scrollback numbering continuous across a restart. */
-    s->sb = sb_open(s->name, 0, 0);
-    if (!s->sb)
-        log_msg(LOG_WARN, "session '%s': scrollback disabled (%s)", s->name,
-                strerror(errno));
+    s->view_cols = cols ? cols : 80;
+    s->view_rows = rows ? rows : 24;
     return s;
 }
 
-static void session_alloc_undo(session *s) {
-    vt_free(s->vt);
-    s->vt = NULL;
-    sb_close(s->sb);
-    s->sb = NULL;
+static void session_free_slot(session *s) {
+    /* Disconnect every attached client here, not only in session_kill: the
+     * reap path used to free the slot with s->clients[] and each client's
+     * c->attached still set. That is not a use-after-free — the slot lives in
+     * static g_sessions — which is exactly what made it dangerous: once the
+     * slot is reused, the stale pointer aliases a live *different* session,
+     * and a client of the dead one can inject stdin into, resize, and read
+     * scrollback from a session it never attached to.
+     *
+     * The order is load-bearing: null the table entry first, then disconnect,
+     * because client_disconnect → session_detach iterates the same table this
+     * loop is clearing. sb_flush inside session_detach is safe — the panes'
+     * sbs are closed below, after this loop. */
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i]) {
+            struct client *c = s->clients[i];
+            s->clients[i] = NULL;
+            client_disconnect(c);
+        }
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use) pane_free_slot(&s->panes[i]);
     s->in_use = false;
 }
 
@@ -143,30 +261,35 @@ session *session_new(const char *name, char *const argv[], uint16_t cols, uint16
     session *s = session_alloc(name, cols, rows);
     if (!s) return NULL;
 
-    if (pty_spawn(&s->child, argv, s->cols, s->rows, "xterm-256color") != 0) {
+    pane *p = pane_alloc(s, s->view_cols, s->view_rows);
+    if (!p) return NULL;
+
+    if (pty_spawn(&p->child, argv, p->cols, p->rows, "xterm-256color") != 0) {
         int saved = errno;
-        session_alloc_undo(s);
+        pane_alloc_undo(p);
         errno = saved;
         return NULL;
     }
+    p->in_use = true;
     s->in_use = true;
-    if (loop_add_fd(s->child.master_fd, POLLIN, session_pty_readable, s) != 0) {
+    if (loop_add_fd(p->child.master_fd, POLLIN, pane_pty_readable, p) != 0) {
         /* Out of poll slots. The child exists but nothing would ever read its
          * output, so it would fill the PTY buffer and block forever with no
          * visible cause. Kill it and report, rather than hand back a session
          * that silently does not work. */
         int saved = errno;
         log_msg(LOG_ERR, "session '%s': no event-loop slot for fd %d", s->name,
-                s->child.master_fd);
-        kill(s->child.pid, SIGHUP);
-        close(s->child.master_fd);
-        s->child.master_fd = -1;
-        session_alloc_undo(s);
+                p->child.master_fd);
+        kill(p->child.pid, SIGHUP);
+        close(p->child.master_fd);
+        p->child.master_fd = -1;
+        pane_alloc_undo(p);
+        s->in_use = false;
         errno = saved ? saved : ENOSPC;
         return NULL;
     }
-    log_msg(LOG_INFO, "session '%s': pid %d on fd %d", s->name, (int)s->child.pid,
-            s->child.master_fd);
+    log_msg(LOG_INFO, "session '%s': pid %d on fd %d", s->name, (int)p->child.pid,
+            p->child.master_fd);
     return s;
 }
 
@@ -175,16 +298,20 @@ session *session_import(const char *name, int master_fd, pid_t pid, uint16_t col
     session *s = session_alloc(name, cols, rows);
     if (!s) return NULL;
 
-    s->child.master_fd = master_fd;
-    s->child.pid = pid;
+    pane *p = pane_alloc(s, s->view_cols, s->view_rows);
+    if (!p) return NULL;
+
+    p->child.master_fd = master_fd;
+    p->child.pid = pid;
+    p->in_use = true;
     s->in_use = true;
 
     /* Replay the pre-restart screen. vt_feed on a snapshot blob is the same
      * round-trip a reattaching client already relies on, so there is no second
      * serialization format here to keep correct. */
-    if (blob_len && s->vt) vt_feed(s->vt, blob, blob_len);
+    if (blob_len && p->vt) vt_feed(p->vt, blob, blob_len);
 
-    if (loop_add_fd(master_fd, POLLIN, session_pty_readable, s) != 0) {
+    if (loop_add_fd(master_fd, POLLIN, pane_pty_readable, p) != 0) {
         int saved = errno;
         /* Do NOT kill the child or close the master here. The child is alive
          * and predates us; dropping the fd is what sends it SIGHUP. Better to
@@ -198,81 +325,16 @@ session *session_import(const char *name, int master_fd, pid_t pid, uint16_t col
     /* Re-apply geometry: the state file's cols/rows are authoritative, and the
      * PTY already has them, but a client that resized during the gap did not
      * reach us. Harmless when they match — pty_resize is idempotent. */
-    pty_resize(master_fd, s->cols, s->rows);
+    pty_resize(master_fd, p->cols, p->rows);
     log_msg(LOG_INFO, "session '%s': restored pid %d on fd %d (%ux%u, %zu-byte screen)",
-            s->name, (int)pid, master_fd, s->cols, s->rows, blob_len);
+            s->name, (int)pid, master_fd, p->cols, p->rows, blob_len);
     return s;
 }
 
-/* Push what is still on the visible screen into scrollback.
- *
- * scrollback only ever received lines that scrolled off, so anything still
- * on screen when a session ended was lost outright: a child that printed a
- * short fatal message and exited left `history` returning zero bytes, while
- * the identical message survived if 100 filler lines had pushed it off. For
- * this project that inverts the priority — the last screen of a crashed AI
- * agent is the single most valuable thing to recover.
- *
- * Trailing blank lines are trimmed so an idle 24-row screen does not append
- * 20 empty records per session. Sessions ending on the alternate screen are
- * skipped: vt_line() exposes the active grid, and scrollback holds
- * primary-screen content only (vt.h), so flushing vim's or htop's live UI
- * here would both break that contract and bury the useful history. The cost
- * is that a session dying inside vim also loses the primary lines still on
- * screen — vt_line() cannot reach the inactive grid. Lines that had already
- * scrolled off are unaffected either way. */
-static void session_flush_screen(session *s) {
-    if (!s->vt || !s->sb) return;
-    if (vt_get_modes(s->vt) & VT_MODE_ALTSCREEN) return;
-    uint16_t rows = 0, cols = 0;
-    vt_get_size(s->vt, &rows, &cols);
-    uint16_t last = 0; /* one past the final non-blank row */
-    for (uint16_t r = 0; r < rows; r++) {
-        const vt_cell *line = vt_line(s->vt, r);
-        if (!line) continue;
-        for (uint16_t c = 0; c < cols; c++)
-            if (line[c].cp != 0 && line[c].cp != ' ') { last = (uint16_t)(r + 1); break; }
-    }
-    for (uint16_t r = 0; r < last; r++) {
-        const vt_cell *line = vt_line(s->vt, r);
-        if (line) sb_push_line(s->sb, line, cols);
-    }
-}
-
-static void session_free_slot(session *s) {
-    session_flush_screen(s); /* before vt_free/sb_close destroy both sides */
-    /* Disconnect every attached client here, not only in session_kill: the
-     * reap path used to free the slot with s->clients[] and each client's
-     * c->attached still set. That is not a use-after-free — the slot lives in
-     * static g_sessions — which is exactly what made it dangerous: once the
-     * slot is reused, the stale pointer aliases a live *different* session,
-     * and a client of the dead one can inject stdin into, resize, or read
-     * scrollback from a session it never attached to.
-     *
-     * The order is load-bearing: null the table entry first, then disconnect,
-     * because client_disconnect → session_detach iterates the same table this
-     * loop is clearing. sb_flush inside session_detach is safe — s->sb is
-     * closed below, after this loop. */
-    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
-        if (s->clients[i]) {
-            struct client *c = s->clients[i];
-            s->clients[i] = NULL;
-            client_disconnect(c);
-        }
-    if (s->child.master_fd >= 0) {
-        loop_del_fd(s->child.master_fd);
-        close(s->child.master_fd);
-        s->child.master_fd = -1;
-    }
-    vt_free(s->vt);
-    s->vt = NULL;
-    sb_close(s->sb);
-    s->sb = NULL;
-    s->in_use = false;
-}
-
 void session_kill(session *s) {
-    if (s->child.pid > 0) kill(s->child.pid, SIGHUP);
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use && s->panes[i].child.pid > 0)
+            kill(s->panes[i].child.pid, SIGHUP);
     session_free_slot(s); /* also disconnects every attached client */
 }
 
@@ -282,34 +344,51 @@ void session_reap_children(void) {
     while ((pid = waitpid(-1, &st, WNOHANG)) > 0) {
         for (int i = 0; i < MAX_SESSIONS; i++) {
             session *s = &g_sessions[i];
-            if (!s->in_use || s->child.pid != pid) continue;
-            s->child.pid = -1;
-            s->exit_status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-            log_msg(LOG_INFO, "session '%s': child exited %d", s->name, s->exit_status);
-            uint8_t payload[4];
-            put_u32(payload, (uint32_t)s->exit_status);
-            for (int j = 0; j < MAX_CLIENTS_PER_SESSION; j++)
-                if (s->clients[j])
-                    client_send(s->clients[j], MSG_SESSION_EXITED, payload, 4);
-            /* Freeing here means `ls` never reports a session as dead — the
-             * client's "dead (exit N)" branch is unreachable, and that is
-             * intentional for v1. session_free_slot flushes the final screen
-             * to scrollback first, so `history` still recovers it. */
-            session_free_slot(s);
+            if (!s->in_use) continue;
+            for (int j = 0; j < MAX_PANES_PER_SESSION; j++) {
+                pane *p = &s->panes[j];
+                if (!p->in_use || p->child.pid != pid) continue;
+                p->child.pid = -1;
+                p->exit_status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+                log_msg(LOG_INFO, "session '%s': child exited %d", s->name,
+                        p->exit_status);
+                uint8_t payload[4];
+                put_u32(payload, (uint32_t)p->exit_status);
+                /* Until splits exist a session has exactly one pane, so its
+                 * child exiting is the session exiting. With ≥2 panes this
+                 * becomes MSG_PANE_EXITED + sibling-absorbs-space (5c); the
+                 * session dies only with its last pane. */
+                for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
+                    if (s->clients[k])
+                        client_send(s->clients[k], MSG_SESSION_EXITED, payload, 4);
+                pane_free_slot(p);
+                bool any = false;
+                for (int k = 0; k < MAX_PANES_PER_SESSION; k++)
+                    if (s->panes[k].in_use) { any = true; break; }
+                /* Freeing here means `ls` never reports a session as dead —
+                 * the client's "dead (exit N)" branch is unreachable, and that
+                 * is intentional for v1. pane_free_slot flushed the final
+                 * screen to scrollback first, so `history` still recovers it. */
+                if (!any) session_free_slot(s);
+            }
         }
     }
 }
 
-static void session_pty_readable(int fd, short revents, void *ud) {
-    session *s = ud;
+static void pane_pty_readable(int fd, short revents, void *ud) {
+    pane *p = ud;
+    session *s = p->sess;
     (void)revents;
     uint8_t buf[16384];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof buf);
         if (n > 0) {
             /* VT engine tracks screen state (snapshot source on reattach);
-             * attached clients get the same bytes raw (perfect fidelity). */
-            if (s->vt) vt_feed(s->vt, buf, (size_t)n);
+             * attached clients get the same bytes raw (perfect fidelity).
+             * This raw tee is the single-pane fast path and must survive 5c
+             * unchanged: at one pane it has perfect fidelity for free, and
+             * the byte-identical guard test pins it. */
+            if (p->vt) vt_feed(p->vt, buf, (size_t)n);
             for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
                 if (s->clients[i])
                     client_send(s->clients[i], MSG_OUTPUT, buf, (uint32_t)n);
@@ -346,8 +425,9 @@ void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) 
             session_resize(s, cols, rows);
             /* Real grid snapshot: repaint blob restores screen content,
              * cursor, and tracked modes exactly as the app left them. */
+            pane *p = session_active_pane(s);
             char *blob = NULL;
-            size_t blob_len = s->vt ? vt_snapshot(s->vt, &blob) : 0;
+            size_t blob_len = (p && p->vt) ? vt_snapshot(p->vt, &blob) : 0;
             static const char fallback[] = "\x1b[0m\x1b[2J\x1b[H";
             const char *body = blob_len ? blob : fallback;
             size_t body_len = blob_len ? blob_len : sizeof fallback - 1;
@@ -355,9 +435,9 @@ void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) 
             size_t first = body_len < SNAPSHOT_BODY_MAX ? body_len : SNAPSHOT_BODY_MAX;
             size_t payload_len = 12 + first;
             uint8_t *payload = xmalloc(payload_len);
-            put_u16(payload, s->cols);
-            put_u16(payload + 2, s->rows);
-            put_u64(payload + 4, sb_total_lines(s->sb));
+            put_u16(payload, s->view_cols);
+            put_u16(payload + 2, s->view_rows);
+            put_u64(payload + 4, p ? sb_total_lines(p->sb) : 0);
             memcpy(payload + 12, body, first);
             client_send(c, MSG_SNAPSHOT, payload, (uint32_t)payload_len);
             free(payload);
@@ -380,28 +460,41 @@ void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) 
 void session_detach(session *s, struct client *c) {
     for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
         if (s->clients[i] == c) s->clients[i] = NULL;
-    sb_flush(s->sb); /* detach is a durability point */
+    /* Detach is a durability point. */
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use) sb_flush(s->panes[i].sb);
 }
 
-void session_stdin(session *s, const uint8_t *data, uint32_t len) {
-    if (s->child.master_fd < 0) return;
+static void pane_stdin(pane *p, const uint8_t *data, uint32_t len) {
+    if (p->child.master_fd < 0) return;
     /* PTY master write; kernel buffers. Short writes under flood are
      * tolerable for keyboard input in M1; M3 adds a staging ring. */
     ssize_t off = 0;
     while (off < (ssize_t)len) {
-        ssize_t n = write(s->child.master_fd, data + off, len - (size_t)off);
+        ssize_t n = write(p->child.master_fd, data + off, len - (size_t)off);
         if (n > 0) { off += n; continue; }
         if (n < 0 && errno == EINTR) continue;
         break;
     }
 }
 
+void session_stdin(session *s, const uint8_t *data, uint32_t len) {
+    pane *p = session_active_pane(s);
+    if (p) pane_stdin(p, data, len);
+}
+
 void session_resize(session *s, uint16_t cols, uint16_t rows) {
-    if (!cols || !rows || (cols == s->cols && rows == s->rows)) return;
-    s->cols = cols;
-    s->rows = rows;
+    if (!cols || !rows || (cols == s->view_cols && rows == s->view_rows)) return;
+    s->view_cols = cols;
+    s->view_rows = rows;
+    /* One pane fills the whole view, so the geometries coincide. The split
+     * tree (5c) is what will make pane geometry diverge from view geometry. */
+    pane *p = session_active_pane(s);
+    if (!p) return;
+    p->cols = cols;
+    p->rows = rows;
     /* Grid reflow first, then TIOCSWINSZ (SIGWINCH makes the app repaint
      * into the new geometry). */
-    if (s->vt) vt_resize(s->vt, rows, cols);
-    if (s->child.master_fd >= 0) pty_resize(s->child.master_fd, cols, rows);
+    if (p->vt) vt_resize(p->vt, rows, cols);
+    if (p->child.master_fd >= 0) pty_resize(p->child.master_fd, cols, rows);
 }
