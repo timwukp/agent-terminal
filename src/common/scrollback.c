@@ -362,15 +362,24 @@ static int64_t read_one_log(const char *path, sb_read_cb cb, void *ud) {
 }
 
 int64_t sb_read_log(const char *session_name, sb_read_cb cb, void *ud) {
+    return sb_read_log_pane(session_name, 0, cb, ud);
+}
+
+int64_t sb_read_log_pane(const char *session_name, uint8_t pane_id,
+                         sb_read_cb cb, void *ud) {
     char dir[600];
     if (session_dir(session_name, dir, sizeof dir) != 0) return -1;
-    char path[664];
+    char base[664];
+    if (pane_id == 0)
+        snprintf(base, sizeof base, "%s/scrollback.log", dir);
+    else
+        snprintf(base, sizeof base, "%s/pane%u.log", dir, pane_id);
+    char path[672];
     int64_t total = -1;
     /* Older generation first so lines stream in order. */
-    snprintf(path, sizeof path, "%s/scrollback.log.1", dir);
+    snprintf(path, sizeof path, "%s.1", base);
     int64_t a = read_one_log(path, cb, ud);
-    snprintf(path, sizeof path, "%s/scrollback.log", dir);
-    int64_t b = read_one_log(path, cb, ud);
+    int64_t b = read_one_log(base, cb, ud);
     if (a >= 0 || b >= 0) total = (a > 0 ? a : 0) + (b > 0 ? b : 0);
     return total;
 }

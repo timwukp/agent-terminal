@@ -64,6 +64,9 @@ void sb_flush(scrollback *sb);
  * does not require an open scrollback. Returns lines read, -1 if no log. */
 typedef void (*sb_read_cb)(void *ud, uint64_t seq, const char *text, uint32_t len);
 int64_t sb_read_log(const char *session_name, sb_read_cb cb, void *ud);
+/* Pane variant; pane 0 reads the same files sb_read_log reads. */
+int64_t sb_read_log_pane(const char *session_name, uint8_t pane_id,
+                         sb_read_cb cb, void *ud);
 
 /* List session names that have scrollback logs on disk. Fills names as a
  * NUL-separated buffer; returns count. */

@@ -80,6 +80,20 @@ static void raise_nofile_limit(void) {
             (unsigned long long)old, (unsigned long long)want);
 }
 
+/* 20 ms compositing tick. The scrollback flush is gated on WALL time, not a
+ * tick count: a delayed tick must not stretch the documented 1 s durability
+ * window. session_composite_all returns immediately when nothing is dirty,
+ * so the idle cost of the faster tick is one scan. */
+static void daemon_tick(void) {
+    static uint64_t last_flush;
+    session_composite_all();
+    uint64_t now = now_ms();
+    if (now - last_flush >= 1000) {
+        session_flush_all();
+        last_flush = now;
+    }
+}
+
 /* Every disposition below is reset to SIG_DFL by execve — the signal *mask*
  * survives, the handlers do not. So this runs again in the new image, and a
  * daemon that skipped it would take the default action on the next SIGHUP and
@@ -207,7 +221,7 @@ int main(int argc, char **argv) {
         log_msg(LOG_INFO, "agent-terminald listening on %s", sock);
 
     for (;;) {
-        loop_set_tick(1000, session_flush_all); /* 1s durability window */
+        loop_set_tick(20, daemon_tick); /* composite pacing; 1s flush inside */
         loop_run();
         if (!handoff_take_request()) break;
         /* handoff_exec does not return on success. On failure it has already

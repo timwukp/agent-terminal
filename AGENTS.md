@@ -246,6 +246,47 @@ SGR changing per cell) made `client_send` disconnect the very client it was
 repainting, which the reconnect loop turned into an attach loop
 (`tests/integration/test_snapshot_large.sh`).
 
+### Panes
+
+Compositing lives in the daemon and a composited frame is an ANSI byte blob —
+the same kind of thing as a snapshot — so it rides `MSG_OUTPUT` and needs no
+client rendering code. New messages exist only for control (`MSG_SPLIT_PANE`,
+`MSG_CLOSE_PANE`, `MSG_SELECT_PANE`) and metadata (`MSG_LAYOUT`,
+`MSG_PANE_EXITED`), gated by `CLIENT_CAP_PANES` in `MSG_HELLO`'s flags.
+
+Load-bearing rules, each pinned by a test:
+
+- **At exactly one pane the raw PTY tee runs unchanged.** Its bytes are a
+  compatibility surface, pinned byte-for-byte against
+  `tests/data/golden/single_pane_stream.bin` by `test_panes_compat.sh`
+  (regen deliberately with `REGEN_GOLDEN=1`). Compositing engages at ≥2.
+- **The composite runs with autowrap off (`?7l`) and no scroll region
+  (`\x1b[r`)**, and every transition back to one pane re-arms `?7h` — a
+  terminal left wrap-less is broken in a way users cannot diagnose
+  (`test_panes_reap.sh` greps for it).
+- **`\x1b[K` is unusable in a pane row** — EL erases to the *terminal's*
+  right margin, wiping the pane to the right. Trailing blanks are literal
+  spaces carrying the correct bg (mutation-tested via `test_panes.sh`).
+- **Damage, not full repaints, drives steady-state frames**: `libvt` keeps a
+  row-dirty bitmap (`vt_any_dirty` / `vt_row_dirty` / `vt_damage_clear`).
+  Reading damage does not clear it — with several attached clients a
+  clear-on-read for one would blank the frame for the rest; the caller
+  clears once per composited frame. The equivalence test in `test_vt.c`
+  (full render vs dirty-rows-only over every case) is what catches a missed
+  `mark_row`, which is otherwise silent visual corruption.
+- **Geometry**: last-resize-wins at one pane (unchanged); smallest attached
+  client wins at ≥2, or the composite would paint outside a smaller
+  client's screen. A shrink the split tree cannot satisfy clamps panes to
+  ≥1×1 and keeps rendering — destroying a pane on resize is data loss.
+- **Wire ids are not slot indices**: pane 0 is forever the first pane (its
+  scrollback file is the pre-pane `scrollback.log`); split panes draw ids
+  1..254 round-robin so an in-flight close can never kill a reused slot's
+  new tenant; 255 means "active". Per-pane history lives in
+  `pane<id>.log` — the id goes in the *filename* because session names are
+  validated to one path component.
+- **Copy-mode follows the active pane** (`MSG_LAYOUT` carries the id; the
+  client passes it back in `MSG_SCROLLBACK_REQ`'s appended byte).
+
 ## 5. Working on the code
 
 ### Layout
@@ -253,7 +294,7 @@ repainting, which the reconnect loop turned into an attach loop
 | Path | Contents |
 |---|---|
 | `src/vt/` | VT engine → `libvt.a`. **No I/O, no syscalls**; effects only via `vt_callbacks`. The untrusted-input surface. |
-| `src/daemon/` | event loop, unix socket server, sessions, PTY, plus the in-place restart handoff (`handoff.c`) and single-instance lock (`lockfile.c`) |
+| `src/daemon/` | event loop, unix socket server, sessions/panes, PTY, the split tree (`layout.c`), the compositor (`composite.c`), plus the in-place restart handoff (`handoff.c`) and single-instance lock (`lockfile.c`) |
 | `src/client/` | thin client, termios raw mode, attach loop, scrollback copy-mode (`pager.c` — the only client code with a view of its own) |
 | `src/common/` | wire protocol, ring buffer, scrollback, paths |
 | `tests/unit/` | table-driven; `runner.h` is the whole framework |

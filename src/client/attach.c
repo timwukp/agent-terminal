@@ -56,7 +56,7 @@ static int hello(int fd) {
     ring_init(&out, 64, 0);
     uint8_t p[4];
     put_u16(p, PROTO_VERSION);
-    put_u16(p + 2, 0);
+    put_u16(p + 2, CLIENT_CAP_PANES);
     proto_write_frame(&out, MSG_HELLO, p, 4);
     uint8_t buf[64];
     size_t n = ring_read(&out, buf, sizeof buf);
@@ -139,7 +139,17 @@ typedef struct {
     uint64_t armed_at;
 } chord;
 
-typedef enum { SCAN_NONE, SCAN_DETACH, SCAN_COPY_MODE } scan_result;
+typedef enum {
+    SCAN_NONE, SCAN_DETACH, SCAN_COPY_MODE,
+    /* pane chords; all single-byte, because scan_input consumes exactly one
+     * byte after the prefix (directional arrows need a sub-state machine and
+     * are a separate PR) */
+    SCAN_SPLIT_STACKED,   /* Ctrl-\ "  — one above the other */
+    SCAN_SPLIT_SIDE,      /* Ctrl-\ %  — side by side */
+    SCAN_PANE_NEXT,       /* Ctrl-\ o */
+    SCAN_PANE_LAST,       /* Ctrl-\ ; */
+    SCAN_PANE_CLOSE,      /* Ctrl-\ x */
+} scan_result;
 
 /* Forwardable bytes land in fwd (caller-sized >= 2*len). *fwdlen is always
  * assigned, and bytes seen before a chord completes are kept: returning early
@@ -154,6 +164,11 @@ static scan_result scan_input(chord *ch, const uint8_t *in, size_t len, uint8_t 
             ch->armed = 0;
             if (b == KEY_CTRL_D) { *fwdlen = o; *consumed = i + 1; return SCAN_DETACH; }
             if (b == KEY_COPY_MODE) { *fwdlen = o; *consumed = i + 1; return SCAN_COPY_MODE; }
+            if (b == '"') { *fwdlen = o; *consumed = i + 1; return SCAN_SPLIT_STACKED; }
+            if (b == '%') { *fwdlen = o; *consumed = i + 1; return SCAN_SPLIT_SIDE; }
+            if (b == 'o') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_NEXT; }
+            if (b == ';') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_LAST; }
+            if (b == 'x') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_CLOSE; }
             fwd[o++] = KEY_CTRL_BACKSLASH; /* forward the swallowed byte */
             fwd[o++] = b;
             continue;
@@ -230,10 +245,14 @@ static int send_new(int fd, const char *name, char *const argv[], int argc,
     return send_frame(fd, MSG_NEW_SESSION, p, off + abytes);
 }
 
-static int send_scrollback_req(int fd, uint64_t start_seq, uint32_t max_lines) {
-    uint8_t p[12];
+static int send_scrollback_req(int fd, uint64_t start_seq, uint32_t max_lines,
+                               uint8_t pane_id) {
+    /* pane_id is a true append: the pre-pane payload was a fixed 12 bytes,
+     * so an old daemon skips the 13th byte and serves the active pane. */
+    uint8_t p[13];
     put_u64(p, start_seq);
     put_u32(p + 8, max_lines);
+    p[12] = pane_id;
     return send_frame(fd, MSG_SCROLLBACK_REQ, p, sizeof p);
 }
 
@@ -296,6 +315,7 @@ int attach_run(const char *name, char *const argv[], int argc) {
         chord ch = {0};
         int detached = 0, exited = 0, exit_code = 0, conn_lost = 0;
         uint64_t sb_lines = 0; /* daemon's scrollback total, from MSG_SNAPSHOT */
+        uint8_t active_pane = 0; /* from MSG_LAYOUT; 0 == pane 0 == pre-pane */
 
         while (!detached && !exited && !conn_lost) {
             struct pollfd pfds[3] = {
@@ -393,6 +413,33 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             conn_lost = 1;
                         if (sr == SCAN_DETACH) {
                             detached = 1;
+                        } else if (sr != SCAN_NONE && sr != SCAN_COPY_MODE && !conn_lost) {
+                            uint8_t pp[2];
+                            int prc = 0;
+                            switch (sr) {
+                            case SCAN_SPLIT_STACKED:
+                                pp[0] = 1; pp[1] = 255;
+                                prc = send_frame(fd, MSG_SPLIT_PANE, pp, 2);
+                                break;
+                            case SCAN_SPLIT_SIDE:
+                                pp[0] = 0; pp[1] = 255;
+                                prc = send_frame(fd, MSG_SPLIT_PANE, pp, 2);
+                                break;
+                            case SCAN_PANE_NEXT:
+                                pp[0] = 1; pp[1] = 0;
+                                prc = send_frame(fd, MSG_SELECT_PANE, pp, 2);
+                                break;
+                            case SCAN_PANE_LAST:
+                                pp[0] = 3; pp[1] = 0;
+                                prc = send_frame(fd, MSG_SELECT_PANE, pp, 2);
+                                break;
+                            case SCAN_PANE_CLOSE:
+                                pp[0] = 255;
+                                prc = send_frame(fd, MSG_CLOSE_PANE, pp, 1);
+                                break;
+                            default: break;
+                            }
+                            if (prc != 0) conn_lost = 1;
                         } else if (sr == SCAN_COPY_MODE && !conn_lost) {
                             pg = pager_new();
                             /* The on-disk log holds all history including the
@@ -400,11 +447,11 @@ int attach_run(const char *name, char *const argv[], int argc) {
                              * the tail not yet flushed. Read disk first, then
                              * ask for the remainder — pager_add_line drops the
                              * overlap by seq. */
-                            pager_load_disk(pg, name);
+                            pager_load_disk_pane(pg, name, active_pane);
                             pager_enter(pg, cols, rows, sb_lines);
                             uint64_t want = pager_want_from(pg);
                             if (want != UINT64_MAX &&
-                                send_scrollback_req(fd, want, 1000) != 0)
+                                send_scrollback_req(fd, want, 1000, active_pane) != 0)
                                 conn_lost = 1;
                             /* Bytes typed after the chord in the same batch are
                              * pager input, not child input. */
@@ -496,11 +543,21 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             }
                             pager_add_batch_done(pg, got);
                             uint64_t want = pager_want_from(pg);
-                            if (want != UINT64_MAX && send_scrollback_req(fd, want, 1000) != 0)
+                            if (want != UINT64_MAX &&
+                                send_scrollback_req(fd, want, 1000, active_pane) != 0)
                                 conn_lost = 1;
                             pager_draw(pg);
                             break;
                         }
+                        case MSG_LAYOUT:
+                            /* u16 view_cols, u16 view_rows, u8 active_id, ...
+                             * Copy-mode needs the active id so Ctrl-\ [ from
+                             * pane 3 shows pane 3's history, not pane 0's. */
+                            if (len >= 5) active_pane = scratch[4];
+                            break;
+                        case MSG_PANE_EXITED:
+                            /* Informational; the daemon already recomposited. */
+                            break;
                         case MSG_SESSION_EXITED:
                             exited = 1;
                             exit_code = len >= 4 ? (int)get_u32(scratch) : 0;

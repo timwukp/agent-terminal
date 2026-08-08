@@ -164,6 +164,10 @@ int64_t pager_load_disk(pager *pg, const char *session_name) {
     return sb_read_log(session_name, disk_line, pg);
 }
 
+int64_t pager_load_disk_pane(pager *pg, const char *session_name, uint8_t pane_id) {
+    return sb_read_log_pane(session_name, pane_id, disk_line, pg);
+}
+
 uint64_t pager_want_from(const pager *pg) { return pg->want_from; }
 
 void pager_add_batch_done(pager *pg, uint32_t nlines_received) {

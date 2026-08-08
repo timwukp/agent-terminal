@@ -14,6 +14,11 @@ void client_disconnect(struct client *c); /* slow-consumer / protocol errors */
  * backlog). Lets a caller streaming multiple frames stop early instead of
  * serializing into a slot that was already torn down. */
 bool client_alive(const struct client *c);
+/* True if the client's HELLO set CLIENT_CAP_PANES: gates MSG_LAYOUT /
+ * MSG_PANE_EXITED delivery. Composited output goes to everyone regardless. */
+bool client_wants_panes(const struct client *c);
+/* Terminal geometry the client last reported (HELLO's ATTACH/RESIZE). */
+void client_geometry(const struct client *c, uint16_t *cols, uint16_t *rows);
 
 /* Bind and listen. If inherited_fd >= 0 it is an already-bound listener passed
  * across the daemon's own re-exec: adopt it instead of rebinding, so the socket

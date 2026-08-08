@@ -99,6 +99,16 @@ A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
 must be a single path component: no `/`, no leading `.`, max 63 bytes. Interior
 dots (`build_2026.08`) and non-ASCII (`日本語`) are fine. Invalid names exit 1.
 
+### Panes
+
+`Ctrl-\ "` and `Ctrl-\ %` split the active pane (top/bottom and side by
+side); each pane is its own child process with its own screen and its own
+scrollback history. The daemon composites the panes and draws the dividers,
+so reattach after a crash restores the whole split exactly, and even an
+older client renders a split session correctly — composited frames ride the
+ordinary output path. Input, mouse reporting and bracketed paste follow the
+**active** pane.
+
 ### Key bindings
 
 - **`Ctrl-\` then `Ctrl-d`** — detach, leaving the session running.
@@ -107,6 +117,13 @@ dots (`build_2026.08`) and non-ASCII (`日本語`) are fine. Invalid names exit 
 - **`Ctrl-\` then `[`** — enter copy-mode to page through scrollback
   without detaching. The session keeps running; output produced while
   paging is skipped, and exiting repaints from a fresh daemon snapshot.
+  With panes, copy-mode shows the **active** pane's history.
+- **`Ctrl-\` then `"`** — split the active pane top/bottom.
+- **`Ctrl-\` then `%`** — split the active pane side by side.
+- **`Ctrl-\` then `o`** — focus the next pane; **`;`** the previous one
+  (most recently active); **`x`** close the active pane. Closing the last
+  pane ends the session. A split is refused (with an error) when the pane
+  is smaller than 2×20 columns / 2×3 rows plus a divider.
 
 Inside copy-mode:
 
@@ -189,8 +206,10 @@ vulnerabilities. Highlights:
 
 ## Limitations (v1, by design)
 
-- One child process per session — no panes/windows/splits (the protocol
-  reserves a `pane_id` byte for a future v2).
+- Panes have no directional (arrow-key) selection, no zoom, and do not
+  appear in `ls`; there are no windows/tabs — one session is one visible
+  surface. Splits also stop at 6 panes per session, and a pane below
+  20×3 plus a divider refuses to split further.
 - A daemon **crash** still kills child processes. A daemon **restart** no
   longer does: `agent-terminal reload` (or `SIGHUP`) re-execs the daemon in
   place, so the pid never changes, no PTY master fd is ever closed, no child

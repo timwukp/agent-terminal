@@ -11,9 +11,16 @@
  *   20     4    generation (incremented by the importing image)
  *   24     ...  session records
  *
- * Session record:
- *   u8 name_len, name bytes, i32 master_fd, i32 pid, u16 cols, u16 rows,
- *   u32 blob_len, blob bytes
+ * Session record (version 2 — grew panes; a v1 file is refused, which only
+ * matters for the exec-window of a binary swap mid-reload):
+ *   u8 name_len, name bytes, u16 view_cols, u16 view_rows,
+ *   u8 active_id, u8 last_id, u8 next_id, u8 npanes,
+ *   layout: i8 root, LAYOUT_NODES x {u8 flags(bit0 in_use, bit1 leaf,
+ *     bit2 stacked), i8 pane_idx, i8 child0, i8 child1, u16 x, u16 y,
+ *     u16 cols, u16 rows},
+ *   then npanes x pane record:
+ *     u8 slot, u8 id, i32 master_fd, i32 pid, u16 cols, u16 rows,
+ *     u16 x, u16 y, u32 blob_len, blob bytes
  *
  * There is deliberately no checksum. The file lives 0600 inside a 0700
  * runtime dir this daemon owns, exists for the microseconds between write and
@@ -45,7 +52,7 @@
 #include "session.h"
 
 #define HANDOFF_MAGIC   "ATHANDF"      /* 7 chars + implicit NUL = 8 bytes */
-#define HANDOFF_VERSION 1
+#define HANDOFF_VERSION 2
 #define HANDOFF_HDR     24
 
 /* A snapshot of the largest grid the engine allows (1000x1000) with truecolor
@@ -123,10 +130,11 @@ static int set_cloexec(int fd, bool on) {
 
 typedef struct {
     const session *s;
-    const pane *p; /* the session's single pane; the format grows a pane
-                    * count (new HANDOFF_VERSION) when splits land */
-    char *blob;
-    size_t blob_len;
+    const pane *panes[MAX_PANES_PER_SESSION]; /* live panes, slot order */
+    uint8_t slots[MAX_PANES_PER_SESSION];     /* their array slots */
+    char *blobs[MAX_PANES_PER_SESSION];
+    size_t blob_lens[MAX_PANES_PER_SESSION];
+    uint8_t npanes;
 } export_rec;
 
 static bool wr(FILE *f, const void *p, size_t n) { return fwrite(p, 1, n, f) == n; }
@@ -144,18 +152,53 @@ static bool write_state(FILE *f, const export_rec *recs, uint16_t n, int listen_
 
     for (uint16_t i = 0; i < n; i++) {
         const session *s = recs[i].s;
-        const pane *p = recs[i].p;
         size_t nlen = strlen(s->name);
-        uint8_t rec[1 + 4 + 4 + 2 + 2 + 4];
         uint8_t b = (uint8_t)nlen;
         if (!wr(f, &b, 1) || !wr(f, s->name, nlen)) return false;
-        put_u32(rec, (uint32_t)p->child.master_fd);
-        put_u32(rec + 4, (uint32_t)p->child.pid);
-        put_u16(rec + 8, p->cols);
-        put_u16(rec + 10, p->rows);
-        put_u32(rec + 12, (uint32_t)recs[i].blob_len);
-        if (!wr(f, rec, 16)) return false;
-        if (recs[i].blob_len && !wr(f, recs[i].blob, recs[i].blob_len)) return false;
+
+        uint8_t shdr[8];
+        put_u16(shdr, s->view_cols);
+        put_u16(shdr + 2, s->view_rows);
+        shdr[4] = s->active_id;
+        shdr[5] = s->last_id;
+        shdr[6] = s->next_id;
+        shdr[7] = recs[i].npanes;
+        if (!wr(f, shdr, sizeof shdr)) return false;
+
+        uint8_t lrec[1 + LAYOUT_NODES * 12];
+        lrec[0] = (uint8_t)s->lt.root;
+        for (int j = 0; j < LAYOUT_NODES; j++) {
+            const layout_node *ln = &s->lt.nodes[j];
+            uint8_t *q = lrec + 1 + j * 12;
+            q[0] = (uint8_t)((ln->in_use ? 1 : 0) | (ln->leaf ? 2 : 0) |
+                             (ln->stacked ? 4 : 0));
+            q[1] = (uint8_t)ln->pane_idx;
+            q[2] = (uint8_t)ln->child[0];
+            q[3] = (uint8_t)ln->child[1];
+            put_u16(q + 4, ln->x);
+            put_u16(q + 6, ln->y);
+            put_u16(q + 8, ln->cols);
+            put_u16(q + 10, ln->rows);
+        }
+        if (!wr(f, lrec, sizeof lrec)) return false;
+
+        for (uint8_t j = 0; j < recs[i].npanes; j++) {
+            const pane *p = recs[i].panes[j];
+            uint8_t prec[2 + 4 + 4 + 2 + 2 + 2 + 2 + 4];
+            prec[0] = recs[i].slots[j];
+            prec[1] = p->id;
+            put_u32(prec + 2, (uint32_t)p->child.master_fd);
+            put_u32(prec + 6, (uint32_t)p->child.pid);
+            put_u16(prec + 10, p->cols);
+            put_u16(prec + 12, p->rows);
+            put_u16(prec + 14, p->x);
+            put_u16(prec + 16, p->y);
+            put_u32(prec + 18, (uint32_t)recs[i].blob_lens[j]);
+            if (!wr(f, prec, sizeof prec)) return false;
+            if (recs[i].blob_lens[j] &&
+                !wr(f, recs[i].blobs[j], recs[i].blob_lens[j]))
+                return false;
+        }
     }
     return true;
 }
@@ -167,28 +210,41 @@ int handoff_exec(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         session *s = session_at(i);
         if (!s) continue;
-        pane *p = session_active_pane(s);
-        /* A session whose child is gone has nothing to keep alive, and a
-         * session with no master fd cannot be handed over. Neither state is
-         * reachable today (reaping frees the slot), so this is a guard, not a
-         * case: dropping such a session would silently lose it. */
-        if (!p || p->child.pid <= 0 || p->child.master_fd < 0) {
+        recs[n].s = s;
+        recs[n].npanes = 0;
+        for (int j = 0; j < MAX_PANES_PER_SESSION; j++) {
+            pane *p = &s->panes[j];
+            if (!p->in_use) continue;
+            /* A pane whose child is gone has nothing to keep alive, and one
+             * with no master fd cannot be handed over. Neither state is
+             * reachable today (reaping frees the pane), so this is a guard,
+             * not a case: dropping it silently would lose the pane. */
+            if (p->child.pid <= 0 || p->child.master_fd < 0) {
+                log_msg(LOG_WARN, "handoff: session '%s' pane %u has no live child, "
+                                  "not carried over", s->name, p->id);
+                continue;
+            }
+            uint8_t k = recs[n].npanes;
+            recs[n].panes[k] = p;
+            recs[n].slots[k] = (uint8_t)j;
+            recs[n].blobs[k] = NULL;
+            recs[n].blob_lens[k] = p->vt ? vt_snapshot(p->vt, &recs[n].blobs[k]) : 0;
+            if (recs[n].blob_lens[k] > HANDOFF_BLOB_MAX) {
+                /* Keep the child, lose the screen. The alternative — abort
+                 * the reload — leaves a daemon that cannot restart. */
+                log_msg(LOG_WARN, "handoff: session '%s' pane %u snapshot %zu bytes "
+                                  "exceeds cap, screen not carried over",
+                        s->name, p->id, recs[n].blob_lens[k]);
+                free(recs[n].blobs[k]);
+                recs[n].blobs[k] = NULL;
+                recs[n].blob_lens[k] = 0;
+            }
+            recs[n].npanes++;
+        }
+        if (recs[n].npanes == 0) {
             log_msg(LOG_WARN, "handoff: session '%s' has no live child, not carried over",
                     s->name);
             continue;
-        }
-        recs[n].s = s;
-        recs[n].p = p;
-        recs[n].blob = NULL;
-        recs[n].blob_len = p->vt ? vt_snapshot(p->vt, &recs[n].blob) : 0;
-        if (recs[n].blob_len > HANDOFF_BLOB_MAX) {
-            /* Keep the child, lose the screen. The alternative — abort the
-             * reload — leaves the operator with a daemon they cannot restart. */
-            log_msg(LOG_WARN, "handoff: session '%s' snapshot %zu bytes exceeds cap, "
-                              "screen not carried over", s->name, recs[n].blob_len);
-            free(recs[n].blob);
-            recs[n].blob = NULL;
-            recs[n].blob_len = 0;
         }
         n++;
     }
@@ -212,9 +268,11 @@ int handoff_exec(void) {
     bool cleared_listen = listen_fd >= 0 && set_cloexec(listen_fd, false) == 0;
     bool cleared_lock = g_lock_fd >= 0 && set_cloexec(g_lock_fd, false) == 0;
     for (uint16_t i = 0; i < n; i++)
-        if (set_cloexec(recs[i].p->child.master_fd, false) != 0)
-            log_msg(LOG_WARN, "handoff: session '%s': cannot clear FD_CLOEXEC on fd %d (%s)",
-                    recs[i].s->name, recs[i].p->child.master_fd, strerror(errno));
+        for (uint8_t j = 0; j < recs[i].npanes; j++)
+            if (set_cloexec(recs[i].panes[j]->child.master_fd, false) != 0)
+                log_msg(LOG_WARN, "handoff: session '%s': cannot clear FD_CLOEXEC on fd %d (%s)",
+                        recs[i].s->name, recs[i].panes[j]->child.master_fd,
+                        strerror(errno));
 
     int rc = -1;
     /* O_EXCL: a leftover state file means a previous reload died between write
@@ -260,10 +318,14 @@ done:
     /* Failed before exec: put every descriptor back the way it was so the
      * still-running daemon keeps its close-on-exec guarantees for the next
      * child it spawns. */
-    for (uint16_t i = 0; i < n; i++) set_cloexec(recs[i].p->child.master_fd, true);
+    for (uint16_t i = 0; i < n; i++)
+        for (uint8_t j = 0; j < recs[i].npanes; j++)
+            set_cloexec(recs[i].panes[j]->child.master_fd, true);
     if (cleared_listen) set_cloexec(listen_fd, true);
     if (cleared_lock) set_cloexec(g_lock_fd, true);
-    for (uint16_t i = 0; i < n; i++) free(recs[i].blob);
+    for (uint16_t i = 0; i < n; i++)
+        for (uint8_t j = 0; j < recs[i].npanes; j++)
+            free(recs[i].blobs[j]);
     if (rc != 0 && errno == 0) errno = EIO;
     return rc;
 }
@@ -368,39 +430,101 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
         }
         name[nlen] = '\0';
 
-        uint8_t rec[16];
-        if (!rd(f, rec, sizeof rec)) {
+        uint8_t shdr[8];
+        if (!rd(f, shdr, sizeof shdr)) {
             log_msg(LOG_WARN, "handoff: truncated record for '%s'", name);
             break;
         }
-        int master_fd = (int)get_u32(rec);
-        pid_t pid = (pid_t)(int32_t)get_u32(rec + 4);
-        uint16_t cols = get_u16(rec + 8), rows = get_u16(rec + 10);
-        uint32_t blob_len = get_u32(rec + 12);
-
-        if (blob_len > HANDOFF_BLOB_MAX) {
-            log_msg(LOG_ERR, "handoff: '%s' claims a %u-byte screen; state file "
-                             "is corrupt, stopping here", name, blob_len);
-            break;
-        }
-        uint8_t *blob = blob_len ? xmalloc(blob_len) : NULL;
-        if (blob_len && !rd(f, blob, blob_len)) {
-            log_msg(LOG_WARN, "handoff: truncated screen for '%s'", name);
-            free(blob);
+        uint16_t view_cols = get_u16(shdr), view_rows = get_u16(shdr + 2);
+        uint8_t active_id = shdr[4], last_id = shdr[5], next_id = shdr[6];
+        uint8_t npanes = shdr[7];
+        if (npanes == 0 || npanes > MAX_PANES_PER_SESSION) {
+            log_msg(LOG_ERR, "handoff: '%s' claims %u panes; state file is "
+                             "corrupt, stopping here", name, npanes);
             break;
         }
 
-        if (!adopt_master(master_fd, name) || pid <= 0) {
+        uint8_t lrec[1 + LAYOUT_NODES * 12];
+        if (!rd(f, lrec, sizeof lrec)) {
+            log_msg(LOG_WARN, "handoff: truncated layout for '%s'", name);
+            break;
+        }
+        layout lt;
+        memset(&lt, 0, sizeof lt);
+        lt.root = (int8_t)lrec[0];
+        if (lt.root < -1 || lt.root >= LAYOUT_NODES) lt.root = 0;
+        for (int j = 0; j < LAYOUT_NODES; j++) {
+            const uint8_t *q = lrec + 1 + j * 12;
+            layout_node *ln = &lt.nodes[j];
+            ln->in_use = (q[0] & 1) != 0;
+            ln->leaf = (q[0] & 2) != 0;
+            ln->stacked = (q[0] & 4) != 0;
+            ln->pane_idx = (int8_t)q[1];
+            ln->child[0] = (int8_t)q[2];
+            ln->child[1] = (int8_t)q[3];
+            /* Child indices come from our own writer, but the file could be
+             * torn: clamp so reflow cannot index out of the node array. */
+            if (ln->child[0] < 0 || ln->child[0] >= LAYOUT_NODES) ln->child[0] = 0;
+            if (ln->child[1] < 0 || ln->child[1] >= LAYOUT_NODES) ln->child[1] = 0;
+            if (ln->pane_idx >= MAX_PANES_PER_SESSION) ln->pane_idx = 0;
+            ln->x = get_u16(q + 4);
+            ln->y = get_u16(q + 6);
+            ln->cols = get_u16(q + 8);
+            ln->rows = get_u16(q + 10);
+        }
+
+        session *s = session_import_begin(name, view_cols, view_rows,
+                                          active_id, last_id, next_id, &lt);
+        if (!s)
+            log_msg(LOG_ERR, "handoff: cannot restore '%s': %s", name,
+                    strerror(errno));
+
+        bool file_ok = true;
+        for (uint8_t j = 0; j < npanes; j++) {
+            uint8_t prec[22];
+            if (!rd(f, prec, sizeof prec)) {
+                log_msg(LOG_WARN, "handoff: truncated pane record for '%s'", name);
+                file_ok = false;
+                break;
+            }
+            uint8_t slot = prec[0], id = prec[1];
+            int master_fd = (int)get_u32(prec + 2);
+            pid_t pid = (pid_t)(int32_t)get_u32(prec + 6);
+            uint16_t cols = get_u16(prec + 10), rows = get_u16(prec + 12);
+            uint32_t blob_len = get_u32(prec + 18);
+
+            if (blob_len > HANDOFF_BLOB_MAX) {
+                log_msg(LOG_ERR, "handoff: '%s' pane %u claims a %u-byte screen; "
+                                 "state file is corrupt, stopping here",
+                        name, id, blob_len);
+                file_ok = false;
+                break;
+            }
+            uint8_t *blob = blob_len ? xmalloc(blob_len) : NULL;
+            if (blob_len && !rd(f, blob, blob_len)) {
+                log_msg(LOG_WARN, "handoff: truncated screen for '%s'", name);
+                free(blob);
+                file_ok = false;
+                break;
+            }
+
+            char label[SESSION_NAME_MAX + 16];
+            snprintf(label, sizeof label, "%s pane %u", name, id);
+            if (!s || !adopt_master(master_fd, label) || pid <= 0) {
+                free(blob);
+                continue; /* record was readable, so keep going with the rest */
+            }
+            if (!session_import_pane(s, slot, id, master_fd, pid, cols, rows,
+                                     blob, blob_len))
+                log_msg(LOG_ERR, "handoff: cannot restore '%s' pane %u: %s",
+                        name, id, strerror(errno));
             free(blob);
-            continue; /* record was readable, so keep going with the rest */
         }
-        session *s = session_import(name, master_fd, pid, cols, rows, blob, blob_len);
-        free(blob);
-        if (!s) {
-            log_msg(LOG_ERR, "handoff: cannot restore '%s': %s", name, strerror(errno));
-            continue;
-        }
-        restored++;
+
+        if (s && session_import_finish(s)) restored++;
+        else if (s)
+            log_msg(LOG_ERR, "handoff: '%s' restored no usable panes", name);
+        if (!file_ok) break;
     }
 
     g_importing = false;
