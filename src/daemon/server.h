@@ -1,6 +1,7 @@
 #ifndef AT_SERVER_H
 #define AT_SERVER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct session;
@@ -9,6 +10,10 @@ struct session;
 struct client;
 void client_send(struct client *c, uint8_t type, const void *payload, uint32_t len);
 void client_disconnect(struct client *c); /* slow-consumer / protocol errors */
+/* False once the client is disconnected (client_send does that itself on
+ * backlog). Lets a caller streaming multiple frames stop early instead of
+ * serializing into a slot that was already torn down. */
+bool client_alive(const struct client *c);
 
 /* Bind and listen. If inherited_fd >= 0 it is an already-bound listener passed
  * across the daemon's own re-exec: adopt it instead of rebinding, so the socket

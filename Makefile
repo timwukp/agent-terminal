@@ -95,6 +95,9 @@ $(O)/tests/%: tests/unit/%.c $(LIBS)
 # recipe picks it up) instead of duplicating the recipe.
 $(O)/tests/test_pager: $(O)/src/client/pager.o
 
+# Same shape for the event loop, which is daemon code.
+$(O)/tests/test_loop: $(O)/src/daemon/loop.o
+
 test: $(TEST_BIN)
 	@rc=0; for t in $(TEST_BIN); do echo "== $$t"; $$t || rc=1; done; exit $$rc
 

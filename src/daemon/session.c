@@ -241,6 +241,24 @@ static void session_flush_screen(session *s) {
 
 static void session_free_slot(session *s) {
     session_flush_screen(s); /* before vt_free/sb_close destroy both sides */
+    /* Disconnect every attached client here, not only in session_kill: the
+     * reap path used to free the slot with s->clients[] and each client's
+     * c->attached still set. That is not a use-after-free — the slot lives in
+     * static g_sessions — which is exactly what made it dangerous: once the
+     * slot is reused, the stale pointer aliases a live *different* session,
+     * and a client of the dead one can inject stdin into, resize, or read
+     * scrollback from a session it never attached to.
+     *
+     * The order is load-bearing: null the table entry first, then disconnect,
+     * because client_disconnect → session_detach iterates the same table this
+     * loop is clearing. sb_flush inside session_detach is safe — s->sb is
+     * closed below, after this loop. */
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i]) {
+            struct client *c = s->clients[i];
+            s->clients[i] = NULL;
+            client_disconnect(c);
+        }
     if (s->child.master_fd >= 0) {
         loop_del_fd(s->child.master_fd);
         close(s->child.master_fd);
@@ -255,13 +273,7 @@ static void session_free_slot(session *s) {
 
 void session_kill(session *s) {
     if (s->child.pid > 0) kill(s->child.pid, SIGHUP);
-    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
-        if (s->clients[i]) {
-            struct client *c = s->clients[i];
-            s->clients[i] = NULL;
-            client_disconnect(c);
-        }
-    session_free_slot(s);
+    session_free_slot(s); /* also disconnects every attached client */
 }
 
 void session_reap_children(void) {
@@ -313,6 +325,18 @@ static void session_pty_readable(int fd, short revents, void *ud) {
     }
 }
 
+/* Ceiling for the blob carried inside one MSG_SNAPSHOT. A worst-case grid
+ * (1000×1000, truecolor fg+bg changing per cell) serializes to ~43 bytes a
+ * cell — far past PROTO_MAX_PAYLOAD (1 MiB), where proto_write_frame returns
+ * false and client_send answers by disconnecting. With the client's reconnect
+ * loop that is not one lost repaint, it is a reconnect→attach→disconnect loop
+ * that never converges. So the snapshot frame carries at most this much and
+ * the remainder rides MSG_OUTPUT: the client handles both with the same
+ * write-to-fd-1 loop, so the split is invisible to it, and frames on one
+ * socket cannot reorder. 768 KB leaves headroom under the 1 MiB frame cap and
+ * stays below the 4 MiB out-ring high-water for typical oversized grids. */
+#define SNAPSHOT_BODY_MAX (768u << 10)
+
 void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) {
     for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++) {
         if (s->clients[i] == c) return;
@@ -328,14 +352,24 @@ void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) 
             const char *body = blob_len ? blob : fallback;
             size_t body_len = blob_len ? blob_len : sizeof fallback - 1;
 
-            size_t payload_len = 12 + body_len;
+            size_t first = body_len < SNAPSHOT_BODY_MAX ? body_len : SNAPSHOT_BODY_MAX;
+            size_t payload_len = 12 + first;
             uint8_t *payload = xmalloc(payload_len);
             put_u16(payload, s->cols);
             put_u16(payload + 2, s->rows);
             put_u64(payload + 4, sb_total_lines(s->sb));
-            memcpy(payload + 12, body, body_len);
+            memcpy(payload + 12, body, first);
             client_send(c, MSG_SNAPSHOT, payload, (uint32_t)payload_len);
             free(payload);
+            /* client_send disconnects on backlog and then ignores further
+             * sends itself; checking client_alive here just stops burning CPU
+             * serializing chunks nobody will get. */
+            for (size_t off = first; off < body_len && client_alive(c);
+                 off += SNAPSHOT_BODY_MAX) {
+                size_t n = body_len - off;
+                if (n > SNAPSHOT_BODY_MAX) n = SNAPSHOT_BODY_MAX;
+                client_send(c, MSG_OUTPUT, body + off, (uint32_t)n);
+            }
             free(blob);
             return;
         }
