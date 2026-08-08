@@ -145,12 +145,15 @@ colour escapes around it. The bottom row reports position and total.
 
 ### Scripted / non-interactive use
 
-`new` attaches a client, and a client whose stdin is closed (or `/dev/null`)
-sees immediate EOF and detaches — which ends the session. So
-`agent-terminal new -s x -- cmd < /dev/null` exits 0 but leaves nothing to
-attach to. Hold stdin open instead; see
-[AGENTS.md §4](AGENTS.md#4-the-constraint-that-matters-most-for-agents) for a
-working FIFO pattern.
+`agent-terminal new -s x -- cmd < /dev/null` creates the session and exits 0
+once the daemon confirms it; the session persists with zero clients, ready
+for `attach`. The client only reports what the daemon confirmed: pointing
+`attach` at a session that does not exist fails with `no such session` and
+rc=1 even with stdin at EOF, and a daemon that confirms nothing within 5 s
+fails the command rather than hanging the script. To *drive* a session from
+a script (type into it, watch output), hold stdin open — see
+[AGENTS.md §4](AGENTS.md#4-scripted--non-interactive-use) for the FIFO
+pattern.
 
 ### SSH sessions
 
