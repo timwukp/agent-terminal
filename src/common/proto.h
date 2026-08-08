@@ -41,18 +41,44 @@ enum proto_type {
     MSG_NEW_SESSION    = 0x12, /* C→D: u16 cols, u16 rows, u8 nlen, name, u16 argv_bytes, argv */
     MSG_KILL_SESSION   = 0x13, /* C→D: u8 nlen, name */
     MSG_RELOAD         = 0x19, /* C→D: empty — re-exec the daemon in place */
-    MSG_ATTACH         = 0x14, /* C→D: u16 cols, u16 rows, u8 pane_id(=0), u8 nlen, name */
+    /* pane_id: 0 = "don't change" — the pre-pane client has always written 0
+     * here (attach.c), so 0 cannot mean "select pane 0". 255 = active. */
+    MSG_ATTACH         = 0x14, /* C→D: u16 cols, u16 rows, u8 pane_id, u8 nlen, name */
     MSG_DETACH         = 0x15, /* C→D: empty */
+    MSG_SPLIT_PANE     = 0x16, /* C→D: u8 stacked, u8 target_pane_id (255 = active) */
+    MSG_CLOSE_PANE     = 0x17, /* C→D: u8 pane_id (255 = active) */
+    MSG_SELECT_PANE    = 0x18, /* C→D: u8 mode (0=by id,1=next,2=prev,3=last), u8 pane_id */
     MSG_STDIN_DATA     = 0x20, /* C→D: raw bytes for the PTY */
     MSG_RESIZE         = 0x21, /* C→D: u16 cols, u16 rows */
-    MSG_OUTPUT         = 0x30, /* D→C: raw child output (live tee) */
+    MSG_OUTPUT         = 0x30, /* D→C: raw child output (live tee) / composite frames */
+    /* MSG_SNAPSHOT ends in a LENGTH-IMPLICIT blob (the client writes payload
+     * bytes 12..len to the terminal), so despite the additive-only rule above
+     * it can never grow a field: appended bytes land inside the blob and get
+     * written to the user's screen. Pane metadata rides MSG_LAYOUT instead. */
     MSG_SNAPSHOT       = 0x31, /* D→C: u16 cols, u16 rows, u64 sb_lines, ANSI repaint */
-    MSG_SCROLLBACK_REQ = 0x32, /* C→D: u64 start_seq, u32 max_lines */
+    /* u8 pane_id is a true append (the pre-pane payload is a fixed 12 bytes);
+     * the daemon reads it only when len >= 13 and treats 255/absent as the
+     * active pane. */
+    MSG_SCROLLBACK_REQ = 0x32, /* C→D: u64 start_seq, u32 max_lines[, u8 pane_id] */
     MSG_SCROLLBACK_DATA= 0x33, /* D→C: u64 first_seq, u32 nlines, {u32 len, bytes}... */
     MSG_SESSION_EXITED = 0x34, /* D→C: i32 exit_status */
+    /* MSG_SESSION_LIST (0x11) is positional with no per-entry length
+     * (hardcoded per-entry parse on both sides), so per-pane data cannot be
+     * appended to it either — the NEXT entry would mis-parse. Showing panes
+     * in `ls` needs a new message type. */
+    MSG_LAYOUT         = 0x35, /* D→C: u16 view_cols, u16 view_rows, u8 active_id,
+                                * u8 npanes, then per pane:
+                                * u8 id, u16 x, u16 y, u16 cols, u16 rows.
+                                * Sent only to clients that set CLIENT_CAP_PANES. */
+    MSG_PANE_EXITED    = 0x36, /* D→C: u8 pane_id, i32 exit_status (≥2 panes only) */
     MSG_PING           = 0x40, /* both: u64 nonce */
     MSG_PONG           = 0x41, /* both: u64 nonce */
 };
+
+/* MSG_HELLO u16 flags (always sent, 0 before panes existed). */
+#define CLIENT_CAP_PANES 0x0001
+/* MSG_HELLO_OK grows u16 server_flags (additive append at offset 10). */
+#define SERVER_CAP_PANES 0x0001
 
 enum proto_err {
     ERR_VERSION      = 1,

@@ -33,6 +33,8 @@ typedef struct client {
     int fd;
     bool in_use;
     bool hello_done;
+    uint16_t caps;          /* MSG_HELLO flags (CLIENT_CAP_PANES) */
+    uint16_t cols, rows;    /* last geometry from ATTACH/RESIZE */
     ring in, out;
     session *attached; /* NULL until ATTACH */
     uint8_t scratch[PROTO_MAX_PAYLOAD];
@@ -72,6 +74,15 @@ void client_send(struct client *c, uint8_t type, const void *payload, uint32_t l
 }
 
 bool client_alive(const struct client *c) { return c->in_use; }
+
+bool client_wants_panes(const struct client *c) {
+    return (c->caps & CLIENT_CAP_PANES) != 0;
+}
+
+void client_geometry(const struct client *c, uint16_t *cols, uint16_t *rows) {
+    if (cols) *cols = c->cols;
+    if (rows) *rows = c->rows;
+}
 
 void client_disconnect(struct client *c) {
     if (!c->in_use) return;
@@ -170,6 +181,8 @@ static void handle_new(client *c, const uint8_t *p, size_t len) {
     }
     argv[argc] = NULL;
 
+    c->cols = cols;
+    c->rows = rows;
     session *s = session_new(name, argv, cols, rows);
     free(argbuf);
     if (!s) {
@@ -195,8 +208,14 @@ static void handle_attach(client *c, const uint8_t *p, size_t len) {
     session *s = session_find(name);
     if (!s) { client_err(c, ERR_NO_SESSION, "no such session"); return; }
     if (c->attached && c->attached != s) session_detach(c->attached, c);
+    c->cols = cols;
+    c->rows = rows;
     c->attached = s;
     session_attach(s, c, cols, rows);
+    /* p[4]: pane selection on attach. 0 = don't change (the pre-pane client
+     * has always sent 0), 255 = active (a no-op), else select by id. */
+    if (p[4] != 0 && p[4] != 255 && client_wants_panes(c))
+        session_select_pane(s, 0, p[4]);
 }
 
 static void handle_kill(client *c, const uint8_t *p, size_t len) {
@@ -220,13 +239,18 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
             client_disconnect(c);
             return;
         }
-        uint8_t ok[10];
+        c->caps = len >= 4 ? get_u16(p + 2) : 0;
+        uint8_t ok[12];
         put_u16(ok, PROTO_VERSION);
         put_u32(ok + 2, (uint32_t)getpid());
         /* The pid is stable across an in-place restart by design, so it cannot
          * tell a client (or a test) that a reload happened. The generation
          * counter can. Appended, so a v1 client that reads 6 bytes is fine. */
         put_u32(ok + 6, handoff_generation());
+        /* server_flags: appended after generation, same additive rule. Lets a
+         * capable client say "this daemon has no panes" instead of a silent
+         * no-op when its split chord goes unanswered. */
+        put_u16(ok + 10, SERVER_CAP_PANES);
         c->hello_done = true;
         client_send(c, MSG_HELLO_OK, ok, sizeof ok);
         return;
@@ -253,7 +277,27 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
         if (c->attached) session_stdin(c->attached, p, (uint32_t)len);
         break;
     case MSG_RESIZE:
-        if (c->attached && len >= 4) session_resize(c->attached, get_u16(p), get_u16(p + 2));
+        if (len >= 4) { c->cols = get_u16(p); c->rows = get_u16(p + 2); }
+        if (c->attached && len >= 4) session_resize(c->attached, c->cols, c->rows);
+        break;
+    case MSG_SPLIT_PANE: {
+        if (!c->attached || len < 2) { client_err(c, ERR_BAD_REQUEST, "short SPLIT_PANE"); break; }
+        errno = 0;
+        if (!session_split(c->attached, p[1], p[0] != 0))
+            client_err(c, errno == ENOSPC ? ERR_INTERNAL : ERR_BAD_REQUEST,
+                       errno == ENOSPC ? "no free pane slot"
+                                       : "pane too small to split or no such pane");
+        break;
+    }
+    case MSG_CLOSE_PANE:
+        if (!c->attached || len < 1) { client_err(c, ERR_BAD_REQUEST, "short CLOSE_PANE"); break; }
+        if (!session_close_pane(c->attached, p[0]))
+            client_err(c, ERR_BAD_REQUEST, "no such pane");
+        break;
+    case MSG_SELECT_PANE:
+        if (!c->attached || len < 2) { client_err(c, ERR_BAD_REQUEST, "short SELECT_PANE"); break; }
+        if (!session_select_pane(c->attached, p[0], p[1]))
+            client_err(c, ERR_BAD_REQUEST, "no such pane");
         break;
     case MSG_SCROLLBACK_REQ: {
         if (!c->attached || len < 12) break;
@@ -261,10 +305,10 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
         uint32_t maxn = get_u32(p + 8);
         if (maxn > 1000) maxn = 1000;
         static sb_line_ref refs[1000];
-        /* Active pane's ring. Copy-mode learns to name a pane in 5c (a true
-         * append to this fixed 12-byte payload); until then active == pane 0
-         * == what sb_read_log reads from disk, so the two sources agree. */
-        pane *ap = session_active_pane(c->attached);
+        /* The pane_id byte is a true append to the original fixed 12-byte
+         * payload: read only when present, 255/absent = active. */
+        pane *ap = len >= 13 ? session_pane_by_id(c->attached, p[12])
+                             : session_active_pane(c->attached);
         uint32_t got = ap ? sb_fetch(ap->sb, start, maxn, refs, 1000) : 0;
         /* payload: u64 first_seq, u32 nlines, then {u32 len, bytes}... */
         static uint8_t payload[PROTO_MAX_PAYLOAD];

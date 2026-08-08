@@ -115,4 +115,15 @@ void vt_get_cursor(const vt *v, uint16_t *row, uint16_t *col, bool *visible);
 uint32_t vt_get_modes(const vt *v);
 void vt_get_size(const vt *v, uint16_t *rows, uint16_t *cols);
 
+/* Row damage since the last vt_damage_clear, so a compositor repaints only
+ * rows that changed. Tracks content mutations of the visible grid; cursor
+ * movement is deliberately not damage (compare vt_get_cursor yourself). A
+ * fresh vt is fully dirty. Reading damage does NOT clear it — with several
+ * attached clients, a clear-on-read for one would blank the frame for the
+ * rest — so consumers call vt_damage_clear exactly once per composited
+ * frame, after every reader has drawn. */
+bool vt_any_dirty(const vt *v);
+bool vt_row_dirty(const vt *v, uint16_t row);
+void vt_damage_clear(vt *v);
+
 #endif

@@ -61,7 +61,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     vt *v = vt_new(rows, cols, &cb, NULL);
     if (!v) return 0;
 
-    /* Feed in variable-size chunks; resize partway through. */
+    /* Feed in variable-size chunks; resize partway through. The damage API
+     * runs interleaved exactly as a compositor would drive it, putting the
+     * bitmap's bounds checks under ASan against arbitrary input. */
     size_t off = 0;
     int chunk_i = 0;
     while (off < size) {
@@ -74,6 +76,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             /* Mid-stream resize: geometry derived from position. */
             vt_resize(v, (uint16_t)(1 + (rows + chunk_i) % 120),
                       (uint16_t)(1 + (cols + chunk_i * 3) % 300));
+        }
+        if (vt_any_dirty(v)) {
+            uint16_t cur_rows = 0, cur_cols = 0;
+            vt_get_size(v, &cur_rows, &cur_cols);
+            volatile uint32_t sink = 0;
+            for (uint16_t r = 0; r < cur_rows; r++)
+                if (vt_row_dirty(v, r)) sink ^= vt_line(v, r)[0].cp;
+            (void)sink;
+            if (chunk_i % 3 == 0) vt_damage_clear(v);
         }
     }
 

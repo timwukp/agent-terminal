@@ -19,6 +19,21 @@ static vt_cell blank_cell(const vt *v) {
  * that has since been scrolled or shifted elsewhere. */
 static void forget_last(vt *v) { v->last_valid = false; }
 
+/* Damage marking. Every write to the active grid must pass through one of
+ * these, or a compositor repainting only dirty rows shows a stale rectangle —
+ * silent visual corruption no other test can see. The equivalence test in
+ * test_vt.c (full render vs dirty-rows-only render over every case) is what
+ * enforces "every": a missed site fails it deterministically. */
+static void mark_row(vt *v, uint16_t row) {
+    if (row < v->rows) v->dirty[row / 32] |= 1u << (row % 32);
+}
+
+static void mark_rows(vt *v, uint16_t top, uint16_t bot /*inclusive*/) {
+    for (uint16_t r = top; r <= bot && r < v->rows; r++) mark_row(v, r);
+}
+
+static void mark_all(vt *v) { v->dirty_all = true; }
+
 vt_cell *vt_cell_at(vt *v, uint16_t row, uint16_t col) {
     if (row >= v->rows || col >= v->cols) return NULL;
     return &v->grid[v->active].cells[(size_t)row * v->cols + col];
@@ -27,6 +42,7 @@ vt_cell *vt_cell_at(vt *v, uint16_t row, uint16_t col) {
 static void clear_row(vt *v, uint16_t row, uint16_t from, uint16_t to /*exclusive*/) {
     if (row >= v->rows) return;
     if (to > v->cols) to = v->cols;
+    mark_row(v, row);
     vt_cell b = blank_cell(v);
     for (uint16_t c = from; c < to; c++)
         *vt_cell_at(v, row, c) = b;
@@ -36,6 +52,7 @@ static void clear_row(vt *v, uint16_t row, uint16_t from, uint16_t to /*exclusiv
 static void unsplit_wide(vt *v, uint16_t row, uint16_t col) {
     vt_cell *c = vt_cell_at(v, row, col);
     if (!c) return;
+    mark_row(v, row);
     if ((c->attrs & VT_ATTR_WIDE_SPACER) && col > 0) {
         vt_cell *lead = vt_cell_at(v, row, (uint16_t)(col - 1));
         if (lead && (lead->attrs & VT_ATTR_WIDE)) {
@@ -55,6 +72,7 @@ static void unsplit_wide(vt *v, uint16_t row, uint16_t col) {
 static void scroll_region_up(vt *v, uint16_t top, uint16_t bot, int n) {
     if (n <= 0) return;
     forget_last(v);
+    mark_rows(v, top, bot);
     int height = bot - top + 1;
     if (n > height) n = height;
     /* Lines leaving the top of the PRIMARY screen's full-height region go
@@ -72,6 +90,7 @@ static void scroll_region_up(vt *v, uint16_t top, uint16_t bot, int n) {
 static void scroll_region_down(vt *v, uint16_t top, uint16_t bot, int n) {
     if (n <= 0) return;
     forget_last(v);
+    mark_rows(v, top, bot);
     int height = bot - top + 1;
     if (n > height) n = height;
     for (int r = bot; r - n >= top; r--)
@@ -151,6 +170,7 @@ static void attach_combining(vt *v, uint32_t cp) {
     vt_cell *cell = vt_cell_at(v, v->last_row, v->last_col);
     if (!cell || cell->cp == 0 || cell->comb != 0) return;
     cell->comb = (uint16_t)cp;
+    mark_row(v, v->last_row);
 }
 
 void vt_screen_put(vt *v, uint32_t cp, int width) {
@@ -187,6 +207,7 @@ void vt_screen_put(vt *v, uint32_t cp, int width) {
     unsplit_wide(v, v->cur.row, v->cur.col);
     vt_cell *cell = vt_cell_at(v, v->cur.row, v->cur.col);
     if (!cell) return;
+    mark_row(v, v->cur.row);
     cell->cp = cp;
     cell->fg = v->cur.pen.fg;
     cell->bg = v->cur.pen.bg;
@@ -275,6 +296,7 @@ void vt_screen_insert_chars(vt *v, int n) {
     int avail = v->cols - v->cur.col;
     if (n > avail) n = avail;
     vt_cell *row = vt_cell_at(v, v->cur.row, 0);
+    mark_row(v, v->cur.row);
     memmove(row + v->cur.col + n, row + v->cur.col,
             (size_t)(avail - n) * sizeof(vt_cell));
     clear_row(v, v->cur.row, v->cur.col, (uint16_t)(v->cur.col + n));
@@ -287,6 +309,7 @@ void vt_screen_delete_chars(vt *v, int n) {
     int avail = v->cols - v->cur.col;
     if (n > avail) n = avail;
     vt_cell *row = vt_cell_at(v, v->cur.row, 0);
+    mark_row(v, v->cur.row);
     memmove(row + v->cur.col, row + v->cur.col + n,
             (size_t)(avail - n) * sizeof(vt_cell));
     clear_row(v, v->cur.row, (uint16_t)(v->cols - n), v->cols);
@@ -318,6 +341,7 @@ void vt_screen_switch_alt(vt *v, bool alt, bool save_cursor, bool clear) {
     bool cur_alt = (v->modes & VT_MODE_ALTSCREEN) != 0;
     if (alt == cur_alt) return;
     forget_last(v);
+    mark_all(v); /* the visible grid is replaced wholesale */
     if (alt) {
         if (save_cursor) v->saved_cur[0] = v->cur;
         v->active = 1;
@@ -341,6 +365,7 @@ static void reset_tabstops(vt *v) {
 
 void vt_screen_reset(vt *v) {
     forget_last(v);
+    mark_all(v);
     v->modes = VT_MODE_DECAWM | VT_MODE_DECTCEM;
     v->active = 0;
     v->scroll_top = 0;
@@ -357,6 +382,7 @@ void vt_screen_reset(vt *v) {
 
 void vt_screen_align_test(vt *v) { /* DECALN: fill with E */
     forget_last(v);
+    mark_all(v);
     vt_pen saved = v->cur.pen;
     v->cur.pen = (vt_pen){.fg = VT_COLOR_DEFAULT, .bg = VT_COLOR_DEFAULT, .attrs = 0};
     for (uint16_t r = 0; r < v->rows; r++)
@@ -435,6 +461,7 @@ void vt_resize(vt *v, uint16_t rows, uint16_t cols) {
     }
     v->cur.pending_wrap = false;
     forget_last(v);
+    mark_all(v);
     reset_tabstops(v);
 }
 
@@ -456,4 +483,24 @@ uint32_t vt_get_modes(const vt *v) { return v->modes; }
 void vt_get_size(const vt *v, uint16_t *rows, uint16_t *cols) {
     if (rows) *rows = v->rows;
     if (cols) *cols = v->cols;
+}
+
+/* ---- damage ---- */
+
+bool vt_any_dirty(const vt *v) {
+    if (v->dirty_all) return true;
+    for (size_t i = 0; i < sizeof v->dirty / sizeof v->dirty[0]; i++)
+        if (v->dirty[i]) return true;
+    return false;
+}
+
+bool vt_row_dirty(const vt *v, uint16_t row) {
+    if (row >= v->rows) return false;
+    if (v->dirty_all) return true;
+    return (v->dirty[row / 32] & (1u << (row % 32))) != 0;
+}
+
+void vt_damage_clear(vt *v) {
+    v->dirty_all = false;
+    memset(v->dirty, 0, sizeof v->dirty);
 }

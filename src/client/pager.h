@@ -37,6 +37,7 @@ void pager_set_out_fd(pager *pg, int fd);
 /* Load the whole on-disk log for a session. Returns lines loaded, or -1 if
  * there is no log at all. Safe with no daemon running. */
 int64_t pager_load_disk(pager *pg, const char *session_name);
+int64_t pager_load_disk_pane(pager *pg, const char *session_name, uint8_t pane_id);
 
 /* Append one line. Ignored if seq is not newer than everything loaded, which
  * is what makes the disk/ring overlap harmless. Text is ANSI, no trailing

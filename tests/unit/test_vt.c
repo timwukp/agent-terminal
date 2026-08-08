@@ -559,9 +559,135 @@ TEST(hostile_input_no_crash) {
     vt_free(v);
 }
 
+/* Copy the rows vt_row_dirty reports from src into shadow, then compare the
+ * whole shadow grid to src. If damage tracking under-reports — one missed
+ * mark_row anywhere in vt_screen.c — the stale row differs and the case name
+ * says which input exposed it. Over-reporting cannot fail this test, and that
+ * is correct: extra dirty rows cost a repaint, not corruption. */
+static void assert_damage_covers(vt *src, vt_cell *shadow, const char *what) {
+    uint16_t rows, cols;
+    vt_get_size(src, &rows, &cols);
+    for (uint16_t r = 0; r < rows; r++)
+        if (vt_row_dirty(src, r))
+            memcpy(shadow + (size_t)r * cols, vt_line(src, r),
+                   (size_t)cols * sizeof(vt_cell));
+    for (uint16_t r = 0; r < rows; r++) {
+        t_checks++;
+        if (memcmp(shadow + (size_t)r * cols, vt_line(src, r),
+                   (size_t)cols * sizeof(vt_cell)) != 0) {
+            t_failures++;
+            fprintf(stderr, "FAIL damage [%s] row %u stale: dirty not reported\n",
+                    what, r);
+        }
+    }
+}
+
+TEST(damage_equals_full_render) {
+    /* Every table case: start both from the same synced state, apply the
+     * case's bytes, repaint only reported-dirty rows, demand equality. The
+     * pre-input state is non-blank so a case that only *erases* still has to
+     * report its rows — starting blank, erased rows compare equal by luck. */
+    static const char preface[] = "\x1b[HxxxxxxxxxxXXXXXXXXXX\r\nyyyyyyyyyy";
+    for (size_t i = 0; i < sizeof CASES / sizeof *CASES; i++) {
+        const vt_case *tc = &CASES[i];
+        vt *v = vt_new(ROWS, COLS, NULL, NULL);
+        vt_feed(v, (const uint8_t *)preface, sizeof preface - 1);
+
+        vt_cell *shadow = calloc((size_t)ROWS * COLS, sizeof(vt_cell));
+        for (uint16_t r = 0; r < ROWS; r++)
+            memcpy(shadow + (size_t)r * COLS, vt_line(v, r),
+                   (size_t)COLS * sizeof(vt_cell));
+        vt_damage_clear(v);
+
+        t_checks++;
+        if (vt_any_dirty(v)) {
+            t_failures++;
+            fprintf(stderr, "FAIL damage [%s]: dirty right after clear\n", tc->name);
+        }
+        vt_feed(v, (const uint8_t *)tc->input, strlen(tc->input));
+        assert_damage_covers(v, shadow, tc->name);
+        free(shadow);
+        vt_free(v);
+    }
+}
+
+TEST(damage_explicit_operations) {
+    /* Operations the table cases reach only incidentally, each from a synced
+     * non-blank state: scroll (both directions), resize, alt-screen switch
+     * both ways, RIS, DECALN, insert/delete lines and chars. `setup` runs
+     * BEFORE the damage clear — that is what makes "leave alt" a real case:
+     * the compositor has already drawn (and cleared damage for) the alt
+     * screen, so the return to primary must generate its own damage. Folding
+     * the enter into `input` masks a missing mark, because the enter's row
+     * clears leave their bits set across the leave. */
+    static const struct { const char *name; const char *setup; const char *input; } ops[] = {
+        {"scroll up", "", "\x1b[6;1H\n"},
+        {"scroll down", "", "\x1b[H\x1bM"},
+        {"region scroll", "", "\x1b[2;4r\x1b[4;1H\n\x1b[r"},
+        {"enter alt", "", "\x1b[?1049h"},
+        {"leave alt", "\x1b[?1049h", "\x1b[?1049l"},
+        {"leave alt after alt draw", "\x1b[?1049hALT-CONTENT", "\x1b[?1049l"},
+        {"ris", "", "\x1b" "c"},
+        {"ris on alt", "\x1b[?1049h", "\x1b" "c"},
+        {"decaln", "", "\x1b#8"},
+        {"insert lines", "", "\x1b[2;1H\x1b[2L"},
+        {"delete lines", "", "\x1b[2;1H\x1b[2M"},
+        {"insert chars", "", "\x1b[1;2H\x1b[3@"},
+        {"delete chars", "", "\x1b[1;2H\x1b[3P"},
+        {"erase display", "", "\x1b[2J"},
+        {"combining mark attaches", "", "e\xcc\x81"},
+        {"combining after clear", "e", "\xcc\x81"},
+    };
+    static const char preface[] = "\x1b[Habcdefghij\r\nklmnopqrst\r\nuvwxyzABCD";
+    for (size_t i = 0; i < sizeof ops / sizeof *ops; i++) {
+        vt *v = vt_new(ROWS, COLS, NULL, NULL);
+        vt_feed(v, (const uint8_t *)preface, sizeof preface - 1);
+        vt_feed(v, (const uint8_t *)ops[i].setup, strlen(ops[i].setup));
+        vt_cell *shadow = calloc((size_t)ROWS * COLS, sizeof(vt_cell));
+        for (uint16_t r = 0; r < ROWS; r++)
+            memcpy(shadow + (size_t)r * COLS, vt_line(v, r),
+                   (size_t)COLS * sizeof(vt_cell));
+        vt_damage_clear(v);
+        vt_feed(v, (const uint8_t *)ops[i].input, strlen(ops[i].input));
+        assert_damage_covers(v, shadow, ops[i].name);
+        free(shadow);
+        vt_free(v);
+    }
+
+    /* Resize replaces the grids: everything must be dirty, at the new size. */
+    vt *v = vt_new(ROWS, COLS, NULL, NULL);
+    vt_feed(v, (const uint8_t *)preface, sizeof preface - 1);
+    vt_damage_clear(v);
+    vt_resize(v, ROWS + 2, COLS + 2);
+    t_checks++;
+    if (!vt_any_dirty(v)) {
+        t_failures++;
+        fprintf(stderr, "FAIL damage [resize]: not dirty after resize\n");
+    }
+    for (uint16_t r = 0; r < ROWS + 2; r++) {
+        t_checks++;
+        if (!vt_row_dirty(v, r)) {
+            t_failures++;
+            fprintf(stderr, "FAIL damage [resize] row %u not dirty\n", r);
+        }
+    }
+    vt_free(v);
+
+    /* A fresh vt is fully dirty: a compositor's first frame paints all. */
+    v = vt_new(ROWS, COLS, NULL, NULL);
+    t_checks++;
+    if (!vt_any_dirty(v) || !vt_row_dirty(v, ROWS - 1)) {
+        t_failures++;
+        fprintf(stderr, "FAIL damage: fresh vt not fully dirty\n");
+    }
+    vt_free(v);
+}
+
 int main(void) {
     RUN(table_cases);
     RUN(chunking_property);
+    RUN(damage_equals_full_render);
+    RUN(damage_explicit_operations);
     RUN(alt_screen_roundtrip);
     RUN(query_responses);
     RUN(scrollback_emitted);

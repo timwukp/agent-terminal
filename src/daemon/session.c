@@ -9,6 +9,7 @@
 
 #include "common/proto.h"
 #include "common/xutil.h"
+#include "composite.h"
 #include "handoff.h"
 #include "loop.h"
 #include "server.h"
@@ -16,6 +17,9 @@
 static session g_sessions[MAX_SESSIONS];
 
 static void pane_pty_readable(int fd, short revents, void *ud);
+static void session_apply_layout(session *s);
+static void session_send_layout(session *s);
+static void session_leave_composite(session *s);
 
 /* ---- VT callbacks ---- */
 
@@ -74,8 +78,20 @@ session *session_find(const char *name) {
 
 pane *session_active_pane(session *s) {
     for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use && s->panes[i].id == s->active_id)
+            return &s->panes[i];
+    /* active_id names a pane that just closed: fall back to any live pane
+     * (the close path re-points active_id, so this is a guard). */
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
         if (s->panes[i].in_use) return &s->panes[i];
     return NULL; /* unreachable for an in-use session; callers may assume */
+}
+
+pane *session_pane_by_id(session *s, uint8_t id) {
+    if (id == 255) return session_active_pane(s);
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use && s->panes[i].id == id) return &s->panes[i];
+    return NULL;
 }
 
 static void pane_flush_screen(pane *p);
@@ -123,7 +139,7 @@ session *session_at(int idx) {
  * a fresh one afterwards — the alternative, a second copy of this setup in
  * handoff.c, is how a restored session ends up with subtly different
  * callbacks or no scrollback at all. */
-static pane *pane_alloc(session *s, uint16_t cols, uint16_t rows) {
+static pane *pane_alloc(session *s, uint8_t id, uint16_t cols, uint16_t rows) {
     pane *p = NULL;
     for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
         if (!s->panes[i].in_use) { p = &s->panes[i]; break; }
@@ -131,11 +147,11 @@ static pane *pane_alloc(session *s, uint16_t cols, uint16_t rows) {
 
     memset(p, 0, sizeof *p);
     p->sess = s;
-    /* Wire id: pane 0 is the session's first pane forever; the round-robin
-     * allocator for 1..254 arrives with the split messages (5c). Today only
-     * one pane ever exists, and its id must be 0 so its scrollback file is
-     * byte-identical to what every existing log reader expects. */
-    p->id = 0;
+    /* Wire id, not the array index. Pane 0 is the session's first pane
+     * forever (its scrollback file must stay byte-identical to pre-pane
+     * logs); split panes draw 1..254 round-robin so an id is never reused
+     * while a close naming it could still be in flight. */
+    p->id = id;
     p->cols = cols;
     p->rows = rows;
     p->child.master_fd = -1;
@@ -230,6 +246,11 @@ static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
     strncpy(s->name, name, SESSION_NAME_MAX);
     s->view_cols = cols ? cols : 80;
     s->view_rows = rows ? rows : 24;
+    layout_init(&s->lt, 0); /* pane slot 0 fills the view */
+    layout_reflow(&s->lt, s->view_cols, s->view_rows);
+    s->active_id = 0;
+    s->last_id = 0;
+    s->next_id = 1;
     return s;
 }
 
@@ -261,7 +282,7 @@ session *session_new(const char *name, char *const argv[], uint16_t cols, uint16
     session *s = session_alloc(name, cols, rows);
     if (!s) return NULL;
 
-    pane *p = pane_alloc(s, s->view_cols, s->view_rows);
+    pane *p = pane_alloc(s, 0, s->view_cols, s->view_rows);
     if (!p) return NULL;
 
     if (pty_spawn(&p->child, argv, p->cols, p->rows, "xterm-256color") != 0) {
@@ -295,16 +316,67 @@ session *session_new(const char *name, char *const argv[], uint16_t cols, uint16
 
 session *session_import(const char *name, int master_fd, pid_t pid, uint16_t cols,
                         uint16_t rows, const uint8_t *blob, size_t blob_len) {
-    session *s = session_alloc(name, cols, rows);
+    /* Single-pane convenience used by tests; the handoff path drives the
+     * three-phase API directly. */
+    layout lt;
+    layout_init(&lt, 0);
+    session *s = session_import_begin(name, cols, rows, 0, 0, 1, &lt);
     if (!s) return NULL;
+    session_import_pane(s, 0, 0, master_fd, pid, cols, rows, blob, blob_len);
+    if (!session_import_finish(s)) return NULL;
+    return s;
+}
 
-    pane *p = pane_alloc(s, s->view_cols, s->view_rows);
-    if (!p) return NULL;
+session *session_import_begin(const char *name, uint16_t view_cols,
+                              uint16_t view_rows, uint8_t active_id,
+                              uint8_t last_id, uint8_t next_id,
+                              const layout *lt) {
+    session *s = session_alloc(name, view_cols, view_rows);
+    if (!s) return NULL;
+    s->lt = *lt;
+    s->active_id = active_id;
+    s->last_id = last_id;
+    s->next_id = next_id ? next_id : 1;
+    s->in_use = true; /* so session_find sees it during pane import */
+    return s;
+}
+
+pane *session_import_pane(session *s, uint8_t slot, uint8_t id, int master_fd,
+                          pid_t pid, uint16_t cols, uint16_t rows,
+                          const uint8_t *blob, size_t blob_len) {
+    if (slot >= MAX_PANES_PER_SESSION || s->panes[slot].in_use) {
+        errno = EINVAL;
+        return NULL;
+    }
+    /* pane_alloc scans for a free slot from 0; the state file names an exact
+     * slot because the layout tree stores pane INDICES. Claim neighbours
+     * temporarily? No — just allocate directly into the named slot. */
+    pane *p = &s->panes[slot];
+    memset(p, 0, sizeof *p);
+    p->sess = s;
+    p->id = id;
+    p->cols = cols;
+    p->rows = rows;
+    p->child.master_fd = -1;
+    p->child.pid = -1;
+
+    vt_callbacks cb = {
+        .on_response = vt_cb_response,
+        .on_scrollback_line = vt_cb_scrollback,
+        .on_title = vt_cb_title,
+        .on_bell = vt_cb_bell,
+        .on_passthrough = NULL,
+    };
+    p->vt = vt_new(p->rows, p->cols, &cb, p);
+    if (!p->vt) { errno = ENOMEM; return NULL; }
+    p->sb = sb_open_pane(s->name, p->id, 0, 0);
+    if (!p->sb)
+        log_msg(LOG_WARN, "session '%s': scrollback disabled (%s)", s->name,
+                strerror(errno));
 
     p->child.master_fd = master_fd;
     p->child.pid = pid;
     p->in_use = true;
-    s->in_use = true;
 
     /* Replay the pre-restart screen. vt_feed on a snapshot blob is the same
      * round-trip a reattaching client already relies on, so there is no second
@@ -320,15 +392,38 @@ session *session_import(const char *name, int master_fd, pid_t pid, uint16_t col
         log_msg(LOG_ERR, "session '%s': no event-loop slot for inherited fd %d; "
                          "child %d is alive but unattended", s->name, master_fd, (int)pid);
         errno = saved ? saved : ENOSPC;
-        return s;
+        return p;
     }
     /* Re-apply geometry: the state file's cols/rows are authoritative, and the
      * PTY already has them, but a client that resized during the gap did not
      * reach us. Harmless when they match — pty_resize is idempotent. */
     pty_resize(master_fd, p->cols, p->rows);
-    log_msg(LOG_INFO, "session '%s': restored pid %d on fd %d (%ux%u, %zu-byte screen)",
-            s->name, (int)pid, master_fd, p->cols, p->rows, blob_len);
-    return s;
+    log_msg(LOG_INFO, "session '%s': restored pane %u pid %d on fd %d (%ux%u, "
+                      "%zu-byte screen)", s->name, id, (int)pid, master_fd,
+            p->cols, p->rows, blob_len);
+    return p;
+}
+
+bool session_import_finish(session *s) {
+    int live = 0;
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use) live++;
+    if (live == 0) {
+        s->in_use = false;
+        return false;
+    }
+    /* Panes the import dropped (unusable fd) leave dangling leaves in the
+     * tree; prune them so reflow and compositing see only live panes. */
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (!s->panes[i].in_use)
+            layout_close(&s->lt, s->view_cols, s->view_rows, (int8_t)i);
+    if (session_pane_by_id(s, s->active_id) == NULL) {
+        pane *fb = session_active_pane(s);
+        if (fb) s->active_id = fb->id;
+    }
+    layout_reflow(&s->lt, s->view_cols, s->view_rows);
+    session_apply_layout(s);
+    return true;
 }
 
 void session_kill(session *s) {
@@ -336,6 +431,51 @@ void session_kill(session *s) {
         if (s->panes[i].in_use && s->panes[i].child.pid > 0)
             kill(s->panes[i].child.pid, SIGHUP);
     session_free_slot(s); /* also disconnects every attached client */
+}
+
+/* A pane's child was reaped. With one pane that is the session exiting,
+ * exactly as before panes existed; with more, the pane closes, its sibling
+ * absorbs the rectangle, and capable clients hear MSG_PANE_EXITED. */
+static void session_pane_reaped(session *s, pane *p, int8_t slot) {
+    uint8_t id = p->id;
+    int live = 0;
+    for (int k = 0; k < MAX_PANES_PER_SESSION; k++)
+        if (s->panes[k].in_use) live++;
+
+    if (live <= 1) {
+        uint8_t payload[4];
+        put_u32(payload, (uint32_t)p->exit_status);
+        for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
+            if (s->clients[k])
+                client_send(s->clients[k], MSG_SESSION_EXITED, payload, 4);
+        pane_free_slot(p);
+        /* Freeing here means `ls` never reports a session as dead — the
+         * client's "dead (exit N)" branch is unreachable, and that is
+         * intentional. pane_free_slot flushed the final screen to
+         * scrollback first, so `history` still recovers it. */
+        session_free_slot(s);
+        return;
+    }
+
+    uint8_t payload[5];
+    payload[0] = id;
+    put_u32(payload + 1, (uint32_t)p->exit_status);
+    for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
+        if (s->clients[k] && client_wants_panes(s->clients[k]))
+            client_send(s->clients[k], MSG_PANE_EXITED, payload, 5);
+
+    /* Free the slot BEFORE reflow so the survivor's resize sees final
+     * geometry; layout_close reflows the sibling into the parent's rect. */
+    pane_free_slot(p);
+    layout_close(&s->lt, s->view_cols, s->view_rows, slot);
+    if (s->active_id == id)
+        s->active_id = s->last_id != id ? s->last_id : 0;
+    if (session_pane_by_id(s, s->active_id) == NULL) {
+        pane *fb = session_active_pane(s);
+        if (fb) s->active_id = fb->id;
+    }
+    session_apply_layout(s);
+    if (!session_should_composite(s)) session_leave_composite(s);
 }
 
 void session_reap_children(void) {
@@ -352,56 +492,269 @@ void session_reap_children(void) {
                 p->exit_status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
                 log_msg(LOG_INFO, "session '%s': child exited %d", s->name,
                         p->exit_status);
-                uint8_t payload[4];
-                put_u32(payload, (uint32_t)p->exit_status);
-                /* Until splits exist a session has exactly one pane, so its
-                 * child exiting is the session exiting. With ≥2 panes this
-                 * becomes MSG_PANE_EXITED + sibling-absorbs-space (5c); the
-                 * session dies only with its last pane. */
-                for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
-                    if (s->clients[k])
-                        client_send(s->clients[k], MSG_SESSION_EXITED, payload, 4);
-                pane_free_slot(p);
-                bool any = false;
-                for (int k = 0; k < MAX_PANES_PER_SESSION; k++)
-                    if (s->panes[k].in_use) { any = true; break; }
-                /* Freeing here means `ls` never reports a session as dead —
-                 * the client's "dead (exit N)" branch is unreachable, and that
-                 * is intentional for v1. pane_free_slot flushed the final
-                 * screen to scrollback first, so `history` still recovers it. */
-                if (!any) session_free_slot(s);
+                session_pane_reaped(s, p, (int8_t)j);
             }
         }
     }
 }
 
+/* Compose and broadcast one frame for a session, if anything is dirty.
+ * Damage is cleared once, after every client got the same bytes — a
+ * per-client clear would blank the frame for the others. */
+static void session_composite_one(session *s) {
+    bool full = s->layout_dirty;
+    char *frame = NULL;
+    size_t n = composite_frame(s, full, &frame);
+    if (s->layout_dirty) {
+        session_send_layout(s);
+        s->layout_dirty = false;
+    }
+    if (!n) { free(frame); return; }
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i])
+            client_send(s->clients[i], MSG_OUTPUT, frame, (uint32_t)n);
+    free(frame);
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use && s->panes[i].vt)
+            vt_damage_clear(s->panes[i].vt);
+    s->last_frame_ms = now_ms();
+}
+
+void session_composite_all(void) {
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session *s = &g_sessions[i];
+        if (!s->in_use || !session_should_composite(s)) continue;
+        bool dirty = s->layout_dirty;
+        for (int j = 0; j < MAX_PANES_PER_SESSION && !dirty; j++)
+            if (s->panes[j].in_use && s->panes[j].vt && vt_any_dirty(s->panes[j].vt))
+                dirty = true;
+        if (dirty) session_composite_one(s);
+    }
+}
+
+/* Echo-latency bound for the composited path. A pure 20 ms tick adds up to
+ * 20 ms to keystroke echo at >=2 panes — perceptible to a fast typist and
+ * certain to be misattributed to the shell. The bucket composites straight
+ * from the read path when the last frame is at least this old; the tick
+ * catches whatever the bucket skips. */
+#define COMPOSITE_MIN_INTERVAL_MS 8
+
 static void pane_pty_readable(int fd, short revents, void *ud) {
     pane *p = ud;
     session *s = p->sess;
     (void)revents;
+    bool composite = session_should_composite(s);
     uint8_t buf[16384];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof buf);
         if (n > 0) {
-            /* VT engine tracks screen state (snapshot source on reattach);
-             * attached clients get the same bytes raw (perfect fidelity).
-             * This raw tee is the single-pane fast path and must survive 5c
-             * unchanged: at one pane it has perfect fidelity for free, and
-             * the byte-identical guard test pins it. */
+            /* VT engine tracks screen state (snapshot source on reattach). */
             if (p->vt) vt_feed(p->vt, buf, (size_t)n);
-            for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
-                if (s->clients[i])
-                    client_send(s->clients[i], MSG_OUTPUT, buf, (uint32_t)n);
-            if ((size_t)n < sizeof buf) return;
+            if (!composite) {
+                /* Single pane: raw tee, perfect fidelity. This path must
+                 * survive compositing unchanged — the byte-identical guard
+                 * test (test_panes_compat.sh) pins it. */
+                for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+                    if (s->clients[i])
+                        client_send(s->clients[i], MSG_OUTPUT, buf, (uint32_t)n);
+            }
+            if ((size_t)n < sizeof buf) break;
             continue;
         }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         if (n < 0 && errno == EINTR) continue;
         /* EOF or EIO: child side closed. Reap will finish the cleanup;
          * stop watching now to avoid a hot loop. */
         loop_del_fd(fd);
-        return;
+        break;
     }
+    if (composite && now_ms() - s->last_frame_ms >= COMPOSITE_MIN_INTERVAL_MS)
+        session_composite_one(s);
+}
+
+/* Push the layout into each pane: resize engines + PTYs to their rectangles
+ * and mark a full repaint. Called after split/close/resize at >=2 panes. */
+static void session_apply_layout(session *s) {
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++) {
+        pane *p = &s->panes[i];
+        if (!p->in_use) continue;
+        uint16_t x, y, cols, rows;
+        if (!layout_pane_rect(&s->lt, (int8_t)i, &x, &y, &cols, &rows)) continue;
+        p->x = x; p->y = y;
+        if (cols != p->cols || rows != p->rows) {
+            p->cols = cols;
+            p->rows = rows;
+            if (p->vt) vt_resize(p->vt, rows, cols);
+            if (p->child.master_fd >= 0) pty_resize(p->child.master_fd, cols, rows);
+        }
+    }
+    s->layout_dirty = true;
+}
+
+/* MSG_LAYOUT payload for capable clients. */
+static void session_send_layout(session *s) {
+    uint8_t payload[6 + MAX_PANES_PER_SESSION * 9];
+    size_t off = 6;
+    uint8_t n = 0;
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++) {
+        pane *p = &s->panes[i];
+        if (!p->in_use) continue;
+        payload[off] = p->id;
+        put_u16(payload + off + 1, p->x);
+        put_u16(payload + off + 3, p->y);
+        put_u16(payload + off + 5, p->cols);
+        put_u16(payload + off + 7, p->rows);
+        off += 9;
+        n++;
+    }
+    put_u16(payload, s->view_cols);
+    put_u16(payload + 2, s->view_rows);
+    payload[4] = s->active_id;
+    payload[5] = n;
+    for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
+        if (s->clients[k] && client_wants_panes(s->clients[k]))
+            client_send(s->clients[k], MSG_LAYOUT, payload, (uint32_t)off);
+}
+
+/* Dropping from composited to single-pane: the tick stops compositing, so
+ * the transition itself must broadcast the final state — MSG_LAYOUT for
+ * capable clients, and a full single-pane repaint (leaving the composite's
+ * autowrap-off is what would otherwise make the survivor unwrappable). */
+static void session_leave_composite(session *s) {
+    session_send_layout(s);
+    s->layout_dirty = false;
+    pane *p = session_active_pane(s);
+    if (!p || !p->vt) return;
+    char *blob = NULL;
+    size_t n = vt_snapshot(p->vt, &blob);
+    /* ?7h before the repaint: the composite ran with autowrap off, and the
+     * snapshot only re-asserts the mode at its tail. Belt and braces. */
+    static const char rearm[] = "\x1b[?7h";
+    for (int i = 0; i < MAX_CLIENTS_PER_SESSION; i++)
+        if (s->clients[i]) {
+            client_send(s->clients[i], MSG_OUTPUT, rearm, sizeof rearm - 1);
+            if (n) client_send(s->clients[i], MSG_OUTPUT, blob, (uint32_t)n);
+        }
+    free(blob);
+    vt_damage_clear(p->vt);
+}
+
+pane *session_split(session *s, uint8_t target, bool stacked) {
+    pane *tp = session_pane_by_id(s, target);
+    if (!tp) { errno = EINVAL; return NULL; }
+    int8_t tslot = (int8_t)(tp - s->panes);
+
+    int8_t nslot = -1;
+    for (int8_t i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (!s->panes[i].in_use) { nslot = i; break; }
+    if (nslot < 0) { errno = ENOSPC; return NULL; }
+
+    /* The tree mutates only if minimums hold at CURRENT geometry. */
+    if (!layout_split(&s->lt, s->view_cols, s->view_rows, tslot, nslot, stacked)) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    /* Allocate a wire id no live pane holds. 254 candidates for <= 5 live
+     * split panes, so the loop always terminates. */
+    uint8_t id;
+    do {
+        id = s->next_id;
+        s->next_id = (uint8_t)(s->next_id == 254 ? 1 : s->next_id + 1);
+    } while (session_pane_by_id(s, id) != NULL);
+
+    uint16_t x = 0, y = 0, cols = 0, rows = 0;
+    layout_pane_rect(&s->lt, nslot, &x, &y, &cols, &rows);
+    pane *np = pane_alloc(s, id, cols, rows);
+    if (!np) {
+        int saved = errno;
+        layout_close(&s->lt, s->view_cols, s->view_rows, nslot);
+        errno = saved;
+        return NULL;
+    }
+
+    const char *sh = getenv("SHELL");
+    char *argv[2] = {(char *)(sh && *sh ? sh : "/bin/sh"), NULL};
+    if (pty_spawn(&np->child, argv, cols, rows, "xterm-256color") != 0) {
+        int saved = errno;
+        pane_alloc_undo(np);
+        layout_close(&s->lt, s->view_cols, s->view_rows, nslot);
+        errno = saved;
+        return NULL;
+    }
+    np->in_use = true;
+    if (loop_add_fd(np->child.master_fd, POLLIN, pane_pty_readable, np) != 0) {
+        int saved = errno;
+        log_msg(LOG_ERR, "session '%s': no event-loop slot for pane fd %d",
+                s->name, np->child.master_fd);
+        kill(np->child.pid, SIGHUP);
+        close(np->child.master_fd);
+        np->child.master_fd = -1;
+        pane_alloc_undo(np);
+        layout_close(&s->lt, s->view_cols, s->view_rows, nslot);
+        errno = saved ? saved : ENOSPC;
+        return NULL;
+    }
+
+    s->last_id = s->active_id;
+    s->active_id = id;
+    session_apply_layout(s);
+    log_msg(LOG_INFO, "session '%s': pane %u pid %d on fd %d (%ux%u at %u,%u)",
+            s->name, id, (int)np->child.pid, np->child.master_fd,
+            np->cols, np->rows, np->x, np->y);
+    return np;
+}
+
+bool session_close_pane(session *s, uint8_t id) {
+    pane *p = session_pane_by_id(s, id);
+    if (!p) return false;
+    uint8_t real_id = p->id;
+    int8_t slot = (int8_t)(p - s->panes);
+
+    int live = 0;
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++)
+        if (s->panes[i].in_use) live++;
+
+    if (p->child.pid > 0) kill(p->child.pid, SIGHUP);
+    if (live <= 1) {
+        session_free_slot(s); /* last pane: the session dies with it */
+        return true;
+    }
+    pane_free_slot(p);
+    layout_close(&s->lt, s->view_cols, s->view_rows, slot);
+    if (s->active_id == real_id)
+        s->active_id = s->last_id != real_id ? s->last_id : 0;
+    if (session_pane_by_id(s, s->active_id) == NULL) {
+        pane *fb = session_active_pane(s);
+        if (fb) s->active_id = fb->id;
+    }
+    session_apply_layout(s);
+    if (!session_should_composite(s)) session_leave_composite(s);
+    return true;
+}
+
+bool session_select_pane(session *s, uint8_t mode, uint8_t id) {
+    pane *cur = session_active_pane(s);
+    if (!cur) return false;
+    pane *next = NULL;
+    if (mode == 0) {
+        next = session_pane_by_id(s, id);
+    } else if (mode == 3) {
+        next = session_pane_by_id(s, s->last_id);
+    } else {
+        /* next/prev in slot order, wrapping. */
+        int8_t start = (int8_t)(cur - s->panes);
+        int step = mode == 1 ? 1 : MAX_PANES_PER_SESSION - 1;
+        for (int k = 1; k <= MAX_PANES_PER_SESSION; k++) {
+            int8_t i = (int8_t)((start + k * step) % MAX_PANES_PER_SESSION);
+            if (s->panes[i].in_use) { next = &s->panes[i]; break; }
+        }
+    }
+    if (!next || next == cur) return next == cur;
+    s->last_id = s->active_id;
+    s->active_id = next->id;
+    s->layout_dirty = true; /* cursor + input modes move; full frame re-arms */
+    return true;
 }
 
 /* Ceiling for the blob carried inside one MSG_SNAPSHOT. A worst-case grid
@@ -421,13 +774,37 @@ void session_attach(session *s, struct client *c, uint16_t cols, uint16_t rows) 
         if (s->clients[i] == c) return;
         if (!s->clients[i]) {
             s->clients[i] = c;
-            /* Force geometry to the newest client (last-resize-wins). */
-            session_resize(s, cols, rows);
+            /* Geometry policy: last-resize-wins at one pane (unchanged from
+             * the pre-pane daemon, guarded byte-for-byte); at >=2 panes the
+             * SMALLEST attached client wins, or the composite would paint
+             * outside a smaller client's screen. Applying smallest-wins
+             * universally would change single-pane bytes — a separate PR. */
+            if (session_should_composite(s)) {
+                uint16_t mc = cols, mr = rows;
+                for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++) {
+                    if (!s->clients[k] || s->clients[k] == c) continue;
+                    uint16_t oc, or_;
+                    client_geometry(s->clients[k], &oc, &or_);
+                    if (oc && oc < mc) mc = oc;
+                    if (or_ && or_ < mr) mr = or_;
+                }
+                session_resize(s, mc, mr);
+            } else {
+                session_resize(s, cols, rows);
+            }
             /* Real grid snapshot: repaint blob restores screen content,
-             * cursor, and tracked modes exactly as the app left them. */
+             * cursor, and tracked modes exactly as the app left them. At
+             * >=2 panes the equivalent is a full composite frame — the same
+             * kind of byte blob, so the client cannot tell the difference. */
             pane *p = session_active_pane(s);
             char *blob = NULL;
-            size_t blob_len = (p && p->vt) ? vt_snapshot(p->vt, &blob) : 0;
+            size_t blob_len;
+            if (session_should_composite(s)) {
+                blob_len = composite_frame(s, true, &blob);
+                session_send_layout(s);
+            } else {
+                blob_len = (p && p->vt) ? vt_snapshot(p->vt, &blob) : 0;
+            }
             static const char fallback[] = "\x1b[0m\x1b[2J\x1b[H";
             const char *body = blob_len ? blob : fallback;
             size_t body_len = blob_len ? blob_len : sizeof fallback - 1;
@@ -487,14 +864,21 @@ void session_resize(session *s, uint16_t cols, uint16_t rows) {
     if (!cols || !rows || (cols == s->view_cols && rows == s->view_rows)) return;
     s->view_cols = cols;
     s->view_rows = rows;
-    /* One pane fills the whole view, so the geometries coincide. The split
-     * tree (5c) is what will make pane geometry diverge from view geometry. */
-    pane *p = session_active_pane(s);
-    if (!p) return;
-    p->cols = cols;
-    p->rows = rows;
-    /* Grid reflow first, then TIOCSWINSZ (SIGWINCH makes the app repaint
-     * into the new geometry). */
-    if (p->vt) vt_resize(p->vt, rows, cols);
-    if (p->child.master_fd >= 0) pty_resize(p->child.master_fd, cols, rows);
+    if (!session_should_composite(s)) {
+        /* One pane fills the whole view: geometries coincide, and this path
+         * must stay byte-identical to the pre-pane daemon. */
+        pane *p = session_active_pane(s);
+        if (!p) return;
+        p->cols = cols;
+        p->rows = rows;
+        /* Grid reflow first, then TIOCSWINSZ (SIGWINCH makes the app repaint
+         * into the new geometry). */
+        if (p->vt) vt_resize(p->vt, rows, cols);
+        if (p->child.master_fd >= 0) pty_resize(p->child.master_fd, cols, rows);
+        return;
+    }
+    /* On a shrink the tree cannot satisfy, rectangles clamp to >=1x1 and
+     * still render: destroying a pane on resize is data loss. */
+    layout_reflow(&s->lt, cols, rows);
+    session_apply_layout(s);
 }

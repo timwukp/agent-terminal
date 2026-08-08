@@ -108,6 +108,16 @@ struct vt {
     uint16_t last_row, last_col;
     bool last_valid;
 
+    /* Row damage since the last vt_damage_clear, for incremental compositing.
+     * Tracks the ACTIVE grid only: an alt-screen switch dirties every row, so
+     * a consumer never needs to know which grid a bit was set against. Fixed
+     * size (128 bytes) inside the one calloc, so invariant 1 holds by
+     * construction. Cursor movement is deliberately not tracked — the
+     * composite compares vt_get_cursor against what it last emitted, because
+     * a bit per cursor twitch would dirty a row nothing on it changed. */
+    uint32_t dirty[(VT_ROWS_MAX + 31) / 32];
+    bool dirty_all;
+
     vt_callbacks cb;
     void *ud;
 };
