@@ -96,6 +96,7 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
 | `agent-terminal kill -s name` | Terminate a session. |
 | `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves. |
+| `agent-terminal version` | Client build (git hash) plus the running daemon's pid, restart generation, and whether it supports panes. Works with no daemon (`daemon: not running`). |
 
 A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
 must be a single path component: no `/`, no leading `.`, max 63 bytes. Interior
@@ -250,6 +251,50 @@ panes. All four are implemented. What remains:
   musical notation) are still dropped. ZWJ sequences are not clusters here,
   so a multi-person emoji splits into its component glyphs. CJK wide
   characters are fully supported.
+
+## Troubleshooting
+
+**Is the daemon running, and which build?**
+```sh
+agent-terminal version
+# agent-terminal 1a2b3c4d5e6f
+# daemon: pid 4242, generation 3, panes yes
+```
+`generation` counts in-place reloads (the pid deliberately does not change
+across one). `daemon: not running` is not an error — the next `new` or
+`attach` autospawns it.
+
+**Key chords do nothing (splits, copy-mode)?** Almost always a version skew:
+an older daemon is answering the socket. Unknown messages are skipped by
+design, so new chords no-op silently against an old daemon. `agent-terminal
+version` shows the mismatch (`panes no`, or a daemon hash older than the
+client's), and the client warns on attach. Fix without losing sessions:
+```sh
+agent-terminal reload
+```
+
+**Client crashed / terminal froze?** The session is fine. Open a new
+terminal and `agent-terminal attach -s <name>`. If you don't remember the
+name: `agent-terminal ls`.
+
+**Daemon actually crashed?** Sessions and their children are gone (see
+Limitations), but scrollback survives on disk:
+```sh
+agent-terminal history -s <name> | less -R
+```
+The next `new` starts a fresh daemon; a leftover socket or lock file from
+the crash is detected and cleaned up automatically.
+
+**A session vanished from `ls`?** Its child exited — that is `ls`'s
+contract (finished sessions disappear rather than showing "dead"). The final
+screen was flushed to scrollback, so `history -s <name>` shows what it
+printed last, including output that never scrolled off.
+
+**Scripted call hangs or lies?** It shouldn't: with stdin at EOF the client
+waits for the daemon's confirmation, fails `no such session` for missing
+sessions (rc=1), and gives up with `no confirmation from daemon` after 5 s
+against a wedged daemon. See
+[AGENTS.md §4](AGENTS.md#4-scripted--non-interactive-use).
 
 ## Development
 

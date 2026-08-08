@@ -39,6 +39,22 @@ ifeq ($(UNAME_S),Linux)
   LDFLAGS += -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 endif
 
+# Version stamp: the short commit hash, "-dirty" when the tree differs from
+# HEAD, or "unknown" outside a git checkout (release tarballs). Generated into
+# a header and compared by CONTENT before replacing, so an unchanged version
+# does not touch the mtime and force rebuilds of everything that includes it.
+# Outside a git checkout both subcommands fail; the -dirty suffix must not
+# fire there (a tarball is not "dirty", it is just not a checkout).
+AT_VERSION := $(shell if git rev-parse --short=12 HEAD >/dev/null 2>&1; then   git rev-parse --short=12 HEAD;   git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty; else echo unknown; fi | tr -d '\n')
+VERSION_H := $(O)/include/at_version.h
+
+$(VERSION_H): FORCE
+	@mkdir -p $(dir $@)
+	@printf '#define AT_VERSION "%s"\n' '$(AT_VERSION)' > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm $@.tmp || mv $@.tmp $@
+
+.PHONY: FORCE
+
 COMMON_SRC := $(wildcard src/common/*.c)
 VT_SRC     := $(wildcard src/vt/*.c)
 DAEMON_SRC := $(wildcard src/daemon/*.c)
@@ -63,6 +79,11 @@ all: $(O)/agent-terminald $(O)/agent-terminal
 $(O)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Only the two entry points bake the version in; scoping the dependency here
+# keeps a hash change from rebuilding the whole tree.
+$(O)/src/client/main.o $(O)/src/daemon/main.o: $(VERSION_H)
+$(O)/src/client/main.o $(O)/src/daemon/main.o: CFLAGS += -I$(O)/include
 
 $(O)/libvt.a: $(VT_OBJ)
 	ar rcs $@ $^
