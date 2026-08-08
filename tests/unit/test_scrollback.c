@@ -223,6 +223,58 @@ TEST(list_logs) {
     ASSERT_TRUE(n >= 5); /* the sessions created above */
 }
 
+TEST(pane_zero_is_the_plain_log) {
+    /* The refactor's compatibility claim: pane 0 writes the same
+     * scrollback.log sb_open always wrote, provable by reading one through
+     * the other in both directions. If pane 0 got its own filename, every
+     * existing log — and `history`, which reads by session name only — would
+     * silently come up empty. */
+    scrollback *sb = sb_open_pane("t-pane0", 0, 100, 0);
+    ASSERT_TRUE(sb != NULL);
+    vt_cell cells[20];
+    make_line(cells, 20, "via-pane-zero");
+    sb_push_line(sb, cells, 20);
+    sb_close(sb);
+
+    collect got = {0};
+    ASSERT_EQ_INT((long long)sb_read_log("t-pane0", collect_cb, &got), 1);
+    ASSERT_TRUE(strstr(got.lines[0], "via-pane-zero") != NULL);
+
+    /* And the reverse: sb_open appends to the same file, same seq stream. */
+    sb = sb_open("t-pane0", 100, 0);
+    ASSERT_TRUE(sb != NULL);
+    ASSERT_EQ_INT((long long)sb_total_lines(sb), 1); /* resumed, not fresh */
+    sb_close(sb);
+}
+
+TEST(pane_logs_are_isolated) {
+    scrollback *p0 = sb_open_pane("t-panes", 0, 100, 0);
+    scrollback *p3 = sb_open_pane("t-panes", 3, 100, 0);
+    ASSERT_TRUE(p0 != NULL && p3 != NULL);
+    vt_cell cells[20];
+    make_line(cells, 20, "zero-only");
+    sb_push_line(p0, cells, 20);
+    make_line(cells, 20, "three-only");
+    sb_push_line(p3, cells, 20);
+    /* Independent seq streams, not interleaved halves of one. */
+    ASSERT_EQ_INT((long long)sb_total_lines(p0), 1);
+    ASSERT_EQ_INT((long long)sb_total_lines(p3), 1);
+    sb_close(p0);
+    sb_close(p3);
+
+    /* The session-level reader sees pane 0 only: pane histories are separate
+     * documents, not lines to merge (their seqs would collide). */
+    collect got = {0};
+    ASSERT_EQ_INT((long long)sb_read_log("t-panes", collect_cb, &got), 1);
+    ASSERT_TRUE(strstr(got.lines[0], "zero-only") != NULL);
+
+    /* Reopening pane 3 resumes its own numbering. */
+    p3 = sb_open_pane("t-panes", 3, 100, 0);
+    ASSERT_TRUE(p3 != NULL);
+    ASSERT_EQ_INT((long long)sb_total_lines(p3), 1);
+    sb_close(p3);
+}
+
 int main(void) {
     setup_home();
     RUN(push_and_read_back);
@@ -233,5 +285,7 @@ int main(void) {
     RUN(sgr_survives_roundtrip);
     RUN(combining_survives_roundtrip);
     RUN(list_logs);
+    RUN(pane_zero_is_the_plain_log);
+    RUN(pane_logs_are_isolated);
     TEST_MAIN_END();
 }

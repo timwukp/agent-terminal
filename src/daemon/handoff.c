@@ -123,6 +123,8 @@ static int set_cloexec(int fd, bool on) {
 
 typedef struct {
     const session *s;
+    const pane *p; /* the session's single pane; the format grows a pane
+                    * count (new HANDOFF_VERSION) when splits land */
     char *blob;
     size_t blob_len;
 } export_rec;
@@ -142,14 +144,15 @@ static bool write_state(FILE *f, const export_rec *recs, uint16_t n, int listen_
 
     for (uint16_t i = 0; i < n; i++) {
         const session *s = recs[i].s;
+        const pane *p = recs[i].p;
         size_t nlen = strlen(s->name);
         uint8_t rec[1 + 4 + 4 + 2 + 2 + 4];
         uint8_t b = (uint8_t)nlen;
         if (!wr(f, &b, 1) || !wr(f, s->name, nlen)) return false;
-        put_u32(rec, (uint32_t)s->child.master_fd);
-        put_u32(rec + 4, (uint32_t)s->child.pid);
-        put_u16(rec + 8, s->cols);
-        put_u16(rec + 10, s->rows);
+        put_u32(rec, (uint32_t)p->child.master_fd);
+        put_u32(rec + 4, (uint32_t)p->child.pid);
+        put_u16(rec + 8, p->cols);
+        put_u16(rec + 10, p->rows);
         put_u32(rec + 12, (uint32_t)recs[i].blob_len);
         if (!wr(f, rec, 16)) return false;
         if (recs[i].blob_len && !wr(f, recs[i].blob, recs[i].blob_len)) return false;
@@ -164,18 +167,20 @@ int handoff_exec(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         session *s = session_at(i);
         if (!s) continue;
+        pane *p = session_active_pane(s);
         /* A session whose child is gone has nothing to keep alive, and a
          * session with no master fd cannot be handed over. Neither state is
          * reachable today (reaping frees the slot), so this is a guard, not a
          * case: dropping such a session would silently lose it. */
-        if (s->child.pid <= 0 || s->child.master_fd < 0) {
+        if (!p || p->child.pid <= 0 || p->child.master_fd < 0) {
             log_msg(LOG_WARN, "handoff: session '%s' has no live child, not carried over",
                     s->name);
             continue;
         }
         recs[n].s = s;
+        recs[n].p = p;
         recs[n].blob = NULL;
-        recs[n].blob_len = s->vt ? vt_snapshot(s->vt, &recs[n].blob) : 0;
+        recs[n].blob_len = p->vt ? vt_snapshot(p->vt, &recs[n].blob) : 0;
         if (recs[n].blob_len > HANDOFF_BLOB_MAX) {
             /* Keep the child, lose the screen. The alternative — abort the
              * reload — leaves the operator with a daemon they cannot restart. */
@@ -207,9 +212,9 @@ int handoff_exec(void) {
     bool cleared_listen = listen_fd >= 0 && set_cloexec(listen_fd, false) == 0;
     bool cleared_lock = g_lock_fd >= 0 && set_cloexec(g_lock_fd, false) == 0;
     for (uint16_t i = 0; i < n; i++)
-        if (set_cloexec(recs[i].s->child.master_fd, false) != 0)
+        if (set_cloexec(recs[i].p->child.master_fd, false) != 0)
             log_msg(LOG_WARN, "handoff: session '%s': cannot clear FD_CLOEXEC on fd %d (%s)",
-                    recs[i].s->name, recs[i].s->child.master_fd, strerror(errno));
+                    recs[i].s->name, recs[i].p->child.master_fd, strerror(errno));
 
     int rc = -1;
     /* O_EXCL: a leftover state file means a previous reload died between write
@@ -255,7 +260,7 @@ done:
     /* Failed before exec: put every descriptor back the way it was so the
      * still-running daemon keeps its close-on-exec guarantees for the next
      * child it spawns. */
-    for (uint16_t i = 0; i < n; i++) set_cloexec(recs[i].s->child.master_fd, true);
+    for (uint16_t i = 0; i < n; i++) set_cloexec(recs[i].p->child.master_fd, true);
     if (cleared_listen) set_cloexec(listen_fd, true);
     if (cleared_lock) set_cloexec(g_lock_fd, true);
     for (uint16_t i = 0; i < n; i++) free(recs[i].blob);
