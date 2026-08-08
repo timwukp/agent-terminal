@@ -73,9 +73,11 @@ sudo make install                     # or system-wide, PREFIX defaults to /usr/
 Installs `agent-terminald`, `agent-terminal` and `agent-terminal.1`.
 `make install` depends on `all`, so a separate build step is optional.
 
-**Whether `agent-terminald` is on `PATH` changes client behaviour** — see the
-autospawn note in §3. An agent installing this unattended should prefer
-`PREFIX="$HOME/.local"`: `sudo` will block on a password prompt with no tty.
+The client autospawns the daemon that sits **next to its own binary**, with
+`PATH` as fallback — see the autospawn note in §3; running from
+`build/release/` needs no install at all. An agent installing this unattended
+should prefer `PREFIX="$HOME/.local"`: `sudo` will block on a password prompt
+with no tty.
 
 ## 3. Command surface
 
@@ -100,8 +102,10 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | `ls`, no daemon running | **0** | warns on stderr, prints `no sessions (daemon not running)` |
 | `ls`, daemon running | 0 | `name: 80x24, pid N, K clients` per line |
 | `history -s missing` | 1 | `no scrollback found for 'missing'` |
-| `attach -s missing`, `agent-terminald` on `PATH` | 1 | `no such session` (daemon was autospawned) |
-| `attach -s missing`, daemon binary not on `PATH` | 1 | `cannot reach daemon at <socket path>` |
+| `attach -s missing`, daemon reachable or autospawnable | 1 | `no such session` (autospawn prefers the daemon next to the client binary, then `PATH` — see §3) |
+| `attach -s missing`, no daemon binary findable at all | 1 | `cannot reach daemon at <socket path>` |
+| `attach -s missing < /dev/null` (scripted) | 1 | `no such session` — the stdin-EOF detach waits for the daemon's verdict instead of racing it |
+| any verb, daemon accepts but never confirms | 1 | `no confirmation from daemon for session '<n>'` after a 5 s bound — a wedged daemon cannot hang a script |
 | unknown verb / missing `-s` | 2 | usage block |
 | `kill -s name`, session exists | 0 | `killed 'name'` |
 | `kill -s name`, no such session | 1 | `no such session` (the daemon's own message) |
@@ -144,31 +148,52 @@ needs no sleep.
 
 `new` and `attach` start `agent-terminald` themselves if the socket is
 unreachable (`src/client/attach.c`, `daemon_connect(auto_start)`): they `fork`,
-`execlp("agent-terminald", ...)` — **resolved via `PATH`** — then retry the
-connect for up to 2 s. So after `make install` there is no separate "start the
-daemon" step, and the two `attach` rows above differ only in whether the daemon
-binary is reachable on `PATH`. Running the client straight out of
-`build/release/` without that directory on `PATH` takes the second row.
+exec **the `agent-terminald` sitting in the client's own directory first**
+(resolved via `_NSGetExecutablePath` / `/proc/self/exe` + `realpath`), falling
+back to a `PATH` lookup, then retry the connect for up to 2 s. So after
+`make install` there is no separate "start the daemon" step, and running the
+client straight out of `build/release/` works too — the sibling daemon is
+right there. The `cannot reach daemon` row is only reachable when the client
+binary was copied somewhere on its own AND no `agent-terminald` is on `PATH`.
 
-## 4. The constraint that matters most for agents
+Sibling-first exists because `PATH`-only resolution silently started whatever
+build was installed first: a stale daemon answers the socket, and the
+protocol's skip-unknown-frames rule turns every message it predates into a
+no-op with no error anywhere. The client also checks `MSG_HELLO_OK`'s
+`server_flags` and warns once on stderr when the answering daemon lacks pane
+support, naming the remedy (`agent-terminal reload`).
 
-**`agent-terminal new` with `stdin` closed or `/dev/null` will not leave a
-usable session behind.**
+## 4. Scripted / non-interactive use
 
-Measured: `agent-terminal new -s x -- sleep 30 < /dev/null` exits **0**, and
-the child *does* run to completion (verified with a file-writing child — it
-still wrote its "survived" marker 8 seconds later). But the client sees
-immediate EOF on stdin, treats it as a detach and exits; the child's PTY then
-reaches EOF, the daemon reaps it, and the session disappears from `ls` right
-away. So `attach` and `history` find nothing.
+**`agent-terminal new -s x -- cmd < /dev/null` now works**: it creates the
+session, waits for the daemon to confirm it, prints the detach message, and
+exits 0 with the session persisting under the daemon. Measured:
 
-Consequences for non-interactive callers:
+```sh
+agent-terminal new -s job -- some-command < /dev/null   # rc=0
+agent-terminal ls                                       # => job: 80x24, pid N, 0 clients
+agent-terminal attach -s job < /dev/null                # rc=0 (and detaches again)
+agent-terminal history -s job                           # scrolled-off output, after the 1 s flush
+```
 
-- Do **not** assume `new` + exit 0 means "session created and waiting".
-- Do **not** poll `ls` in a loop expecting the session to appear.
+Two earlier generations of behavior are worth knowing because scripts written
+against them are still out there. Originally the request itself could be lost
+(the daemon discarded bytes queued on a closing connection — the close-race
+class). Then the session survived but the *report* raced: the client printed
+"keeps running" before the daemon had confirmed anything, so `attach` to a
+nonexistent session also claimed success with rc=0. The current client only
+reports what the daemon confirmed:
 
-Working pattern — hold stdin open with a FIFO, then detach explicitly with the
-`Ctrl-\ Ctrl-d` chord (`\x1c\x04`):
+- Session exists / was created → the snapshot arrives → detach message, rc=0.
+- It does not → the daemon's error arrives → `no such session` on stderr, rc=1.
+- The daemon confirms nothing within 5 s → `no confirmation from daemon`,
+  rc=1. A wedged daemon cannot hang a script.
+
+So exit 0 from a scripted `new`/`attach` **does** now mean the daemon
+confirmed the session. What a scripted `new` does not give you is a *client*:
+stdin is already at EOF, so nothing stays attached to watch output or type.
+To drive a session interactively from a script, hold stdin open with a FIFO
+and detach explicitly with the `Ctrl-\ Ctrl-d` chord (`\x1c\x04`):
 
 ```sh
 mkfifo /tmp/at.in
@@ -177,13 +202,12 @@ exec 8>/tmp/at.in            # hold the write end open
 sleep 1.5                    # let the session register
 
 agent-terminal ls            # => work: 80x24, pid 99218, 1 client
+printf 'make test\n' >&8     # type into the session
 
 printf '\x1c\x04' >&8        # detach, leaving the session running
 exec 8>&-
-agent-terminal ls            # => work: 80x24, pid 99218, 0 clients
 ```
 
-The session now persists with zero clients, exactly as after a client crash.
 This is the same mechanism the integration tests use — read
 `tests/integration/test_reattach.sh` for a complete worked example, and source
 `tests/integration/lib.sh` for `require_bins` / `require_alive` / `wait_for`.

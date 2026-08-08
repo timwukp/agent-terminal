@@ -43,7 +43,15 @@ network listener of any kind.
    damaged data). Note that scrollback contains whatever your sessions
    displayed — treat the directory as sensitive.
 
-4. **Session names → filesystem paths.** A name becomes one path component
+4. **Autospawn → what gets executed.** When no daemon answers the socket,
+   `new`/`attach` start one: first the `agent-terminald` in the client
+   binary's own directory (same trust domain — anyone who can write there
+   can replace the client itself), then a `PATH` lookup as fallback. The
+   daemon is never resolved from the current working directory, and the
+   client warns when the answering daemon's capabilities say it is an
+   older build than the client.
+
+5. **Session names → filesystem paths.** A name becomes one path component
    under `~/.agent-terminal/sessions/`, so it is validated by
    `at_valid_session_name()` (no `/`, no leading `.`, no control bytes, not
    empty) at three independent layers: the client CLI, the daemon's
