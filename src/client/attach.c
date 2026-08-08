@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -15,6 +16,9 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h> /* _NSGetExecutablePath, for sibling_daemon_path */
+#endif
 
 #define NAME_MAX_WIRE 255
 
@@ -88,12 +92,56 @@ static int hello(int fd) {
         return -1;
     }
     if (hdr[4] != MSG_HELLO_OK) return -1;
-    /* Both fields are optional tail: a daemon older than this client sends 6
+    /* All tail fields are optional: a daemon older than this client sends 6
      * bytes, and the protocol's additive rule means a short payload is not an
      * error. */
     if (plen >= 6) g_daemon_pid = get_u32(payload + 2);
     g_daemon_gen = plen >= 10 ? get_u32(payload + 6) : 0;
+    /* Version-skew visibility. Unknown message types are skipped by design,
+     * so against a pane-less daemon every split chord is a silent no-op —
+     * nothing errors, keys just do nothing. Say so once, on the evidence the
+     * daemon itself provides: a short HELLO_OK or a flags word without the
+     * pane bit both mean an older build is answering (typically a stale
+     * binary on PATH, or a daemon from before the last upgrade that was
+     * never `reload`ed). */
+    uint16_t server_flags = plen >= 12 ? get_u16(payload + 10) : 0;
+    if (!(server_flags & SERVER_CAP_PANES)) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "agent-terminal: daemon (pid %u) is an older build "
+                            "without pane support; splits will do nothing. "
+                            "`agent-terminal reload` upgrades it in place.\n",
+                    g_daemon_pid);
+        }
+    }
     return 0;
+}
+
+/* The daemon binary that matches THIS client: the one in our own directory.
+ * Autospawning via PATH alone picked up whatever agent-terminald was
+ * installed first — silently a different, possibly older build, whose
+ * missing message types make new features no-op with no error anywhere
+ * (unknown frame types are skipped by design). Returns false if our own
+ * path cannot be resolved; the caller falls back to PATH. */
+static bool sibling_daemon_path(char *out, size_t outsz) {
+    char self[1024];
+#ifdef __APPLE__
+    uint32_t sz = sizeof self;
+    if (_NSGetExecutablePath(self, &sz) != 0) return false;
+#else
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (n <= 0) return false;
+    self[n] = '\0';
+#endif
+    char resolved[PATH_MAX];
+    if (!realpath(self, resolved)) return false;
+    char *slash = strrchr(resolved, '/');
+    if (!slash) return false;
+    *slash = '\0';
+    if ((size_t)snprintf(out, outsz, "%s/agent-terminald", resolved) >= outsz)
+        return false;
+    return access(out, X_OK) == 0;
 }
 
 int daemon_connect(int auto_start) {
@@ -104,10 +152,15 @@ int daemon_connect(int auto_start) {
     }
     int fd = try_connect(path);
     if (fd < 0 && auto_start) {
+        char sibling[1088];
+        bool have_sibling = sibling_daemon_path(sibling, sizeof sibling);
         pid_t pid = fork();
         if (pid == 0) {
+            /* Sibling first — the build that shipped with this client —
+             * then PATH for installed layouts where only the client was
+             * given an explicit path. */
+            if (have_sibling) execl(sibling, "agent-terminald", (char *)NULL);
             execlp("agent-terminald", "agent-terminald", (char *)NULL);
-            /* also try alongside our own binary via PATH failure fallthrough */
             _exit(127);
         }
         if (pid > 0) {
@@ -314,21 +367,45 @@ int attach_run(const char *name, char *const argv[], int argc) {
         uint8_t *scratch = xmalloc(PROTO_MAX_PAYLOAD);
         chord ch = {0};
         int detached = 0, exited = 0, exit_code = 0, conn_lost = 0;
+        /* "[detached — keeps running]" is a claim about the DAEMON's state,
+         * so it may only be printed once the daemon has confirmed the attach
+         * (the snapshot is that confirmation). A client whose stdin is
+         * already at EOF — `new ... < /dev/null`, cron, CI — used to report
+         * detached-and-running for a session the daemon might be about to
+         * refuse: rc=0, message on stdout, and the MSG_ERR still in flight.
+         * stdin_gone defers the exit, attached_ok is the daemon's word. */
+        int stdin_gone = 0, attached_ok = 0;
+        uint64_t stdin_gone_at = 0;
         uint64_t sb_lines = 0; /* daemon's scrollback total, from MSG_SNAPSHOT */
         uint8_t active_pane = 0; /* from MSG_LAYOUT; 0 == pane 0 == pre-pane */
 
         while (!detached && !exited && !conn_lost) {
             struct pollfd pfds[3] = {
-                {.fd = 0, .events = POLLIN},
+                /* -1 once stdin hit EOF: poll ignores negative fds, and the
+                 * exhausted fd would otherwise re-report forever. */
+                {.fd = stdin_gone ? -1 : 0, .events = POLLIN},
                 {.fd = fd, .events = POLLIN},
                 {.fd = g_winch_pipe[0], .events = POLLIN},
             };
             int timeout = -1;
             if (ch.armed) timeout = CHORD_TIMEOUT_MS;
             else if (pg && pager_esc_pending(pg)) timeout = PAGER_ESC_TIMEOUT_MS;
+            else if (stdin_gone && !attached_ok) timeout = 250;
             int n = poll(pfds, 3, timeout);
             if (n < 0 && errno != EINTR) { conn_lost = 1; break; }
 
+            if (stdin_gone && !attached_ok &&
+                now_ms() - stdin_gone_at >= 5000) {
+                /* Daemon accepted the connection but confirmed nothing in 5s.
+                 * Do not claim the session is running — nobody said so. */
+                fprintf(stderr, "agent-terminal: no confirmation from daemon "
+                                "for session '%s'\n", name);
+                ring_free(&in);
+                free(scratch);
+                close(fd);
+                tty_raw_leave();
+                return 1;
+            }
             if (ch.armed && now_ms() - ch.armed_at >= CHORD_TIMEOUT_MS) {
                 /* timeout: forward the held Ctrl-\ */
                 uint8_t b = KEY_CTRL_BACKSLASH;
@@ -466,7 +543,10 @@ int attach_run(const char *name, char *const argv[], int argc) {
                         }
                     }
                 } else if (r == 0) {
-                    detached = 1; /* stdin gone: treat as detach */
+                    /* stdin gone: detach — but only once the daemon has
+                     * confirmed the session exists (see stdin_gone above). */
+                    if (attached_ok) detached = 1;
+                    else { stdin_gone = 1; stdin_gone_at = now_ms(); }
                 } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
                     /* A hard read error on stdin is permanent, and poll() will
                      * keep reporting the fd ready, so ignoring it here spins the
@@ -475,7 +555,8 @@ int attach_run(const char *name, char *const argv[], int argc) {
                      * way to get keystrokes from it again. EINTR/EAGAIN fall
                      * through to the next poll(), which is correct: those are
                      * retryable and poll() is what should do the waiting. */
-                    detached = 1;
+                    if (attached_ok) detached = 1;
+                    else { stdin_gone = 1; stdin_gone_at = now_ms(); }
                 }
             }
 
@@ -510,6 +591,9 @@ int attach_run(const char *name, char *const argv[], int argc) {
                         }
                         case MSG_SNAPSHOT: {
                             if (len < 12) break;
+                            attached_ok = 1;
+                            if (stdin_gone) detached = 1; /* confirmed: NOW the
+                                                           * detach message is true */
                             /* u16 cols, u16 rows, u64 sb_lines, then the blob.
                              * sb_lines is the anchor copy-mode needs: it bounds
                              * how much history exists, including lines the
@@ -563,6 +647,32 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             exit_code = len >= 4 ? (int)get_u32(scratch) : 0;
                             break;
                         case MSG_ERR: {
+                            uint16_t code = len >= 2 ? get_u16(scratch) : 0;
+                            /* Two kinds of error share this message type.
+                             * Before the attach is confirmed, any ERR is the
+                             * attach itself failing (no such session, version
+                             * mismatch) — fatal, nothing to stay attached to.
+                             * After it, an ERR is the daemon REFUSING one
+                             * request (a split below the pane minimum, a full
+                             * pane table) while the session runs on — and
+                             * exiting the client over that turned every
+                             * refused split into a lost attach: raw mode torn
+                             * down, terminal handed back, user reattaching to
+                             * a perfectly healthy session. Report it and keep
+                             * going. ERR_VERSION stays fatal at any time —
+                             * nothing sensible can follow it. */
+                            bool fatal = !attached_ok || code == ERR_VERSION;
+                            if (!fatal) {
+                                if (len >= 4) {
+                                    uint16_t mlen = get_u16(scratch + 2);
+                                    /* Visible in raw mode: CR+LF positions the
+                                     * message on a fresh line; the session's
+                                     * next repaint overwrites it. */
+                                    fprintf(stderr, "\r\nagent-terminal: %.*s\r\n",
+                                            (int)mlen, scratch + 4);
+                                }
+                                break;
+                            }
                             if (pg) { pager_leave(pg); pager_free(pg); pg = NULL; }
                             tty_raw_leave();
                             if (len >= 4) {
