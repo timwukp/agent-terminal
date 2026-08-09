@@ -516,15 +516,23 @@ itself. Do not re-enable them without reading those notes:
   `_DARWIN_C_SOURCE`, …). Those names are *required* to live in the reserved
   namespace, so there is no conforming way to satisfy the check.
 
-CI runs clang-tidy with `--warnings-as-errors='*'` using the same flags as the
-real build. To reproduce it exactly:
+CI runs clang-tidy with `--warnings-as-errors='*'` over **all four source
+dirs** using the same flags as the real build (the generated `at_version.h`
+is stubbed — its content is irrelevant to analysis). To reproduce exactly:
 
 ```sh
 docker run --rm -v "$PWD":/w:ro -w /w ubuntu:24.04 bash -c \
   'apt-get update -q && apt-get install -y -q clang-tidy &&
-   clang-tidy --warnings-as-errors="*" src/vt/*.c src/common/*.c -- \
-     -std=c17 -Isrc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE'
+   mkdir -p /tmp/inc && printf "#define AT_VERSION \"tidy\"\n" > /tmp/inc/at_version.h &&
+   clang-tidy --warnings-as-errors="*" \
+     src/vt/*.c src/common/*.c src/client/*.c src/daemon/*.c -- \
+     -std=c17 -Isrc -I/tmp/inc \
+     -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE'
 ```
+
+`make tidy` runs the same scope locally. Suppressions in the tree are
+NOLINT-with-reason at the site (length-prefixed wire fields tripping
+`bugprone-not-null-terminated-result`); do not add a bare NOLINT.
 
 Note for Apple Silicon: that container runs arm64 by default while CI is
 x86_64, and some analyzer results genuinely differ between the two. Add
