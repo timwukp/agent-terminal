@@ -26,7 +26,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$BIN/agent-terminald" -f -v > "$TMP/daemon.log" 2>&1 &
+# Bare argv[0] + a cwd far from the binary, exactly like client autospawn:
+# resolve_exe() must find its own executable WITHOUT an absolute argv[0] or
+# /proc (absent on macOS). Starting with an absolute path here was the blind
+# spot that let the macOS reload break ship — the harness was kinder than
+# reality (every real daemon is autospawned with the bare name).
+(cd / && PATH="$BIN:$PATH" exec agent-terminald -f -v) > "$TMP/daemon.log" 2>&1 &
 DPID=$!
 wait_for "listening on" "$TMP/daemon.log" 10 || fail "daemon did not start"
 require_alive "$DPID" "daemon"
