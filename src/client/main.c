@@ -30,7 +30,14 @@ static int cmd_ls(void) {
     int fd = daemon_connect(0);
     if (fd < 0) { printf("no sessions (daemon not running)\n"); return 0; }
 
-    uint8_t hdr[PROTO_HDR_SIZE] = {0, 0, 0, 0, MSG_LIST_SESSIONS};
+    /* Prefer the length-prefixed v2 list (adds pane count / zoom). A daemon
+     * without it silently skips the unknown request — bounded wait, then
+     * fall back to v1. Two requests on one connection would be simpler, but
+     * v1 daemons answer only the second, and telling "skipped v2" from "slow
+     * v1 answer" apart needs the timeout anyway. */
+    bool v2 = daemon_has_panes();
+    uint8_t hdr[PROTO_HDR_SIZE] = {0, 0, 0, 0,
+                                   v2 ? MSG_LIST_SESSIONS2 : MSG_LIST_SESSIONS};
     if (write(fd, hdr, sizeof hdr) != (ssize_t)sizeof hdr) { close(fd); return 1; }
 
     uint8_t rhdr[PROTO_HDR_SIZE];
@@ -41,7 +48,8 @@ static int cmd_ls(void) {
         got += (size_t)r;
     }
     uint32_t plen = get_u32(rhdr);
-    if (rhdr[4] != MSG_SESSION_LIST || plen > PROTO_MAX_PAYLOAD) { close(fd); return 1; }
+    if (rhdr[4] != (v2 ? MSG_SESSION_LIST2 : MSG_SESSION_LIST) ||
+        plen > PROTO_MAX_PAYLOAD) { close(fd); return 1; }
     uint8_t *p = xmalloc(plen ? plen : 1);
     got = 0;
     while (got < plen) {
@@ -55,9 +63,17 @@ static int cmd_ls(void) {
     uint16_t count = get_u16(p);
     if (count == 0) printf("no sessions\n");
     size_t off = 2;
-    for (uint16_t i = 0; i < count && off + 1 <= plen; i++) {
+    for (uint16_t i = 0; i < count && off < plen; i++) {
+        size_t entry_end = plen;
+        if (v2) {
+            if (off + 2 > plen) break;
+            uint16_t elen = get_u16(p + off); off += 2;
+            if (off + elen > plen) break;
+            entry_end = off + elen; /* unknown tail fields skip cleanly */
+        }
+        if (off + 1 > entry_end) break;
         uint8_t nlen = p[off++];
-        if (off + nlen + 14 > plen) break;
+        if (off + nlen + 14 > entry_end) break;
         char name[256];
         memcpy(name, p + off, nlen);
         name[nlen] = '\0';
@@ -68,11 +84,20 @@ static int cmd_ls(void) {
         uint8_t ncli = p[off++];
         int32_t pid = (int32_t)get_u32(p + off); off += 4;
         int32_t status = (int32_t)get_u32(p + off); off += 4;
-        if (alive)
-            printf("%s: %ux%u, pid %d, %u client%s\n", name, cols, rows, pid, ncli,
+        uint8_t npanes = 1, zoomed = 0;
+        if (v2 && off + 2 <= entry_end) {
+            npanes = p[off];
+            zoomed = p[off + 1];
+        }
+        if (alive) {
+            printf("%s: %ux%u, pid %d, %u client%s", name, cols, rows, pid, ncli,
                    ncli == 1 ? "" : "s");
-        else
+            if (npanes > 1)
+                printf(", %u panes%s", npanes, zoomed ? " (zoomed)" : "");
+            printf("\n");
+        } else
             printf("%s: dead (exit %d)\n", name, status);
+        if (v2) off = entry_end;
     }
     free(p);
     return 0;

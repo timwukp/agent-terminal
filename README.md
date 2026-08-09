@@ -127,6 +127,12 @@ ordinary output path. Input, mouse reporting and bracketed paste follow the
   (most recently active); **`x`** close the active pane. Closing the last
   pane ends the session. A split is refused (with an error) when the pane
   is smaller than 2×20 columns / 2×3 rows plus a divider.
+- **`Ctrl-\` then an arrow key** — focus the nearest pane in that
+  direction (straight across beats diagonal). A direction with no pane
+  there does nothing.
+- **`Ctrl-\` then `z`** — zoom: the active pane temporarily takes the
+  whole view; `z` again (or any split/close/focus change) restores the
+  layout. `ls` marks zoomed sessions.
 
 Inside copy-mode:
 
@@ -220,10 +226,9 @@ The original v1 release documented four deliberate gaps — no scrollback
 paging, dropped combining marks, children dying on daemon restart, and no
 panes. All four are implemented. What remains:
 
-- Panes have no directional (arrow-key) selection, no zoom, and do not
-  appear in `ls`; there are no windows/tabs — one session is one visible
-  surface. Splits also stop at 6 panes per session, and a pane below
-  20×3 plus a divider refuses to split further.
+- No windows/tabs — one session is one visible surface. Splits stop at
+  6 panes per session, and a pane below 20×3 plus a divider refuses to
+  split further.
 - A daemon **crash** still kills child processes. A daemon **restart** no
   longer does: `agent-terminal reload` (or `SIGHUP`) re-execs the daemon in
   place, so the pid never changes, no PTY master fd is ever closed, no child

@@ -47,7 +47,10 @@ enum proto_type {
     MSG_DETACH         = 0x15, /* C→D: empty */
     MSG_SPLIT_PANE     = 0x16, /* C→D: u8 stacked, u8 target_pane_id (255 = active) */
     MSG_CLOSE_PANE     = 0x17, /* C→D: u8 pane_id (255 = active) */
-    MSG_SELECT_PANE    = 0x18, /* C→D: u8 mode (0=by id,1=next,2=prev,3=last), u8 pane_id */
+    MSG_SELECT_PANE    = 0x18, /* C→D: u8 mode (0=by id, 1=next, 2=prev, 3=last,
+                                * 4=up, 5=down, 6=right, 7=left — geometrically
+                                * nearest pane in that direction — 8=zoom toggle),
+                                * u8 pane_id (modes 1-8 ignore it) */
     MSG_STDIN_DATA     = 0x20, /* C→D: raw bytes for the PTY */
     MSG_RESIZE         = 0x21, /* C→D: u16 cols, u16 rows */
     MSG_OUTPUT         = 0x30, /* D→C: raw child output (live tee) / composite frames */
@@ -66,6 +69,15 @@ enum proto_type {
      * (hardcoded per-entry parse on both sides), so per-pane data cannot be
      * appended to it either — the NEXT entry would mis-parse. Showing panes
      * in `ls` needs a new message type. */
+    /* SESSION_LIST could not grow (positional, no per-entry length), so panes
+     * get a v2 with a u16 LENGTH PREFIX per entry: unknown tail fields skip
+     * cleanly and future appends stay additive. Entry payload:
+     *   u8 nlen, name, u16 view_cols, u16 view_rows, u8 alive, u8 nclients,
+     *   u32 pid, u32 exit_status, u8 npanes, u8 zoomed(0/1)
+     * Requested only by capable clients; old daemons skip the request
+     * (unknown type) and the client falls back to MSG_LIST_SESSIONS. */
+    MSG_LIST_SESSIONS2 = 0x1a, /* C→D: empty */
+    MSG_SESSION_LIST2  = 0x37, /* D→C: u16 count, then {u16 entry_len, entry}... */
     MSG_LAYOUT         = 0x35, /* D→C: u16 view_cols, u16 view_rows, u8 active_id,
                                 * u8 npanes, then per pane:
                                 * u8 id, u16 x, u16 y, u16 cols, u16 rows.

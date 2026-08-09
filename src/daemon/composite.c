@@ -193,6 +193,9 @@ size_t composite_frame(session *s, bool full, char **out) {
     for (int i = 0; i < MAX_PANES_PER_SESSION; i++) {
         pane *p = &s->panes[i];
         if (!p->in_use || !p->vt) continue;
+        /* Zoomed: only the zoomed pane renders (it owns the whole view);
+         * drawing a hidden sibling would paint over it. */
+        if (s->zoomed_id != 255 && p->id != s->zoomed_id) continue;
         uint16_t vrows = 0, vcols = 0;
         vt_get_size(p->vt, &vrows, &vcols);
         uint16_t rows = p->rows < vrows ? p->rows : vrows;
@@ -201,7 +204,7 @@ size_t composite_frame(session *s, bool full, char **out) {
                 emit_pane_row(&b, &ps, p, r);
     }
 
-    if (full) emit_dividers(&b, &ps, s);
+    if (full && s->zoomed_id == 255) emit_dividers(&b, &ps, s);
 
     /* Input-affecting modes for the ACTIVE pane only, re-emitted every frame:
      * with one keyboard that is the only coherent choice, and a frame is the

@@ -140,6 +140,40 @@ static void handle_list(client *c) {
     client_send(c, MSG_SESSION_LIST, payload, (uint32_t)off);
 }
 
+static void handle_list2(client *c) {
+    uint8_t payload[PROTO_MAX_PAYLOAD];
+    size_t off = 2;
+    uint16_t count = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session *s = session_at(i);
+        if (!s) continue;
+        size_t nlen = strlen(s->name);
+        int ncli = 0, npanes = 0;
+        for (int j = 0; j < MAX_CLIENTS_PER_SESSION; j++)
+            if (s->clients[j]) ncli++;
+        for (int j = 0; j < MAX_PANES_PER_SESSION; j++)
+            if (s->panes[j].in_use) npanes++;
+        pane *ap = session_active_pane(s);
+        size_t entry = 1 + nlen + 2 + 2 + 1 + 1 + 4 + 4 + 1 + 1;
+        if (off + 2 + entry > sizeof payload) break;
+        put_u16(payload + off, (uint16_t)entry); off += 2;
+        payload[off++] = (uint8_t)nlen;
+        memcpy(payload + off, s->name, nlen); /* NOLINT(bugprone-not-null-terminated-result) */
+        off += nlen;
+        put_u16(payload + off, s->view_cols); off += 2;
+        put_u16(payload + off, s->view_rows); off += 2;
+        payload[off++] = (ap && ap->child.pid > 0) ? 1 : 0;
+        payload[off++] = (uint8_t)ncli;
+        put_u32(payload + off, (uint32_t)(ap ? ap->child.pid : -1)); off += 4;
+        put_u32(payload + off, (uint32_t)(ap ? ap->exit_status : 0)); off += 4;
+        payload[off++] = (uint8_t)npanes;
+        payload[off++] = s->zoomed_id != 255 ? 1 : 0;
+        count++;
+    }
+    put_u16(payload, count);
+    client_send(c, MSG_SESSION_LIST2, payload, (uint32_t)off);
+}
+
 static void handle_new(client *c, const uint8_t *p, size_t len) {
     if (len < 7) { client_err(c, ERR_BAD_REQUEST, "short NEW_SESSION"); return; }
     uint16_t cols = get_u16(p), rows = get_u16(p + 2);
@@ -258,6 +292,7 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
     }
     switch (type) {
     case MSG_LIST_SESSIONS: handle_list(c); break;
+    case MSG_LIST_SESSIONS2: handle_list2(c); break;
     case MSG_NEW_SESSION:   handle_new(c, p, len); break;
     case MSG_ATTACH:        handle_attach(c, p, len); break;
     case MSG_KILL_SESSION:  handle_kill(c, p, len); break;
