@@ -292,7 +292,10 @@ static int send_new(int fd, const char *name, char *const argv[], int argc,
     put_u16(p, cols);
     put_u16(p + 2, rows);
     p[4] = (uint8_t)nlen;
-    memcpy(p + 5, name, nlen);
+    /* Length-prefixed wire field, not a C string: the u8 before it carries
+     * the length, and no reader expects a NUL. NOLINT for the check that
+     * assumes every string-ish memcpy wants termination. */
+    memcpy(p + 5, name, nlen); /* NOLINT(bugprone-not-null-terminated-result) */
     size_t off = 5 + nlen + 2;
     size_t abytes = 0;
     for (int i = 0; i < argc; i++) {
@@ -399,7 +402,10 @@ int attach_run(const char *name, char *const argv[], int argc) {
             else if (pg && pager_esc_pending(pg)) timeout = PAGER_ESC_TIMEOUT_MS;
             else if (stdin_gone && !attached_ok) timeout = 250;
             int n = poll(pfds, 3, timeout);
-            if (n < 0 && errno != EINTR) { conn_lost = 1; break; }
+            /* Falling out of the loop with neither detached nor exited set IS
+             * the connection-lost path (see the tail of the loop); assigning
+             * conn_lost before break was a dead store. */
+            if (n < 0 && errno != EINTR) break;
 
             if (stdin_gone && !attached_ok &&
                 now_ms() - stdin_gone_at >= 5000) {
@@ -549,17 +555,14 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             }
                         }
                     }
-                } else if (r == 0) {
-                    /* stdin gone: detach — but only once the daemon has
-                     * confirmed the session exists (see stdin_gone above). */
-                    if (attached_ok) detached = 1;
-                    else { stdin_gone = 1; stdin_gone_at = now_ms(); }
-                } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    /* A hard read error on stdin is permanent, and poll() will
-                     * keep reporting the fd ready, so ignoring it here spins the
-                     * loop exactly as a missed POLLHUP did. Treat it as stdin
-                     * being gone — the same outcome as EOF, since there is no
-                     * way to get keystrokes from it again. EINTR/EAGAIN fall
+                } else if (r == 0 ||
+                           (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    /* stdin is gone — EOF, or a hard read error, which is
+                     * permanent (poll() would keep reporting the fd ready and
+                     * spin the loop exactly as a missed POLLHUP did; there is
+                     * no way to get keystrokes from it again). Either way:
+                     * detach — but only once the daemon has confirmed the
+                     * session exists (see stdin_gone above). EINTR/EAGAIN fall
                      * through to the next poll(), which is correct: those are
                      * retryable and poll() is what should do the waiting. */
                     if (attached_ok) detached = 1;

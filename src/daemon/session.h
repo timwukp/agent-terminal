@@ -40,22 +40,25 @@ typedef struct pane {
 } pane;
 
 typedef struct session {
+    /* Field order minimizes padding (8-byte members first, then the arrays,
+     * then narrow fields): 3 pad bytes instead of 11 — measured by the
+     * analyzer, worth ~0.5 KB across the static table of 64. */
+    uint64_t last_frame_ms; /* leaky bucket for read-path compositing */
+    struct client *clients[MAX_CLIENTS_PER_SESSION];
+    pane panes[MAX_PANES_PER_SESSION];
+    layout lt;
     char name[SESSION_NAME_MAX + 1];
     /* Composite geometry — what an attached client's terminal shows. Renamed
      * from cols/rows when panes were lifted out so that every reader had to
      * decide which geometry it meant; with one pane they coincide with
      * pane 0's, and session_resize keeps them so. */
     uint16_t view_cols, view_rows;
-    struct client *clients[MAX_CLIENTS_PER_SESSION];
-    pane panes[MAX_PANES_PER_SESSION];
-    layout lt;
     uint8_t active_id;   /* wire id of the pane holding the keyboard */
     uint8_t last_id;     /* previously active, for select "last" */
     uint8_t next_id;     /* round-robin cursor for ids 1..254 */
     /* Set when any pane's rectangle changed (split/close/resize): the next
      * composite must be a full repaint plus a MSG_LAYOUT broadcast. */
     bool layout_dirty;
-    uint64_t last_frame_ms; /* leaky bucket for read-path compositing */
     bool in_use;
 } session;
 

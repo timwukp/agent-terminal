@@ -3,24 +3,24 @@
 #include <string.h>
 
 static int8_t node_alloc(layout *lt) {
-    for (int8_t i = 0; i < LAYOUT_NODES; i++)
-        if (!lt->nodes[i].in_use) return i;
+    for (int i = 0; i < LAYOUT_NODES; i++)
+        if (!lt->nodes[i].in_use) return (int8_t)i;
     return -1;
 }
 
 static int8_t find_leaf(const layout *lt, int8_t pane_idx) {
-    for (int8_t i = 0; i < LAYOUT_NODES; i++)
+    for (int i = 0; i < LAYOUT_NODES; i++)
         if (lt->nodes[i].in_use && lt->nodes[i].leaf &&
             lt->nodes[i].pane_idx == pane_idx)
-            return i;
+            return (int8_t)i;
     return -1;
 }
 
 static int8_t find_parent(const layout *lt, int8_t node) {
-    for (int8_t i = 0; i < LAYOUT_NODES; i++) {
+    for (int i = 0; i < LAYOUT_NODES; i++) {
         const layout_node *n = &lt->nodes[i];
         if (n->in_use && !n->leaf && (n->child[0] == node || n->child[1] == node))
-            return i;
+            return (int8_t)i;
     }
     return -1;
 }
@@ -149,7 +149,7 @@ bool layout_pane_rect(const layout *lt, int8_t pane_idx, uint16_t *x,
 
 int layout_leaf_count(const layout *lt) {
     int n = 0;
-    for (int8_t i = 0; i < LAYOUT_NODES; i++)
+    for (int i = 0; i < LAYOUT_NODES; i++)
         if (lt->nodes[i].in_use && lt->nodes[i].leaf) n++;
     return n;
 }
