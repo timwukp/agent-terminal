@@ -187,63 +187,7 @@ int daemon_connect(int auto_start) {
     return fd;
 }
 
-/* ---- input scanning: prefix Ctrl-\ then Ctrl-d (detach) or [ (copy-mode) ---- */
-
-#define KEY_CTRL_BACKSLASH 0x1c
-#define KEY_CTRL_D 0x04
-#define KEY_COPY_MODE '['
-#define CHORD_TIMEOUT_MS 500
-
-typedef struct {
-    int armed;          /* saw Ctrl-\, waiting for the second key */
-    uint64_t armed_at;
-} chord;
-
-typedef enum {
-    SCAN_NONE, SCAN_DETACH, SCAN_COPY_MODE,
-    /* pane chords; all single-byte, because scan_input consumes exactly one
-     * byte after the prefix (directional arrows need a sub-state machine and
-     * are a separate PR) */
-    SCAN_SPLIT_STACKED,   /* Ctrl-\ "  — one above the other */
-    SCAN_SPLIT_SIDE,      /* Ctrl-\ %  — side by side */
-    SCAN_PANE_NEXT,       /* Ctrl-\ o */
-    SCAN_PANE_LAST,       /* Ctrl-\ ; */
-    SCAN_PANE_CLOSE,      /* Ctrl-\ x */
-} scan_result;
-
-/* Forwardable bytes land in fwd (caller-sized >= 2*len). *fwdlen is always
- * assigned, and bytes seen before a chord completes are kept: returning early
- * without setting it silently dropped everything typed earlier in the same
- * read() batch. */
-static scan_result scan_input(chord *ch, const uint8_t *in, size_t len, uint8_t *fwd,
-                              size_t *fwdlen, size_t *consumed) {
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++) {
-        uint8_t b = in[i];
-        if (ch->armed) {
-            ch->armed = 0;
-            if (b == KEY_CTRL_D) { *fwdlen = o; *consumed = i + 1; return SCAN_DETACH; }
-            if (b == KEY_COPY_MODE) { *fwdlen = o; *consumed = i + 1; return SCAN_COPY_MODE; }
-            if (b == '"') { *fwdlen = o; *consumed = i + 1; return SCAN_SPLIT_STACKED; }
-            if (b == '%') { *fwdlen = o; *consumed = i + 1; return SCAN_SPLIT_SIDE; }
-            if (b == 'o') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_NEXT; }
-            if (b == ';') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_LAST; }
-            if (b == 'x') { *fwdlen = o; *consumed = i + 1; return SCAN_PANE_CLOSE; }
-            fwd[o++] = KEY_CTRL_BACKSLASH; /* forward the swallowed byte */
-            fwd[o++] = b;
-            continue;
-        }
-        if (b == KEY_CTRL_BACKSLASH) {
-            ch->armed = 1;
-            ch->armed_at = now_ms();
-            continue;
-        }
-        fwd[o++] = b;
-    }
-    *fwdlen = o;
-    *consumed = len;
-    return SCAN_NONE;
-}
+#include "scan.h"
 
 /* ---- attach pump ---- */
 
@@ -420,10 +364,18 @@ int attach_run(const char *name, char *const argv[], int argc) {
                 return 1;
             }
             if (ch.armed && now_ms() - ch.armed_at >= CHORD_TIMEOUT_MS) {
-                /* timeout: forward the held Ctrl-\ */
-                uint8_t b = KEY_CTRL_BACKSLASH;
-                send_frame(fd, MSG_STDIN_DATA, &b, 1);
+                /* timeout: forward everything the chord swallowed — one byte
+                 * (Ctrl-\) in state 1, up to three (Ctrl-\ ESC [) deeper in
+                 * the arrow sub-machine. */
+                uint8_t held[3] = {KEY_CTRL_BACKSLASH, 0, 0};
+                size_t nheld = 1;
+                if (ch.npending) {
+                    memcpy(held, ch.pending, (size_t)ch.npending);
+                    nheld = (size_t)ch.npending;
+                }
+                send_frame(fd, MSG_STDIN_DATA, held, nheld);
                 ch.armed = 0;
+                ch.npending = 0;
             }
             if (n <= 0) {
                 /* A lone ESC in copy-mode means quit, but only once we know no
@@ -526,6 +478,18 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             case SCAN_PANE_CLOSE:
                                 pp[0] = 255;
                                 prc = send_frame(fd, MSG_CLOSE_PANE, pp, 1);
+                                break;
+                            case SCAN_PANE_ZOOM:
+                                pp[0] = 8; pp[1] = 255; /* mode 8 = zoom toggle */
+                                prc = send_frame(fd, MSG_SELECT_PANE, pp, 2);
+                                break;
+                            case SCAN_PANE_UP:
+                            case SCAN_PANE_DOWN:
+                            case SCAN_PANE_RIGHT:
+                            case SCAN_PANE_LEFT:
+                                pp[0] = (uint8_t)(4 + (sr - SCAN_PANE_UP));
+                                pp[1] = 0;
+                                prc = send_frame(fd, MSG_SELECT_PANE, pp, 2);
                                 break;
                             default: break;
                             }

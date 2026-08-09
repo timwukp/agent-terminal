@@ -128,6 +128,8 @@ $(O)/tests/test_loop: $(O)/src/daemon/loop.o
 
 $(O)/tests/test_layout: $(O)/src/daemon/layout.o
 
+$(O)/tests/test_scan: $(O)/src/client/scan.o
+
 test: $(TEST_BIN)
 	@rc=0; for t in $(TEST_BIN); do echo "== $$t"; $$t || rc=1; done; exit $$rc
 

@@ -56,6 +56,12 @@ typedef struct session {
     uint8_t active_id;   /* wire id of the pane holding the keyboard */
     uint8_t last_id;     /* previously active, for select "last" */
     uint8_t next_id;     /* round-robin cursor for ids 1..254 */
+    /* Zoom: the active pane temporarily borrows the full view. The layout
+     * tree is NOT modified — zoom is a render/geometry overlay, so unzoom is
+     * a pure reflow and a shrunk tree cannot be corrupted by it. 255 = not
+     * zoomed. Any split/close/select-other auto-unzooms first: mutating the
+     * layout underneath a zoom would apply geometry the user cannot see. */
+    uint8_t zoomed_id;
     /* Set when any pane's rectangle changed (split/close/resize): the next
      * composite must be a full repaint plus a MSG_LAYOUT broadcast. */
     bool layout_dirty;

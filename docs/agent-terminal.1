@@ -100,13 +100,30 @@ must contain no control characters, and is capped at 63 bytes. Interior dots
 rejected \(em never rewritten \(em and the command exits 1.
 .SH KEY BINDINGS
 .TP
-.B Ctrl\-\\\\ Ctrl\-d
+.B Ctrl\-\e Ctrl\-d
 Detach from the session, leaving it running. A lone
-.B Ctrl\-\\\\
+.B Ctrl\-\e
 is forwarded to the application after a 500 ms timeout.
 .TP
-.B Ctrl\-\\\\ [
-Enter copy-mode and page through the session's scrollback without
+.B Ctrl\-\e \(dq
+Split the active pane top/bottom;
+.B Ctrl\-\e %
+side by side. Each pane is its own child process with its own scrollback.
+.TP
+.B Ctrl\-\e o
+Focus the next pane;
+.B ;
+the previously active one;
+.B x
+close the active pane (the last pane ends the session). An
+.B arrow key
+selects the nearest pane in that direction;
+.B z
+zooms the active pane to the full view and back (any split, close, or
+focus change also unzooms).
+.TP
+.B Ctrl\-\e [
+Enter copy-mode and page through the active pane's scrollback without
 detaching. The child keeps running; output produced while paging is
 skipped, and leaving copy-mode repaints from a fresh daemon snapshot.
 Copy-mode shows only what has scrolled

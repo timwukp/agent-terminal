@@ -251,6 +251,7 @@ static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
     s->active_id = 0;
     s->last_id = 0;
     s->next_id = 1;
+    s->zoomed_id = 255;
     return s;
 }
 
@@ -337,6 +338,7 @@ session *session_import_begin(const char *name, uint16_t view_cols,
     s->active_id = active_id;
     s->last_id = last_id;
     s->next_id = next_id ? next_id : 1;
+    s->zoomed_id = 255; /* zoom is ephemeral view state; a reload drops it */
     s->in_use = true; /* so session_find sees it during pane import */
     return s;
 }
@@ -579,7 +581,13 @@ static void session_apply_layout(session *s) {
         pane *p = &s->panes[i];
         if (!p->in_use) continue;
         uint16_t x, y, cols, rows;
-        if (!layout_pane_rect(&s->lt, (int8_t)i, &x, &y, &cols, &rows)) continue;
+        if (s->zoomed_id != 255 && p->id == s->zoomed_id) {
+            /* Zoom overlay: the tree keeps its rectangles; only this pane's
+             * applied geometry is the full view. Other panes keep their tree
+             * rects (they are not rendered while zoomed, but their PTY size
+             * stays sane for the running apps). */
+            x = 0; y = 0; cols = s->view_cols; rows = s->view_rows;
+        } else if (!layout_pane_rect(&s->lt, (int8_t)i, &x, &y, &cols, &rows)) continue;
         p->x = x; p->y = y;
         if (cols != p->cols || rows != p->rows) {
             p->cols = cols;
@@ -639,7 +647,16 @@ static void session_leave_composite(session *s) {
     vt_damage_clear(p->vt);
 }
 
+/* Drop the zoom overlay (if any) and restore tree geometry. Safe to call
+ * when not zoomed. */
+static void session_unzoom(session *s) {
+    if (s->zoomed_id == 255) return;
+    s->zoomed_id = 255;
+    session_apply_layout(s);
+}
+
 pane *session_split(session *s, uint8_t target, bool stacked) {
+    session_unzoom(s); /* splitting under a zoom would be invisible geometry */
     pane *tp = session_pane_by_id(s, target);
     if (!tp) { errno = EINVAL; return NULL; }
     int8_t tslot = (int8_t)(tp - s->panes);
@@ -708,6 +725,7 @@ pane *session_split(session *s, uint8_t target, bool stacked) {
 bool session_close_pane(session *s, uint8_t id) {
     pane *p = session_pane_by_id(s, id);
     if (!p) return false;
+    session_unzoom(s);
     uint8_t real_id = p->id;
     int8_t slot = (int8_t)(p - s->panes);
 
@@ -733,14 +751,73 @@ bool session_close_pane(session *s, uint8_t id) {
     return true;
 }
 
+/* Geometrically nearest pane in a direction: among panes whose rectangle
+ * lies strictly beyond the current pane's edge, pick the one whose center
+ * is closest (edge distance first, then perpendicular offset — the tmux
+ * feel: straight across beats diagonal). */
+static pane *pane_in_direction(session *s, pane *cur, uint8_t mode) {
+    int ccx = cur->x + cur->cols / 2, ccy = cur->y + cur->rows / 2;
+    pane *best = NULL;
+    long best_key = 0;
+    for (int i = 0; i < MAX_PANES_PER_SESSION; i++) {
+        pane *p = &s->panes[i];
+        if (!p->in_use || p == cur) continue;
+        int pcx = p->x + p->cols / 2, pcy = p->y + p->rows / 2;
+        long primary, secondary;
+        switch (mode) {
+        case 4: /* up */
+            if (p->y + p->rows > cur->y) continue;
+            primary = cur->y - (p->y + p->rows);
+            secondary = labs((long)pcx - ccx);
+            break;
+        case 5: /* down */
+            if (p->y < cur->y + cur->rows) continue;
+            primary = p->y - (cur->y + cur->rows);
+            secondary = labs((long)pcx - ccx);
+            break;
+        case 6: /* right */
+            if (p->x < cur->x + cur->cols) continue;
+            primary = p->x - (cur->x + cur->cols);
+            secondary = labs((long)pcy - ccy);
+            break;
+        default: /* 7 = left */
+            if (p->x + p->cols > cur->x) continue;
+            primary = cur->x - (p->x + p->cols);
+            secondary = labs((long)pcy - ccy);
+            break;
+        }
+        long key = primary * 4096 + secondary;
+        if (!best || key < best_key) { best = p; best_key = key; }
+    }
+    return best;
+}
+
 bool session_select_pane(session *s, uint8_t mode, uint8_t id) {
     pane *cur = session_active_pane(s);
     if (!cur) return false;
+
+    if (mode == 8) {
+        /* Zoom toggle on the active pane. A no-op at one pane: the view is
+         * already the whole screen, and arming zoom state there would only
+         * surprise the next split. */
+        if (s->zoomed_id != 255) {
+            session_unzoom(s);
+            return true;
+        }
+        if (!session_should_composite(s)) return true;
+        s->zoomed_id = cur->id;
+        session_apply_layout(s);
+        return true;
+    }
+
     pane *next = NULL;
     if (mode == 0) {
         next = session_pane_by_id(s, id);
     } else if (mode == 3) {
         next = session_pane_by_id(s, s->last_id);
+    } else if (mode >= 4 && mode <= 7) {
+        next = pane_in_direction(s, cur, mode);
+        if (!next) return true; /* nothing that way: keep focus, no error */
     } else {
         /* next/prev in slot order, wrapping. */
         int8_t start = (int8_t)(cur - s->panes);
@@ -751,6 +828,7 @@ bool session_select_pane(session *s, uint8_t mode, uint8_t id) {
         }
     }
     if (!next || next == cur) return next == cur;
+    session_unzoom(s); /* focus moved: a zoom on the old pane hides the new one */
     s->last_id = s->active_id;
     s->active_id = next->id;
     s->layout_dirty = true; /* cursor + input modes move; full frame re-arms */

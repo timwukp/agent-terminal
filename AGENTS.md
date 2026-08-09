@@ -319,6 +319,19 @@ Load-bearing rules, each pinned by a test:
   validated to one path component.
 - **Copy-mode follows the active pane** (`MSG_LAYOUT` carries the id; the
   client passes it back in `MSG_SCROLLBACK_REQ`'s appended byte).
+- **Directional selection** (`MSG_SELECT_PANE` modes 4–7) picks the
+  geometrically nearest pane past the current edge — edge distance first,
+  then perpendicular center offset, so straight across beats diagonal. A
+  direction with nothing there is a quiet no-op, not an error.
+- **Zoom** (mode 8) is a render/geometry overlay: the layout tree is never
+  modified, so unzoom is a pure reflow. Split/close/focus-change auto-unzoom
+  first — mutating the tree under a zoom would apply geometry the user
+  cannot see. Zoom is deliberately dropped across a reload (ephemeral view
+  state, not session state).
+- **`MSG_SESSION_LIST2`** exists because v1 is positional and frozen: v2
+  entries carry a u16 length prefix, so unknown tail fields skip cleanly
+  and future appends stay additive. The client uses it when `server_flags`
+  says panes exist, and falls back to v1 otherwise.
 
 ## 5. Working on the code
 
