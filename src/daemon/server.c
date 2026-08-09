@@ -100,7 +100,8 @@ static void client_err(client *c, uint16_t code, const char *msg) {
     uint8_t payload[4 + 512];
     put_u16(payload, code);
     put_u16(payload + 2, (uint16_t)mlen);
-    memcpy(payload + 4, msg, mlen);
+    /* Length-prefixed wire field, not a C string. */
+    memcpy(payload + 4, msg, mlen); /* NOLINT(bugprone-not-null-terminated-result) */
     client_send(c, MSG_ERR, payload, (uint32_t)(4 + mlen));
 }
 
@@ -450,7 +451,7 @@ static void server_accept(int fd, short revents, void *ud) {
     c->in_use = true;
     c->hello_done = false;
     c->attached = NULL;
-    ring_init(&c->in, 4096, 2 * PROTO_MAX_PAYLOAD);
+    ring_init(&c->in, 4096, (size_t)2 * PROTO_MAX_PAYLOAD);
     ring_init(&c->out, 4096, CLIENT_OUT_MAX);
     if (loop_add_fd(cfd, POLLIN, client_io, c) != 0) {
         /* Out of poll slots: nothing would ever read this fd, so the client
@@ -516,10 +517,11 @@ int server_init(const char *socket_path, int inherited_fd) {
 
     if (inherited_fd >= 0) {
         if (!inherited_listener_ok(inherited_fd, socket_path)) {
+            /* Fall through to a fresh bind; the fd is closed and no longer
+             * consulted (the adopt path below returns before reaching it). */
             log_msg(LOG_WARN, "inherited fd %d is not the listener for %s; rebinding",
                     inherited_fd, socket_path);
             close(inherited_fd);
-            inherited_fd = -1;
         } else {
             int ifl = fcntl(inherited_fd, F_GETFL);
             if (ifl >= 0) fcntl(inherited_fd, F_SETFL, ifl | O_NONBLOCK);
@@ -539,8 +541,9 @@ int server_init(const char *socket_path, int inherited_fd) {
     if (fd < 0) return -1;
 
     struct sockaddr_un sa = {.sun_family = AF_UNIX};
-    if (strlen(socket_path) >= sizeof sa.sun_path) { close(fd); errno = ENAMETOOLONG; return -1; }
-    strcpy(sa.sun_path, socket_path);
+    size_t plen = strlen(socket_path);
+    if (plen >= sizeof sa.sun_path) { close(fd); errno = ENAMETOOLONG; return -1; }
+    memcpy(sa.sun_path, socket_path, plen + 1); /* bounded by the check above */
 
     /* Stale socket: only unlink if nothing answers.
      *

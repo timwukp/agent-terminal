@@ -65,10 +65,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install clang-tidy
         run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
-      - name: Analyze VT engine + common (the security-critical surface)
+      - name: Analyze all four source dirs
         # Flags must match the real build (see Makefile COMMON_CFLAGS), or
-        # clang-tidy analyzes a different translation unit than ships.
+        # clang-tidy analyzes a different translation unit than ships. The
+        # generated version header is stubbed: its content is irrelevant to
+        # analysis and generating it for real would need a build first.
+        # Scope grew from vt+common to everything once client+daemon were
+        # made clean — 15 findings lived there precisely because they were
+        # outside this gate.
         run: |
-          clang-tidy --warnings-as-errors='*' src/vt/*.c src/common/*.c -- \
-            -std=c17 -Isrc \
+          mkdir -p /tmp/tidy-inc
+          printf '#define AT_VERSION "tidy"\n' > /tmp/tidy-inc/at_version.h
+          clang-tidy --warnings-as-errors='*' \
+            src/vt/*.c src/common/*.c src/client/*.c src/daemon/*.c -- \
+            -std=c17 -Isrc -I/tmp/tidy-inc \
             -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE

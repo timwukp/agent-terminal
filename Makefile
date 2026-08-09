@@ -76,9 +76,16 @@ endif
 
 all: $(O)/agent-terminald $(O)/agent-terminal
 
+# -MMD -MP: every object records the headers it included, so editing a header
+# rebuilds exactly its dependents. Without this, a struct-layout change in a
+# header left stale objects linking against the OLD layout — a silently
+# corrupted binary (garbled session names, wrong geometry) that only
+# `rm -rf build` cured. Found when reordering session.h for padding.
 $(O)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+-include $(shell find $(O) -name '*.d' 2>/dev/null)
 
 # Only the two entry points bake the version in; scoping the dependency here
 # keeps a hash change from rebuilding the whole tree.
@@ -171,8 +178,8 @@ fuzz-regress: $(FUZZ_REGRESS_BIN)
 fmt:
 	clang-format -i $(shell find src tests fuzz tools -name '*.[ch]' 2>/dev/null)
 
-tidy:
-	clang-tidy $(VT_SRC) $(COMMON_SRC) -- $(CFLAGS)
+tidy: $(VERSION_H)
+	clang-tidy $(VT_SRC) $(COMMON_SRC) $(CLIENT_SRC) $(DAEMON_SRC) -- $(CFLAGS) -I$(O)/include
 
 clean:
 	rm -rf build

@@ -146,9 +146,9 @@ static int set_cloexec(int fd, bool on) {
 typedef struct {
     const session *s;
     const pane *panes[MAX_PANES_PER_SESSION]; /* live panes, slot order */
-    uint8_t slots[MAX_PANES_PER_SESSION];     /* their array slots */
     char *blobs[MAX_PANES_PER_SESSION];
     size_t blob_lens[MAX_PANES_PER_SESSION];
+    uint8_t slots[MAX_PANES_PER_SESSION];     /* their array slots */
     uint8_t npanes;
 } export_rec;
 
@@ -184,7 +184,7 @@ static bool write_state(FILE *f, const export_rec *recs, uint16_t n, int listen_
         lrec[0] = (uint8_t)s->lt.root;
         for (int j = 0; j < LAYOUT_NODES; j++) {
             const layout_node *ln = &s->lt.nodes[j];
-            uint8_t *q = lrec + 1 + j * 12;
+            uint8_t *q = lrec + 1 + (size_t)j * 12;
             q[0] = (uint8_t)((ln->in_use ? 1 : 0) | (ln->leaf ? 2 : 0) |
                              (ln->stacked ? 4 : 0));
             q[1] = (uint8_t)ln->pane_idx;
@@ -469,7 +469,7 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
         lt.root = (int8_t)lrec[0];
         if (lt.root < -1 || lt.root >= LAYOUT_NODES) lt.root = 0;
         for (int j = 0; j < LAYOUT_NODES; j++) {
-            const uint8_t *q = lrec + 1 + j * 12;
+            const uint8_t *q = lrec + 1 + (size_t)j * 12;
             layout_node *ln = &lt.nodes[j];
             ln->in_use = (q[0] & 1) != 0;
             ln->leaf = (q[0] & 2) != 0;

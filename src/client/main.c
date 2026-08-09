@@ -110,7 +110,8 @@ static int cmd_kill(const char *name) {
     put_u32(frame, (uint32_t)(1 + nlen));
     frame[4] = MSG_KILL_SESSION;
     frame[5] = (uint8_t)nlen;
-    memcpy(frame + 6, name, nlen);
+    /* Length-prefixed wire field, not a C string (see attach.c). */
+    memcpy(frame + 6, name, nlen); /* NOLINT(bugprone-not-null-terminated-result) */
     ssize_t total = (ssize_t)(PROTO_HDR_SIZE + 1 + nlen);
     if (write(fd, frame, (size_t)total) != total) {
         fprintf(stderr, "agent-terminal: failed to kill '%s'\n", name);
