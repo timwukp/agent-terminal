@@ -129,8 +129,28 @@ assert active == new_id, 'new pane should be active'
 print('layout: pane0=%r pane%d=%r active=%d' % (panes[0], new_id, panes[new_id], new_id))
 
 # Type into the ACTIVE (new) pane; its shell echoes into its own rectangle.
-s.sendall(frame(0x20, b'echo RIGHT-MARKER\n'))
+s.sendall(frame(0x20, b'echo RIGHT-MARKER-$((1300+37))\n'))
 pump(s, 2.5, cap)
+
+# The EL rule, tested where it can actually bite: repainting a LEFT-pane row
+# must not erase the RIGHT pane's content on the same terminal rows. \x1b[K
+# erases to the TERMINAL's right margin, so an "optimization" that clears a
+# pane row's tail with EL instead of literal spaces wipes the neighbour —
+# and nothing else in this file would notice, because the earlier asserts
+# all read the right pane AFTER its own latest repaint. Dirty several left
+# rows (with colored bg, so the pad also carries a pen change), then assert
+# the right pane's marker survived the left pane's repaint.
+s.sendall(frame(0x18, bytes([1, 0])))  # MSG_SELECT_PANE next -> pane 0
+pump(s, 1.2, cap)                      # drain the select's FULL frame first
+# Now dirty ONLY left-pane rows: this frame is incremental, so the right pane
+# is not re-emitted and cannot heal an EL wipe within the same frame.
+s.sendall(frame(0x20, b'printf "\\033[41mred-bg-line\\033[0m\\n\\n\\n"\n'))
+pump(s, 2.0, cap)
+# The EL-guard capture ends HERE, on the incremental frame. The select-last
+# below triggers a FULL frame (layout_dirty) that re-emits the right pane —
+# which would heal an EL wipe and mask the very bug this assert exists for.
+# That healing frame goes to the close-phase capture instead.
+cap.close()
 
 # The composite must place LEFT-MARKER at pane 0's origin and RIGHT-MARKER
 # inside the new pane's rectangle — asserted on the vtdump grid by the shell
@@ -141,8 +161,9 @@ open(tmp + '/coords.txt', 'w').write('%d %d %d %d %d %d %d %d\n'
 # Close the active pane; survivor grows back to the full view. Captured to a
 # SEPARATE file: the leave-composite transition repaints with \x1b[2J, which
 # would wipe RIGHT-MARKER out of the split-phase grid we assert below.
-cap.close()
 cap2 = open(tmp + '/capture_close.bin', 'wb')
+s.sendall(frame(0x18, bytes([3, 0])))  # select "last" -> back to the new pane
+pump(s, 0.8, cap2)
 layouts2 = []
 s.sendall(frame(0x17, bytes([255])))
 pump(s, 1.0, cap2, layouts2)
@@ -192,14 +213,22 @@ esac
 # RIGHT-MARKER appears somewhere inside the new pane's columns, and nowhere
 # in pane 0's columns — writing to pane B must leave pane A's rectangle
 # byte-unchanged.
-echo "$GRID" | grep -q "RIGHT-MARKER" || fail "new pane's output never rendered"
-ROW=$(echo "$GRID" | grep -n "RIGHT-MARKER" | head -1 | cut -d: -f1)
-COL=$(echo "$GRID" | sed -n "${ROW}p" | awk -v m="RIGHT-MARKER" '{print index($0, m)}')
+echo "$GRID" | grep -q "RIGHT-MARKER-1337" || fail "new pane's output never rendered"
+ROW=$(echo "$GRID" | grep -n "RIGHT-MARKER-1337" | head -1 | cut -d: -f1)
+COL=$(echo "$GRID" | sed -n "${ROW}p" | awk -v m="RIGHT-MARKER-1337" '{print index($0, m)}')
 [ "$COL" -gt "$((X1))" ] || fail "RIGHT-MARKER at column $COL is left of pane boundary $X1"
+
+# The computed marker (present only in the OUTPUT row, never in the typed
+# command's echo) must still be on the grid AFTER the left pane's repaint —
+# the EL guard. A composite that used \x1b[K for a left row's tail erased
+# the right pane's row; literal spaces stop at the pane edge. The command
+# echo itself cannot satisfy this grep, which is what made an earlier
+# version of this assert pass under the very mutation it existed to catch.
+echo "$GRID" | grep -q "RIGHT-MARKER-1337" || fail "right pane output erased by left-pane repaint (EL used in a pane row?)"
 
 # Pane 0's rectangle must contain no RIGHT-MARKER fragment. Character-sliced
 # in python for the same byte-vs-character reason as the divider check.
-if echo "$GRID" | python3 -c "import sys; [print(l[:$C0]) for l in sys.stdin.read().splitlines()]" | grep -q "RIGHT-MARKER"; then
+if echo "$GRID" | python3 -c "import sys; [print(l[:$C0]) for l in sys.stdin.read().splitlines()]" | grep -q "RIGHT-MARKER-1337"; then
     fail "active pane's output bled into pane 0's rectangle"
 fi
 
