@@ -67,6 +67,25 @@ int pty_spawn(pty_child *out, char *const argv[], uint16_t cols, uint16_t rows,
 
         if (term_env) setenv("TERM", term_env, 1);
         execvp(argv[0], argv);
+        /* The exec failed and this child IS the session: whatever it writes
+         * to the slave is the session's screen, and the final-screen flush
+         * preserves it into scrollback. Without this the failure was
+         * completely silent — a session created for a command that is not on
+         * the daemon's PATH (a launchd daemon gets only /usr/bin:/bin:...)
+         * just vanished: the client saw a blank snapshot and
+         * "[session exited: 127]", `ls` was empty, `history` was empty.
+         * Plain write()s to fd 2 (the slave, via the dup2 above): no stdio
+         * buffering to flush in a forked child, nothing async-signal-unsafe. */
+        {
+            const char *msg[] = {"agent-terminald: exec ", argv[0], ": ",
+                                 strerror(errno), "\r\n(daemon PATH: ",
+                                 getenv("PATH") ? getenv("PATH") : "(unset)",
+                                 ")\r\n"};
+            for (size_t mi = 0; mi < sizeof msg / sizeof *msg; mi++) {
+                ssize_t w = write(2, msg[mi], strlen(msg[mi]));
+                (void)w;
+            }
+        }
         _exit(127);
     }
 
