@@ -484,6 +484,12 @@ add narration. `clang-format` config is in `.clang-format` (`make fmt`).
 
 ### Adding tests
 
+An end-user UAT report (real Claude Code workload through a real pty, full
+case/procedure/verdict log) lives in `docs/UAT.md`; its "testing notes for
+TUI workloads" section is required reading before scripting a TUI child —
+synchronize on the app's prompt before typing, ANSI-strip before matching,
+and know the alt-screen scrollback rule.
+
 - VT changes → cases in `tests/unit/test_vt.c`. They are automatically
   re-run byte-at-a-time, so chunking bugs surface without extra work.
 - Protocol/daemon changes → a script in `tests/integration/`, sourcing

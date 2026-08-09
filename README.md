@@ -296,6 +296,25 @@ sessions (rc=1), and gives up with `no confirmation from daemon` after 5 s
 against a wedged daemon. See
 [AGENTS.md §4](AGENTS.md#4-scripted--non-interactive-use).
 
+## Testing
+
+Three layers, all green on `main`:
+
+- **Unit**: 6,265 checks across 8 suites (VT parser byte-at-a-time, protocol
+  round-trips and violations, ring, scrollback CRC recovery, pane layout
+  geometry, pager, path validation, event loop) — run under ASan+UBSan.
+- **Integration**: 20 end-to-end scripts covering the failure modes this tool
+  exists for — client `kill -9` + reattach, daemon reload with children
+  surviving, pane splits driven over the wire, malformed handoff state files,
+  path-traversal probes, close races, honest error reporting. Run on macOS
+  and Linux in CI on every PR.
+- **End-user UAT with a real Claude Code session** — the actual workload,
+  driven through a real pty with real keystrokes: crash-reattach with the
+  same process answering, panes around a live TUI, a daemon binary upgrade
+  under the conversation, multi-client viewing, batch `claude -p` patterns.
+  Full test log — case IDs, data, procedure, verdicts, and the macOS reload
+  bug it caught — in **[docs/UAT.md](docs/UAT.md)**.
+
 ## Development
 
 ```sh
