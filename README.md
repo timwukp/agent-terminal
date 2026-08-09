@@ -1,5 +1,7 @@
 # agent-terminal
 
+**English** | [繁體中文](README.zh-TW.md)
+
 A tiny tmux-like session multiplexer in C, purpose-built so long-running
 terminal AI agents (e.g. Claude Code CLI) survive terminal front-end
 crashes. macOS + Linux. Zero dependencies beyond libc. MIT licensed.
@@ -305,20 +307,23 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,265 checks across 8 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 6,340 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
-  geometry, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 20 end-to-end scripts covering the failure modes this tool
+  geometry, input-chord scanner, pager, path validation, event loop) — run
+  under ASan+UBSan.
+- **Integration**: 22 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
-  surviving, pane splits driven over the wire, malformed handoff state files,
+  surviving, pane splits / directional navigation / zoom driven over the
+  wire, a 100 MB memory-bound soak, malformed handoff state files,
   path-traversal probes, close races, honest error reporting. Run on macOS
   and Linux in CI on every PR.
 - **End-user UAT with a real Claude Code session** — the actual workload,
-  driven through a real pty with real keystrokes: crash-reattach with the
-  same process answering, panes around a live TUI, a daemon binary upgrade
-  under the conversation, multi-client viewing, batch `claude -p` patterns.
-  Full test log — case IDs, data, procedure, verdicts, and the macOS reload
-  bug it caught — in **[docs/UAT.md](docs/UAT.md)**.
+  driven through a real pty with real keystrokes, two full rounds (27
+  cases): crash-reattach with the same process answering, panes with arrow
+  navigation and zoom around a live TUI, a daemon binary upgrade under the
+  conversation, multi-client viewing, batch `claude -p` patterns. Full test
+  logs — case IDs, data, procedure, verdicts, the macOS reload bug round 1
+  caught, and the TUI testing playbook — in **[docs/UAT.md](docs/UAT.md)**.
 
 ## Development
 
