@@ -66,6 +66,20 @@ that already scrolled off survives on disk regardless).
    layer delivers every byte faithfully; readiness is the app's business.
 2. **ANSI-strip before matching output.** Styled output splits plain substrings.
 3. **Know the alt-screen rule** (footnote 2) before relying on `history` for TUI content.
+4. **Assert on the rendered grid, not raw bytes** (round-2 lesson). A TUI child's own
+   output contains `│` box borders and `\x1b[2J` repaints, so byte-level checks like
+   "divider present in output" are meaningless near it. Render the cumulative capture
+   through `vtdump` and assert on the final grid — e.g. the divider *column*:
+   `rows where grid[r][80] == '│'` flips 39→0→39 across zoom/unzoom, unambiguously.
+5. **Reset view state between cases.** Zoom is daemon-side session state: it survives
+   detach and even a client crash (by design), so a case that leaves a session zoomed
+   changes what the next case's attach snapshot shows.
+
+A second full UAT round ran against v27 (directional selection, zoom, `ls` pane counts):
+12/12 cases pass with the real Claude workload, including zoom-while-crashed, reload
+dropping zoom but keeping panes, and the literal-ESC byte-preservation check performed
+live against Claude's input box. No product defects found; the two in-run failures were
+test-method errors that produced notes 4 and 5 above.
 
 ## Reproducing this UAT
 
