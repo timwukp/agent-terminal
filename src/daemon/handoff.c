@@ -37,6 +37,9 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h> /* _NSGetExecutablePath: macOS has no /proc/self/exe */
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -91,11 +94,23 @@ bool handoff_take_request(void) {
  * being renamed or replaced by an upgrade, which is the main reason to reload
  * in the first place. */
 static void resolve_exe(const char *argv0) {
+#ifdef __APPLE__
+    /* No /proc on macOS. _NSGetExecutablePath is the equivalent, and it is
+     * not optional here: the autospawned daemon's argv[0] is the bare string
+     * "agent-terminald", which realpath resolves against the CWD — so every
+     * reload failed with ENOENT and macOS users of the autospawn path simply
+     * could not upgrade in place. Found by an end-user UAT reload drill. */
+    char raw[PATH_MAX];
+    uint32_t sz = sizeof raw;
+    if (_NSGetExecutablePath(raw, &sz) == 0 && realpath(raw, g_exe_path))
+        return;
+#else
     ssize_t n = readlink("/proc/self/exe", g_exe_path, sizeof g_exe_path - 1);
     if (n > 0) {
         g_exe_path[n] = '\0';
         return;
     }
+#endif
     if (argv0 && realpath(argv0, g_exe_path)) return;
     /* Last resort: whatever we were invoked as. execv will fail loudly if it
      * no longer resolves, and handoff_exec reports that rather than exiting. */
