@@ -22,6 +22,13 @@ Documentation=https://github.com/timwukp/agent-terminal
 
 [Service]
 Type=simple
+# PATH: the user manager's default (usually /usr/local/bin:/usr/bin:/bin on
+# most distros) does NOT include your login-shell additions (~/.local/bin,
+# ~/bin, cargo/nvm shims). Session commands inherit the daemon's PATH, so a
+# command that lives there dies instantly with exec 127 and the session
+# appears to "do nothing" — the screen and `history` now name the reason.
+# Uncomment and extend as needed (%h = your home directory):
+#Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/agent-terminald -f
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

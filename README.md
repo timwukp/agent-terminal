@@ -271,6 +271,21 @@ agent-terminal version
 across one). `daemon: not running` is not an error — the next `new` or
 `attach` autospawns it.
 
+**`new -s x -- some-cmd` "does nothing" — session missing from `ls`?** The
+command exited instantly, usually because it is **not on the daemon's
+PATH**: a service-managed daemon gets a minimal PATH (launchd:
+`/usr/bin:/bin:...`), and session commands inherit it. The failure is
+named on the session's screen and preserved in scrollback:
+```sh
+agent-terminal history -s x
+# agent-terminald: exec some-cmd: No such file or directory
+# (daemon PATH: /usr/bin:/bin:/usr/sbin:/sbin)
+```
+Fix: add the command's directory to the service unit's PATH — see the
+`EnvironmentVariables` block in the shipped launchd plist, or the
+commented `Environment=PATH=` line in the systemd unit — then reload the
+service. An absolute path (`-- /full/path/to/cmd`) also works.
+
 **Key chords do nothing (splits, copy-mode)?** Almost always a version skew:
 an older daemon is answering the socket. Unknown messages are skipped by
 design, so new chords no-op silently against an old daemon. `agent-terminal

@@ -27,6 +27,12 @@
     grandchild keeps running and reparents to pid 1. So PTY children survive
     an unload here, whereas systemd's default KillMode=control-group would
     kill them (see contrib/systemd/agent-terminald.service).
+  - PATH: launchd gives agents only /usr/bin:/bin:/usr/sbin:/sbin, and the
+    daemon's children inherit it. A session command that lives anywhere else
+    (~/.local/bin, /opt/homebrew/bin) then dies instantly with exec 127 —
+    the session appears to "do nothing". The EnvironmentVariables block
+    below ships the common locations; add yours. ($HOME does not expand in
+    plists — write the absolute path.)
   - For SSH sessions to inherit your agent, launchd must know
     SSH_AUTH_SOCK. On macOS the system launchd sets it for user agents by
     default; if you use a custom agent path, add it to EnvironmentVariables.
@@ -37,6 +43,11 @@
 <dict>
     <key>Label</key>
     <string>dev.agentterminal.daemon</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/agent-terminald</string>

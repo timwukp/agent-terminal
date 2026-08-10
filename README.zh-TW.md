@@ -242,6 +242,20 @@ agent-terminal version
 `generation` 計數原地 reload 的次數(pid 刻意不變)。`daemon: not running`
 不是錯誤 — 下一次 `new` 或 `attach` 會自動啟動它。
 
+**`new -s x -- 某指令` 「毫無反應」— session 沒出現在 `ls`?** 指令瞬間退出
+了,最常見的原因是它**不在 daemon 的 PATH 上**:由服務管理器啟動的 daemon
+只拿到極簡 PATH(launchd:`/usr/bin:/bin:...`),而 session 的指令繼承它。
+失敗原因會寫在 session 的螢幕上並保存進 scrollback:
+```sh
+agent-terminal history -s x
+# agent-terminald: exec 某指令: No such file or directory
+# (daemon PATH: /usr/bin:/bin:/usr/sbin:/sbin)
+```
+修法:把指令所在目錄加進服務單元的 PATH — 見隨附 launchd plist 的
+`EnvironmentVariables` 區塊,或 systemd unit 中註解掉的
+`Environment=PATH=` 行 — 然後重載服務。直接寫絕對路徑
+(`-- /完整/路徑/指令`)也可以。
+
 **按鍵組合沒反應(分割、copy-mode)?** 幾乎都是版本偏差:一個較舊的 daemon
 在回應 socket。未知訊息按設計會被跳過,所以新的按鍵組合對舊 daemon 是靜默
 無效。`agent-terminal version` 能看出偏差(`panes no`,或 daemon 的 hash 比
