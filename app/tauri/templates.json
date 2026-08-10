@@ -1,0 +1,7 @@
+{
+  "$comment": "Default new-session templates; user overrides live in ~/.agent-terminal/gui-templates.json (design: app/design/ux-spec.md).",
+  "templates": [
+    { "name_prefix": "claude", "argv": ["claude"], "label": "New Claude session" },
+    { "name_prefix": "shell", "argv": [], "label": "New shell" }
+  ]
+}

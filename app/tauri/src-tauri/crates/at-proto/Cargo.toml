@@ -1,0 +1,9 @@
+[package]
+name = "at-proto"
+version = "0.1.0"
+description = "Pure (sans-io) codec for the agent-terminal wire protocol; mirrors src/common/proto.h"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
