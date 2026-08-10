@@ -1,7 +1,15 @@
-//! Connection management for the GUI client: socket path resolution,
-//! HELLO/ATTACH state machines, output backpressure. Lands in PR3;
-//! PR1 ships only the socket path logic so the crate compiles with a
-//! real, tested unit.
+//! Connection management for the GUI client: socket path resolution and
+//! the async connection (HELLO handshake, event stream, senders).
+//!
+//! The wire format lives in at-proto; this crate owns io and lifecycle.
+//! Backpressure is structural: the reader task sends parsed events into
+//! a bounded channel and awaits when it is full, so a slow consumer
+//! stops the socket reads and the daemon's write buffer absorbs the
+//! burst — the daemon already handles slow clients (the CLI is one).
+
+mod conn;
+
+pub use conn::{connect, Client, ClientError, Event, EventRx, HELLO_TIMEOUT};
 
 use std::path::PathBuf;
 
@@ -19,6 +27,13 @@ pub fn socket_path(xdg_runtime_dir: Option<&str>, home: &str) -> PathBuf {
             .join("run")
             .join("default.sock"),
     }
+}
+
+/// socket_path from this process's environment.
+pub fn default_socket_path() -> PathBuf {
+    let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+    let home = std::env::var("HOME").unwrap_or_default();
+    socket_path(xdg.as_deref(), &home)
 }
 
 #[cfg(test)]
