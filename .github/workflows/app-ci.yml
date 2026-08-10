@@ -42,8 +42,15 @@ jobs:
       # by tauri-build with the frontend in place.
       - run: cargo clippy --workspace --exclude agent-terminal-gui --all-targets -- -D warnings
         working-directory: app/tauri/src-tauri
+      # Build the REAL daemon for at-client's integration tests — they
+      # skip without it, and AT_REQUIRE_DAEMON turns a skip into a
+      # failure so CI can never green-light nine tests that ran nothing.
+      - run: make all
+        working-directory: .
       - run: cargo test --workspace --exclude agent-terminal-gui
         working-directory: app/tauri/src-tauri
+        env:
+          AT_REQUIRE_DAEMON: "1"
 
   # Mutation testing on the protocol codec: a codec bug is a wire bug,
   # so its tests must be strong enough that mutated code fails them.

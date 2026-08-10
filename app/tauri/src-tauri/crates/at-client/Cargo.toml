@@ -8,3 +8,8 @@ publish.workspace = true
 
 [dependencies]
 at-proto = { path = "../at-proto" }
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "process"] }
+tempfile = "3"
