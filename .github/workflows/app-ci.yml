@@ -100,6 +100,7 @@ jobs:
       # The binary crate's unit tests (templates resolve) can only run
       # where the frontend dist exists — generate_context! embeds it.
       - run: cargo test -p agent-terminal-gui
+        working-directory: app/tauri/src-tauri
       # The staleness guard in build.rs is the only thing standing between
       # a Rust-only rebuild and a binary that pairs new commands with old
       # JavaScript (measured: it rejected 100% of keystrokes and read as a
@@ -118,4 +119,3 @@ jobs:
             || { echo "build failed, but not on the guard:" >&2; cat build.log >&2; exit 1; }
           echo "guard fired as expected"
           npm run build   # leave the tree consistent
-        working-directory: app/tauri/src-tauri
