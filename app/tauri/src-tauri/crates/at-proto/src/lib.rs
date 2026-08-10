@@ -11,8 +11,18 @@
 //! 5       N     payload      (N == payload_len, max PROTO_MAX_PAYLOAD)
 //! ```
 //!
-//! PR1 ships the frame header codec only — enough to prove the crate,
-//! test, and CI wiring. The full message set lands in PR2.
+//! Semantics mirrored from proto.c / the daemon:
+//! - an oversized `payload_len` is a protocol violation: disconnect
+//!   (`proto_read_frame` returns -1);
+//! - unknown frame *types* are skipped by the receiver;
+//! - unknown *trailing payload bytes* are ignored (additive evolution);
+//! - tail-optional fields (HELLO_OK) parse only when present.
+
+mod msg;
+mod stream;
+
+pub use msg::*;
+pub use stream::{Decoder, Frame};
 
 /// proto.h: `PROTO_VERSION`
 pub const PROTO_VERSION: u16 = 1;
@@ -33,8 +43,9 @@ pub struct FrameHeader {
     pub msg_type: u8,
 }
 
-/// Errors the decoder can report. `Oversized` is a protocol violation:
-/// the caller must disconnect (mirrors proto_read_frame returning -1).
+/// Errors the frame decoder can report. `Oversized` is a protocol
+/// violation: the caller must disconnect (mirrors proto_read_frame
+/// returning -1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     /// payload_len exceeds PROTO_MAX_PAYLOAD.
