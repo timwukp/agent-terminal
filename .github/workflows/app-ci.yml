@@ -36,9 +36,13 @@ jobs:
           workspaces: app/tauri/src-tauri
       - run: cargo fmt --check
         working-directory: app/tauri/src-tauri
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The app binary is excluded here: tauri::generate_context! embeds
+      # the frontend dist, which only the tauri-build job produces. The
+      # library crates carry all the logic; the binary is compile-smoked
+      # by tauri-build with the frontend in place.
+      - run: cargo clippy --workspace --exclude agent-terminal-gui --all-targets -- -D warnings
         working-directory: app/tauri/src-tauri
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude agent-terminal-gui
         working-directory: app/tauri/src-tauri
 
   frontend:
