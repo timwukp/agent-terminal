@@ -206,6 +206,12 @@ npm ci && npm run build          # Tauri embeds dist/ at compile time
 cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
 ```
 
+That order is not a suggestion, and `cargo build` now enforces it: because the
+frontend bundle is embedded at compile time, building only the Rust half ships
+old JavaScript against new commands — which looks like a broken app rather than
+a broken build (it rejected every keystroke once). The build script fails with
+the fix instructions if `dist/` is missing or older than `src/`.
+
 What works today: a sidebar listing live sessions with pane count, zoom badge
 and client count (the same data as `ls`, polled); click to attach and render;
 one-click templates for a new Claude or shell session; kill a session; keyboard

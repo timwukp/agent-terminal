@@ -190,6 +190,11 @@ npm ci && npm run build          # Tauri 在編譯期把 dist/ 嵌入二進位�
 cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
 ```
 
+這個順序不是建議,`cargo build` 現在會強制執行:因為前端 bundle 是在編譯期
+嵌入的,只建置 Rust 那一半會讓新指令配上舊 JavaScript — 看起來像應用程式壞了,
+而不是建置壞了(曾經因此拒絕了每一次按鍵)。當 `dist/` 不存在、或比 `src/`
+更舊時,build script 會直接失敗並附上修復指令。
+
 目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
 (與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
 Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格。

@@ -14,9 +14,18 @@ export interface TerminalProps {
   transport: Transport;
   session: string;
   onClosed?: (error: string | null) => void;
+  /** A keystroke could not be delivered. Surfaced in the UI, because a
+   * console message is invisible to the person typing — a build with a
+   * stale frontend rejected every key and read as a product bug. */
+  onStdinError?: (message: string) => void;
 }
 
-export default function TerminalView({ transport, session, onClosed }: TerminalProps) {
+export default function TerminalView({
+  transport,
+  session,
+  onClosed,
+  onStdinError,
+}: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<PaneRect[]>([]);
 
@@ -58,7 +67,10 @@ export default function TerminalView({ transport, session, onClosed }: TerminalP
     // before then hits "not attached" and the byte is gone.
     const stdin = createStdinQueue(
       (bytes) => transport.stdin(bytes),
-      (e) => console.error("stdin send failed", e),
+      (e) => {
+        console.error("stdin send failed", e);
+        if (!disposed) onStdinError?.(String(e));
+      },
     );
 
     const attach = async () => {
@@ -141,7 +153,7 @@ export default function TerminalView({ transport, session, onClosed }: TerminalP
       void transport.detach();
       term.dispose();
     };
-  }, [transport, session, onClosed]);
+  }, [transport, session, onClosed, onStdinError]);
 
   return <div ref={hostRef} style={{ width: "100%", height: "100%" }} />;
 }

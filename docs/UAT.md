@@ -147,6 +147,32 @@ session simultaneously, both rendering), GUI-10, and GUI-03 at the protocol leve
 letter-boxed terminal. The display slept mid-run, so screenshots came back solid black and
 the remaining verification was done programmatically over the socket. These stay open.
 
+### Round 2 (2026-08-10, against the production daemon)
+
+One report — "picked new claude session / new shell, typing does nothing" — and it was
+**not** a product defect. The sessions had live children (creation worked), and the fix
+from round 1 was present in the binary's Rust. What differed was the other half: the
+running binary's mtime was **2.5 hours older** than `dist/`, so it carried the previous
+frontend. Old JS sent stdin as a JSON number array; new Rust accepts only a bytes
+payload and rejected it — **100% of keystrokes**, with the old JS's fire-and-forget
+send swallowing every error. Rebuilding both halves fixed it, confirmed end-to-end over
+the production socket (a marker typed into a throwaway session echoed back).
+
+The interesting part is that nothing was wrong with the code, and nothing could have
+told the tester that. `tauri::generate_context!` embeds `../dist` at compile time, but
+`tauri-build` emits `rerun-if-changed` only for `tauri.conf.json` and `capabilities/`.
+Measured: with `dist/` **deleted entirely**, `cargo build` exited **0** and produced a
+binary referencing no bundled asset at all. `beforeBuildCommand` does not help — it is a
+`tauri build` CLI feature, and both the README and app-ci.yml use bare `cargo build`.
+
+Three guards landed, one per failure surface: `build.rs` declares the frontend as a
+build input and fails on a missing or stale bundle (verified in four states — missing
+fails, fresh builds, source-newer fails, test-only-change builds); `stdin_data`'s
+rejection message now names the stale half instead of describing the payload; and
+undelivered input raises a visible banner, because a console error is invisible to the
+person typing. app-ci.yml asserts the guard still fires — neutering `check_frontend()`
+makes that step fail, so it cannot rot into a no-op.
+
 ### GUI testing notes
 
 1. **Sample CPU before believing "slow".** An idle process that feels laggy is dropping
@@ -161,6 +187,12 @@ the remaining verification was done programmatically over the socket. These stay
 5. **Automating clicks via `osascript` triggers an Accessibility prompt** and can return
    `missing value` even when the click landed. It is a test-harness artifact; the GUI itself
    needs no such permission.
+6. **Check the binary's mtime against `dist/`'s before testing the GUI at all.** The
+   frontend is embedded at compile time, so a Rust-only rebuild produces a binary
+   pairing new commands with old JavaScript — and that binary's symptom is a *product*
+   symptom. Round 2 spent real time on "typing does nothing" that was a binary built
+   2.5 hours before the frontend it was tested against. `build.rs` now refuses to build
+   a stale or missing bundle, and app-ci.yml asserts that refusal still happens.
 
 ## Reproducing this UAT
 
