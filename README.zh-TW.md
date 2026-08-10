@@ -178,6 +178,32 @@ agent-terminal ls
 agent-terminal new -s work -- claude
 ```
 
+## GUI 客戶端(`app/`,早期預覽)
+
+桌面客戶端位於 [`app/tauri`](app/tauri) — Tauri + xterm.js,走的是同一個 Unix
+socket,沒有新增任何網路監聽。它**不**屬於 `make install` 流程,也還沒有發佈
+版本;請當作自行編譯的預覽版。
+
+```sh
+cd app/tauri
+npm ci && npm run build          # Tauri 在編譯期把 dist/ 嵌入二進位檔
+cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
+```
+
+目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
+(與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
+Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格。
+
+**它與 CLI 並存。** 多客戶端 attach 是 daemon 原生能力,所以終端機裡的
+`agent-terminal attach -s work` 與顯示 `work` 的 GUI 會同時即時渲染同一個
+session,彼此不會搶走對方的輸入。
+
+尚未實作:拖曳分隔線調整窗格大小(需要新的協定訊息),以及 token 用量、
+hooks 與安全性面板 — 這些 crate 目前還只是骨架。驗收採用
+[docs/UAT.md](docs/UAT.md#gui-client-apptauri--manual-checklist) 中的手動
+檢查清單;協定層行為則由 `app/tauri/src-tauri/crates/at-client/tests/` 下的
+真實 daemon 整合測試覆蓋。
+
 ## Scrollback 持久化
 
 捲出主螢幕的行會保存在 1 萬行的記憶體環形緩衝區中,並附加到 CRC 框定的磁碟

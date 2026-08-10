@@ -97,3 +97,7 @@ jobs:
       - run: npm run build
       - run: cargo build
         working-directory: app/tauri/src-tauri
+      # The binary crate's unit tests (templates resolve) can only run
+      # where the frontend dist exists — generate_context! embeds it.
+      - run: cargo test -p agent-terminal-gui
+        working-directory: app/tauri/src-tauri

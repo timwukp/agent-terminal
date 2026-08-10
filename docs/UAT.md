@@ -81,6 +81,52 @@ dropping zoom but keeping panes, and the literal-ESC byte-preservation check per
 live against Claude's input box. No product defects found; the two in-run failures were
 test-method errors that produced notes 4 and 5 above.
 
+## GUI client (`app/tauri`) — manual checklist
+
+The GUI is not covered by the pty harness above: driving a webview through
+`tauri-driver` is flaky on macOS runners, so its acceptance is a **manual** checklist
+against a **real daemon**, run before any `app/` PR that changes behaviour. Wire-level
+behaviour is covered instead by the `at-client` real-daemon integration tests, which is
+where anything expressible as bytes belongs.
+
+Build first — Tauri embeds the frontend at compile time, so a stale `dist/` means the
+binary runs old JavaScript and a fix appears not to work:
+
+```sh
+cd app/tauri && npm ci && npm run build
+cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
+```
+
+| ID | Case | Procedure | Expected |
+|----|------|-----------|----------|
+| GUI-01 | sidebar reflects reality | run `agent-terminal ls` alongside the GUI | same session names; `⧉` pane count, `🔍` zoom, `N●` client count agree |
+| GUI-02 | attach + render | click a session running a TUI | screen repaints from SNAPSHOT: full content, cursor, colours, CJK width |
+| GUI-03 | typing | type immediately after the window opens, before clicking anything | every keystroke appears once, in order; no key needs retyping |
+| GUI-04 | CLI coexistence | `agent-terminal attach -s <name>` in a terminal while the GUI shows it | both render the same output live; `ls` shows 2 clients |
+| GUI-05 | session switch | click between two sessions repeatedly | each switch repaints the correct session; input goes to the newly selected one |
+| GUI-06 | templates | click *+ New Claude session* / *+ New shell* | session created with a free name (`claude`, then `claude-2`…), appears in sidebar, renders |
+| GUI-07 | kill | right-click a session, confirm | session ends; row disappears; `ls` agrees |
+| GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
+| GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
+
+**Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
+exercise them against a session doing real work.
+
+### GUI testing notes
+
+1. **Sample CPU before believing "slow".** An idle process that feels laggy is dropping
+   input somewhere, not failing to keep up.
+2. **A screenshot of a sleeping display is solid black, not a rendering bug.** Check for a
+   plausible image before concluding anything from one.
+3. **Never `pkill agent-terminald`.** A launchd-managed daemon may be carrying the tester's
+   real work. Confirm a daemon's socket with `lsof -p <pid>` before killing it, and track
+   test daemons by pid.
+4. **macOS has no `timeout(1)`.** A wrapper that exits 127 looks exactly like a command
+   producing no output, which can be misread as a hang.
+5. **Automating clicks via `osascript` triggers an Accessibility prompt** and can return
+   `missing value` even when the click landed. It is a test-harness artifact; the GUI itself
+   needs no such permission.
+
 ## Reproducing this UAT
 
 The interactive cases are pty scripts; the shape for all of them:
