@@ -191,42 +191,67 @@ pub async fn attach_session(
     Ok(())
 }
 
-fn send_frame(state: &tauri::State<'_, SessionState>, frame: Vec<u8>) -> Result<(), String> {
-    let guard = state.0.lock().unwrap();
-    let att = guard.as_ref().ok_or("not attached")?;
-    att.cmd_tx
-        .try_send(Cmd::Frame(frame))
-        .map_err(|e| e.to_string())
+/// Queue one frame for the writer task.
+///
+/// Awaits a full queue rather than `try_send`ing: a dropped frame here is
+/// a keystroke the user typed and never saw, and a paste or a fast typist
+/// can outrun a busy writer. The clone releases the mutex before the
+/// await — a std Mutex must not be held across one.
+async fn send_frame(state: &tauri::State<'_, SessionState>, frame: Vec<u8>) -> Result<(), String> {
+    let tx = {
+        let guard = state.0.lock().unwrap();
+        guard.as_ref().ok_or("not attached")?.cmd_tx.clone()
+    };
+    tx.send(Cmd::Frame(frame)).await.map_err(|e| e.to_string())
+}
+
+/// Terminal input. Takes the raw IPC body instead of a named `bytes`
+/// argument: the webview sends an ArrayBuffer, which arrives as
+/// `InvokeBody::Raw`, and a named arg cannot be deserialized from a
+/// bytes payload at all (tauri::ipc::CommandItem::deserialize_json).
+/// Raw also skips JSON-encoding every keystroke as a number array.
+#[tauri::command]
+pub async fn stdin_data(
+    state: tauri::State<'_, SessionState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.as_slice(),
+        tauri::ipc::InvokeBody::Json(_) => return Err("stdin_data expects a bytes payload".into()),
+    };
+    send_frame(&state, proto::stdin_data(bytes)).await
 }
 
 #[tauri::command]
-pub fn stdin_data(state: tauri::State<'_, SessionState>, bytes: Vec<u8>) -> Result<(), String> {
-    send_frame(&state, proto::stdin_data(&bytes))
+pub async fn resize(
+    state: tauri::State<'_, SessionState>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    send_frame(&state, proto::resize(cols, rows)).await
 }
 
 #[tauri::command]
-pub fn resize(state: tauri::State<'_, SessionState>, cols: u16, rows: u16) -> Result<(), String> {
-    send_frame(&state, proto::resize(cols, rows))
+pub async fn select_pane(state: tauri::State<'_, SessionState>, pane_id: u8) -> Result<(), String> {
+    send_frame(&state, proto::select_pane(proto::SelectMode::ById, pane_id)).await
 }
 
 #[tauri::command]
-pub fn select_pane(state: tauri::State<'_, SessionState>, pane_id: u8) -> Result<(), String> {
-    send_frame(&state, proto::select_pane(proto::SelectMode::ById, pane_id))
+pub async fn zoom_toggle(state: tauri::State<'_, SessionState>) -> Result<(), String> {
+    send_frame(&state, proto::select_pane(proto::SelectMode::ZoomToggle, 0)).await
 }
 
 #[tauri::command]
-pub fn zoom_toggle(state: tauri::State<'_, SessionState>) -> Result<(), String> {
-    send_frame(&state, proto::select_pane(proto::SelectMode::ZoomToggle, 0))
+pub async fn split_pane(
+    state: tauri::State<'_, SessionState>,
+    stacked: bool,
+) -> Result<(), String> {
+    send_frame(&state, proto::split_pane(stacked, proto::PANE_ACTIVE)).await
 }
 
 #[tauri::command]
-pub fn split_pane(state: tauri::State<'_, SessionState>, stacked: bool) -> Result<(), String> {
-    send_frame(&state, proto::split_pane(stacked, proto::PANE_ACTIVE))
-}
-
-#[tauri::command]
-pub fn close_pane(state: tauri::State<'_, SessionState>) -> Result<(), String> {
-    send_frame(&state, proto::close_pane(proto::PANE_ACTIVE))
+pub async fn close_pane(state: tauri::State<'_, SessionState>) -> Result<(), String> {
+    send_frame(&state, proto::close_pane(proto::PANE_ACTIVE)).await
 }
 
 /// Detach from the current session (drop the connection; the session
