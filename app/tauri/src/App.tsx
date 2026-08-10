@@ -1,6 +1,6 @@
 // Window shell: sidebar / terminal / claude panel (app/design/ux-spec.md).
 // Claude panel fills in with PR6-PR9.
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import TerminalView from "./terminal/Terminal";
 import { TauriTransport } from "./terminal/transport";
 import Sidebar from "./sidebar/Sidebar";
@@ -13,11 +13,18 @@ export default function App() {
     () => new URLSearchParams(window.location.search).get("session"),
   );
   const [closed, setClosed] = useState<string | null | undefined>(undefined);
+  // Undelivered input must be visible where the typing is happening. A
+  // console message is not: a build pairing fixed Rust with a stale
+  // dist/ rejected every keystroke and looked like a broken product.
+  const [stdinError, setStdinError] = useState<string | null>(null);
 
   const select = (name: string) => {
     setClosed(undefined);
+    setStdinError(null);
     setActive(name);
   };
+  // Stable identity: Terminal re-attaches when this changes.
+  const onStdinError = useCallback((m: string) => setStdinError(m), []);
 
   return (
     <div style={{ display: "flex", height: "100vh", margin: 0, fontFamily: "system-ui" }}>
@@ -30,12 +37,33 @@ export default function App() {
             select a session, or create one from a template
           </p>
         ) : closed === undefined ? (
-          <TerminalView
-            key={active} // full remount on switch: drop + reconnect + ATTACH
-            transport={transport}
-            session={active}
-            onClosed={setClosed}
-          />
+          <>
+            <TerminalView
+              key={active} // full remount on switch: drop + reconnect + ATTACH
+              transport={transport}
+              session={active}
+              onClosed={setClosed}
+              onStdinError={onStdinError}
+            />
+            {stdinError !== null && (
+              <p
+                role="alert"
+                style={{
+                  position: "absolute",
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  margin: 0,
+                  padding: "6px 10px",
+                  background: "#7f1d1d",
+                  color: "#fff",
+                  fontSize: 12,
+                }}
+              >
+                input not delivered: {stdinError}
+              </p>
+            )}
+          </>
         ) : (
           <p style={{ color: "#ccc", padding: 16, fontSize: 13 }}>
             {closed === null ? "session ended" : `connection closed: ${closed}`}

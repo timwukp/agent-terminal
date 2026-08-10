@@ -101,3 +101,21 @@ jobs:
       # where the frontend dist exists — generate_context! embeds it.
       - run: cargo test -p agent-terminal-gui
         working-directory: app/tauri/src-tauri
+      # The staleness guard in build.rs is the only thing standing between
+      # a Rust-only rebuild and a binary that pairs new commands with old
+      # JavaScript (measured: it rejected 100% of keystrokes and read as a
+      # product bug). Assert it actually fires, because a guard that has
+      # silently stopped failing is worse than no guard — it reads clean.
+      - name: staleness guard fails on a stale dist
+        working-directory: app/tauri
+        run: |
+          set -u
+          sleep 1 && touch src/App.tsx
+          if (cd src-tauri && cargo build) 2>build.log; then
+            echo "GUARD DID NOT FIRE: cargo build succeeded with a stale dist" >&2
+            exit 1
+          fi
+          grep -q "stale frontend bundle" build.log \
+            || { echo "build failed, but not on the guard:" >&2; cat build.log >&2; exit 1; }
+          echo "guard fired as expected"
+          npm run build   # leave the tree consistent

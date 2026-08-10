@@ -217,7 +217,17 @@ pub async fn stdin_data(
 ) -> Result<(), String> {
     let bytes = match request.body() {
         tauri::ipc::InvokeBody::Raw(b) => b.as_slice(),
-        tauri::ipc::InvokeBody::Json(_) => return Err("stdin_data expects a bytes payload".into()),
+        // Only a stale frontend sends JSON here, and it does so for EVERY
+        // keystroke — so say which half is old rather than describing the
+        // payload. Measured: a binary built from fixed Rust plus an old
+        // dist/ rejected 100% of input, and it read as a product bug.
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(
+                "stale frontend: stdin_data needs a bytes payload — rebuild dist/ \
+                        (cd app/tauri && npm run build) and rebuild the binary"
+                    .into(),
+            )
+        }
     };
     send_frame(&state, proto::stdin_data(bytes)).await
 }
