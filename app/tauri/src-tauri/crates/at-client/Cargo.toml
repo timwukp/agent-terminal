@@ -1,0 +1,10 @@
+[package]
+name = "at-client"
+version = "0.1.0"
+description = "Connection management for the agent-terminal GUI: unix socket, HELLO/ATTACH, backpressure"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+at-proto = { path = "../at-proto" }

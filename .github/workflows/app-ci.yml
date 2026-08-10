@@ -1,0 +1,74 @@
+# CI for the GUI apps under app/ only. Path-filtered so C changes never
+# wait on Rust/Node toolchains; the C workflow (ci.yml) is untouched and
+# unfiltered. These jobs must stay NON-REQUIRED in branch protection:
+# a required path-filtered check never reports on non-app PRs and would
+# block their merges.
+name: app-ci
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', '.github/workflows/app-ci.yml']
+  pull_request:
+    paths: ['app/**', '.github/workflows/app-ci.yml']
+
+defaults:
+  run:
+    working-directory: app/tauri
+
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux webkit deps (tauri)
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/tauri/src-tauri
+      - run: cargo fmt --check
+        working-directory: app/tauri/src-tauri
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: app/tauri/src-tauri
+      - run: cargo test --workspace
+        working-directory: app/tauri/src-tauri
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/tauri/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  # Compile smoke of the full Tauri app (needs the frontend dist first).
+  # Debug build, no bundling, no signing.
+  tauri-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/tauri/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/tauri/src-tauri
+      - run: npm ci
+      - run: npm run build
+      - run: cargo build
+        working-directory: app/tauri/src-tauri

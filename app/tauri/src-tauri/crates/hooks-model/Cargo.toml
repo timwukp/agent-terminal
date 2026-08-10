@@ -1,0 +1,9 @@
+[package]
+name = "hooks-model"
+version = "0.1.0"
+description = "Read-only model of Claude Code hooks config (~/.claude/settings.json) for the hooks/security panels"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
