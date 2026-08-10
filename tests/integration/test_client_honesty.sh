@@ -25,13 +25,20 @@ TMP="$(mktemp -d)"
 export HOME="$TMP"
 unset XDG_RUNTIME_DIR
 
+DPID=""
+SIBPID=""
 cleanup() {
-    pkill -f "agent-terminald" 2>/dev/null
+    # Kill by tracked pid, never by name (a broad pkill also hits a
+    # production daemon on this machine — it did, once). SIBPID is the
+    # daemon part 3's autospawn starts; `version` reports its pid.
+    [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
+    [ -n "$SIBPID" ] && kill "$SIBPID" 2>/dev/null
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 SHELL=/bin/sh "$BIN/agent-terminald" -f -v > "$TMP/daemon.log" 2>&1 &
+DPID=$!
 wait_for "listening on" "$TMP/daemon.log" 5 \
     || fail "daemon never logged a listen: $(cat "$TMP/daemon.log")"
 
@@ -135,7 +142,8 @@ PY
 grep -q "fatal-still-fatal ok" "$TMP/fatal.out" || fail "fatal probe incomplete"
 
 # --- 3. autospawn prefers the sibling daemon over PATH ----------------------
-pkill -f "agent-terminald" 2>/dev/null
+kill "$DPID" 2>/dev/null
+DPID=""
 sleep 0.5
 mkdir -p "$TMP/decoy"
 cat > "$TMP/decoy/agent-terminald" <<SH
@@ -149,5 +157,7 @@ PATH="$TMP/decoy:$PATH" "$BIN/agent-terminal" new -s sib -- /bin/sleep 300 \
     || fail "autospawn failed with a decoy on PATH"
 [ -f "$TMP/decoy.log" ] && fail "autospawn ran the PATH decoy instead of the sibling"
 "$BIN/agent-terminal" ls | grep -q "sib:" || fail "sibling daemon created nothing"
+SIBPID=$("$BIN/agent-terminal" version | sed -n 's/.*daemon: pid \([0-9]*\).*/\1/p')
+[ -n "$SIBPID" ] || fail "could not learn the autospawned daemon's pid for cleanup"
 
 echo "PASS: no false success on missing sessions; refused split keeps the attach; autospawn prefers the sibling daemon"
