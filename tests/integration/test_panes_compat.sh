@@ -107,7 +107,11 @@ out = open(out_path, 'wb')
 deadline = time.time() + 20
 seen = b''
 s.settimeout(0.3)
-while b'DONE-MARKER' not in seen and time.time() < deadline:
+# Wait for the marker INCLUDING its newline: the PTY may deliver
+# 'DONE-MARKER' and the trailing '\r\n' in separate reads, hence separate
+# OUTPUT frames — stopping at the bare marker races the last two bytes
+# (seen: golden 636 vs captured 634 on ubuntu CI).
+while b'DONE-MARKER\r\n' not in seen and time.time() < deadline:
     try:
         typ, payload = read_frame(s)
     except socket.timeout:
@@ -119,7 +123,7 @@ while b'DONE-MARKER' not in seen and time.time() < deadline:
         seen += payload
         seen = seen[-8192:]
 out.close()
-assert b'DONE-MARKER' in seen, 'child output never completed'
+assert b'DONE-MARKER\r\n' in seen, 'child output never completed'
 print('captured')
 PY
 
