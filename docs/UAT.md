@@ -108,9 +108,44 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-07 | kill | right-click a session, confirm | session ends; row disappears; `ls` agrees |
 | GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
 | GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
+| GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
+
+### Round 1 (2026-08-10, against the production daemon)
+
+Two defects, both found by using the GUI as a user rather than as a test, and neither
+visible to the wire-level suite:
+
+1. **Keystrokes silently dropped** (GUI-03). Reported as "typed and nothing appeared, had to
+   type it again". The process sat at **0.0–2.7% CPU** throughout, which ruled out throughput
+   and pointed at logic. Three causes, none of them performance: nothing called
+   `term.focus()` (xterm.js focuses itself only on a mousedown inside the terminal, so input
+   went to the document until the user happened to click); keys pressed before the async
+   attach resolved were sent to a not-yet-existing attachment and discarded, error and all;
+   and a bounded channel's `try_send` dropped frames under paste or fast typing. Fixed by an
+   ordered stdin queue that holds input until attach completes and reports failures instead
+   of swallowing them.
+2. **The GUI resized a session just by looking at it** (GUI-10) — the more serious find, and
+   an accident: `ls` showed the tester's live session had gone from **111x54 to 93x48**, the
+   GUI window's cell size, reflowing the Claude TUI inside it. What exposed the cause was a
+   second session that changed size while having **zero** clients. Isolated on a throwaway
+   daemon: the daemon is correct — geometry is durable *session* state, and resize does not
+   leak between sessions — the GUI was simply imposing its window size on ATTACH. Fixed with
+   no protocol change: `ATTACH` with `cols=0, rows=0` leaves geometry untouched *and* still
+   returns a SNAPSHOT, so the GUI adopts the session's real size and scales its view. Window
+   resize no longer sends `MSG_RESIZE` at all.
+
+Both are pinned by mutation-verified real-daemon tests
+(`stdin_right_after_attach_is_not_lost`, `attach_with_zero_dims_adopts_size_without_resizing`);
+re-imposing the window size makes the latter fail with `left: (93, 48)`, `right: (97, 41)`.
+
+Verified in round 1: GUI-01, GUI-02, GUI-04 (CLI and GUI attached to the same live Claude
+session simultaneously, both rendering), GUI-10, and GUI-03 at the protocol level.
+**Not yet confirmed by eye:** GUI-05 through GUI-09, and the visual quality of the scaled
+letter-boxed terminal. The display slept mid-run, so screenshots came back solid black and
+the remaining verification was done programmatically over the socket. These stay open.
 
 ### GUI testing notes
 

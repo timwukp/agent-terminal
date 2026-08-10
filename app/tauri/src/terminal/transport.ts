@@ -70,7 +70,10 @@ export class TauriTransport implements Transport {
     await invoke("attach_session", { session, cols, rows, chan });
   }
   stdin(bytes: Uint8Array): Promise<void> {
-    return invoke("stdin_data", { bytes: Array.from(bytes) });
+    // Raw ArrayBuffer, not Array.from(bytes): a number-array payload is
+    // JSON-serialized per keystroke and arrives as InvokeBody::Json,
+    // which the byte-slice command cannot read.
+    return invoke("stdin_data", bytes);
   }
   resize(cols: number, rows: number): Promise<void> {
     return invoke("resize", { cols, rows });

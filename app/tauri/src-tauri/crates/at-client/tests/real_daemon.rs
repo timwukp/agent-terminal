@@ -512,3 +512,160 @@ async fn flood_arrives_complete_and_ordered() {
     c.shutdown().await;
     d.stop().await;
 }
+
+/// The reported bug: keys pressed the moment a session opens vanished, so
+/// the user retyped them. Two causes were client-side (xterm never
+/// focused; sends before ATTACH resolved were dropped), but this pins the
+/// protocol half: bytes written straight after ATTACH — with no wait for
+/// a snapshot — must still reach a child that is already running.
+///
+/// Distinct from new_session_snapshot_output_stdin_roundtrip, which waits
+/// for the child's READY first: here the child is long since started and
+/// the *attach* is what races, which is what a GUI session-switch does.
+#[tokio::test]
+async fn stdin_right_after_attach_is_not_lost() {
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+
+    // First connection creates the session and waits for the child to
+    // hold the pty slave open.
+    let (mut creator, mut crx) = connect(&d.sock(), 0).await.expect("connect");
+    creator
+        .send(
+            &proto::new_session(
+                80,
+                24,
+                "race",
+                &["/bin/sh", "-c", "echo READY; exec /bin/cat"],
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut pre = Vec::new();
+    loop {
+        match next_ev(&mut crx).await {
+            Event::Output(b) => {
+                pre.extend_from_slice(&b);
+                if String::from_utf8_lossy(&pre).contains("READY") {
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    // Second connection attaches and types immediately — no snapshot wait.
+    let (mut c, mut rx) = connect(&d.sock(), proto::CLIENT_CAP_PANES)
+        .await
+        .expect("connect");
+    c.send(&proto::attach(80, 24, 0, "race").unwrap())
+        .await
+        .unwrap();
+    c.send(&proto::stdin_data(b"NORACE-7\n")).await.unwrap();
+
+    let mut seen = Vec::new();
+    loop {
+        match next_ev(&mut rx).await {
+            Event::Output(b) => {
+                seen.extend_from_slice(&b);
+                if String::from_utf8_lossy(&seen).contains("NORACE-7") {
+                    break;
+                }
+            }
+            Event::Snapshot { blob, .. } => {
+                // A snapshot may arrive first and may already contain the
+                // echo; either path counts as delivered.
+                seen.extend_from_slice(&blob);
+                if String::from_utf8_lossy(&seen).contains("NORACE-7") {
+                    break;
+                }
+            }
+            Event::Layout(_) => continue,
+            other => panic!("expected output/snapshot, got {other:?}"),
+        }
+    }
+
+    c.shutdown().await;
+    creator.shutdown().await;
+    d.stop().await;
+}
+
+/// A viewer must not reflow the session it opens. The GUI attaches with
+/// cols/rows 0 for this reason: measured on the real daemon, attaching
+/// with the window's own size took a live 111x54 session down to 93x48,
+/// reflowing the TUI running inside it — and because geometry is durable
+/// session state, it stayed wrong after the viewer left.
+///
+/// Pins both halves of the sentinel: geometry is untouched, and the
+/// attach still succeeds (a SNAPSHOT arrives, not ERR_BAD_REQUEST), which
+/// is what makes 0 usable as "adopt the session's size".
+#[tokio::test]
+async fn attach_with_zero_dims_adopts_size_without_resizing() {
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+
+    let (mut creator, mut crx) = connect(&d.sock(), 0).await.expect("connect");
+    creator
+        .send(&proto::new_session(97, 41, "geo", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        match next_ev(&mut crx).await {
+            Event::Snapshot { cols, rows, .. } => {
+                assert_eq!((cols, rows), (97, 41), "session starts at its own size");
+                break;
+            }
+            Event::Layout(_) => continue,
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    // The viewer attaches with 0x0 and must be handed 97x41 back.
+    let (mut viewer, mut vrx) = connect(&d.sock(), proto::CLIENT_CAP_PANES)
+        .await
+        .expect("connect");
+    viewer
+        .send(&proto::attach(0, 0, 0, "geo").unwrap())
+        .await
+        .unwrap();
+    loop {
+        match next_ev(&mut vrx).await {
+            Event::Snapshot { cols, rows, .. } => {
+                assert_eq!(
+                    (cols, rows),
+                    (97, 41),
+                    "viewer must adopt the session's size, not impose 0x0"
+                );
+                break;
+            }
+            Event::Layout(_) => continue,
+            Event::Err { code, msg } => panic!("attach rejected: {msg} (code {code})"),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    // And the session itself is unchanged, as seen by a third client.
+    let (mut lister, mut lrx) = connect(&d.sock(), 0).await.expect("connect");
+    lister.send(&proto::list_sessions2()).await.unwrap();
+    // No loop: a control connection's first event is the list itself,
+    // with no layout/output traffic to skip past.
+    match next_ev(&mut lrx).await {
+        Event::SessionList(entries) => {
+            let geo = entries.iter().find(|e| e.name == "geo").expect("listed");
+            assert_eq!(
+                (geo.view_cols, geo.view_rows),
+                (97, 41),
+                "a 0x0 attach must not resize the session"
+            );
+        }
+        other => panic!("expected session list, got {other:?}"),
+    }
+
+    lister.shutdown().await;
+    viewer.shutdown().await;
+    creator.shutdown().await;
+    d.stop().await;
+}

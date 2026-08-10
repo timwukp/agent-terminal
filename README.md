@@ -211,9 +211,17 @@ and client count (the same data as `ls`, polled); click to attach and render;
 one-click templates for a new Claude or shell session; kill a session; keyboard
 input; click-to-focus inside splits.
 
-**It coexists with the CLI.** Multi-client attach is native to the daemon, so
-`agent-terminal attach -s work` in a terminal and the GUI showing `work` both
-render the same session live; neither steals the other's input.
+Two properties are worth stating because they are easy to assume wrong:
+
+- **It coexists with the CLI.** Multi-client attach is native to the daemon, so
+  `agent-terminal attach -s work` in a terminal and the GUI showing `work` both
+  render the same session live; neither steals the other's input.
+- **It is a viewer: it never resizes your session.** Session geometry is durable
+  session state shared by every client, so a window that imposed its own size
+  would reflow a running TUI under whoever else is attached. The GUI attaches
+  with a "keep your current size" sentinel and scales its view to the window
+  instead (letter-boxed, never past 1:1). Resizing the window changes nothing
+  on the far end.
 
 Not implemented yet: drag-to-resize panes (needs a new protocol message), and
 the token-usage, hooks and security panels — those crates are stubs today.

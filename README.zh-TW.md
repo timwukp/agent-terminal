@@ -194,9 +194,16 @@ cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
 (與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
 Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格。
 
-**它與 CLI 並存。** 多客戶端 attach 是 daemon 原生能力,所以終端機裡的
-`agent-terminal attach -s work` 與顯示 `work` 的 GUI 會同時即時渲染同一個
-session,彼此不會搶走對方的輸入。
+有兩點值得明說,因為很容易想錯:
+
+- **它與 CLI 並存。** 多客戶端 attach 是 daemon 原生能力,所以終端機裡的
+  `agent-terminal attach -s work` 與顯示 `work` 的 GUI 會同時即時渲染同一個
+  session,彼此不會搶走對方的輸入。
+- **它是檢視器,絕不改變你的 session 尺寸。** Session 幾何是所有客戶端共用的
+  持久 session 狀態,所以一個把自己視窗尺寸套上去的客戶端,會在別人 attach
+  的情況下把正在跑的 TUI 重排。GUI 以「保持你目前的尺寸」的 sentinel 來
+  attach,改為把畫面縮放進視窗(留黑邊,絕不放大超過 1:1)。調整視窗大小
+  對遠端不造成任何影響。
 
 尚未實作:拖曳分隔線調整窗格大小(需要新的協定訊息),以及 token 用量、
 hooks 與安全性面板 — 這些 crate 目前還只是骨架。驗收採用
