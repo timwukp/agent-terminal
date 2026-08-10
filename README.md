@@ -193,6 +193,34 @@ agent-terminal ls
 agent-terminal new -s work -- claude
 ```
 
+## GUI client (`app/`, early preview)
+
+A desktop client lives in [`app/tauri`](app/tauri) — Tauri + xterm.js over the
+same Unix socket, no network listener added. It is **not** part of the
+`make install` flow and has no release build yet; treat it as a preview you
+build yourself.
+
+```sh
+cd app/tauri
+npm ci && npm run build          # Tauri embeds dist/ at compile time
+cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
+```
+
+What works today: a sidebar listing live sessions with pane count, zoom badge
+and client count (the same data as `ls`, polled); click to attach and render;
+one-click templates for a new Claude or shell session; kill a session; keyboard
+input; click-to-focus inside splits.
+
+**It coexists with the CLI.** Multi-client attach is native to the daemon, so
+`agent-terminal attach -s work` in a terminal and the GUI showing `work` both
+render the same session live; neither steals the other's input.
+
+Not implemented yet: drag-to-resize panes (needs a new protocol message), and
+the token-usage, hooks and security panels — those crates are stubs today.
+Acceptance is a manual checklist in [docs/UAT.md](docs/UAT.md#gui-client-apptauri--manual-checklist);
+wire-level behaviour is covered by real-daemon integration tests under
+`app/tauri/src-tauri/crates/at-client/tests/`.
+
 ## Scrollback persistence
 
 Lines scrolling off the primary screen are kept in a 10k-line in-memory

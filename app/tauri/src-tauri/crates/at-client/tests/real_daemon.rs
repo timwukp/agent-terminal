@@ -239,6 +239,58 @@ async fn list_sessions2_shows_created_session() {
 }
 
 #[tokio::test]
+async fn kill_session_answers_with_a_list_without_it() {
+    // The sidebar's kill button relies on two things: the answer to
+    // KILL_SESSION is a fresh session list (not an ack), and the killed
+    // name is gone from it — that list is what refreshes the rows.
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+    let (mut c1, mut rx1) = connect(&d.sock(), 0).await.expect("connect 1");
+    c1.send(&proto::new_session(80, 24, "doomed", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        if let Event::Snapshot { .. } = next_ev(&mut rx1).await {
+            break;
+        }
+    }
+    // A second session proves the kill is targeted, not a clear-all.
+    c1.shutdown().await;
+    let (mut c2, mut rx2) = connect(&d.sock(), 0).await.expect("connect 2");
+    c2.send(&proto::new_session(80, 24, "keeper", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        if let Event::Snapshot { .. } = next_ev(&mut rx2).await {
+            break;
+        }
+    }
+    c2.shutdown().await;
+
+    let (mut c3, mut rx3) = connect(&d.sock(), 0).await.expect("connect 3");
+    c3.send(&proto::kill_session("doomed").unwrap())
+        .await
+        .unwrap();
+    let list = loop {
+        match next_ev(&mut rx3).await {
+            Event::SessionList(l) => break l,
+            Event::Err { code, msg } => panic!("kill failed: {code} {msg}"),
+            _ => {}
+        }
+    };
+    let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["keeper"],
+        "kill answers with the surviving sessions"
+    );
+
+    c3.shutdown().await;
+    d.stop().await;
+}
+
+#[tokio::test]
 async fn multi_client_both_receive_output() {
     // The CLI-coexistence property the GUI depends on: two clients
     // attached to one session both get every OUTPUT frame.
