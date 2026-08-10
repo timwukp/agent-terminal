@@ -12,13 +12,19 @@ TMP="$(mktemp -d)"
 export HOME="$TMP"
 unset XDG_RUNTIME_DIR
 
+DPID=""
 cleanup() {
-    pkill -f "agent-terminald" 2>/dev/null
+    # Kill by tracked pid, never by name: a broad pkill also hits a
+    # PRODUCTION daemon on the same machine (it did — took a live session
+    # with it). The pid survives `reload` because the handoff is an in-place
+    # execv, so this stays correct across restarts the test performs.
+    [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
     rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 SHELL=/bin/sh "$BIN/agent-terminald" -f -v > "$TMP/daemon.log" 2>&1 &
+DPID=$!
 wait_for "listening on" "$TMP/daemon.log" 5 \
     || fail "daemon never logged a listen: $(cat "$TMP/daemon.log")"
 
