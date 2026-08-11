@@ -347,6 +347,35 @@ mod tests {
         );
     }
 
+    /// Bundling is config + files that only meet at `tauri build` time,
+    /// which CI does not run (a release bundle per PR is minutes of
+    /// build). This pins the meeting point: every icon the config names
+    /// exists, and the bundle stays active — so a renamed icon or a
+    /// "temporarily" disabled bundle reds the unit suite instead of the
+    /// next release attempt.
+    #[test]
+    fn bundle_config_names_icons_that_exist() {
+        let conf = include_str!("../tauri.conf.json");
+        let v: serde_json::Value = serde_json::from_str(conf).expect("tauri.conf.json is valid");
+        assert_eq!(
+            v["bundle"]["active"],
+            serde_json::json!(true),
+            "bundling is how the .app (and with it, real macOS notifications) exists"
+        );
+        let icons = v["bundle"]["icon"]
+            .as_array()
+            .expect("bundle.icon is a list");
+        assert!(!icons.is_empty(), "an empty icon list fails `tauri build`");
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for icon in icons {
+            let rel = icon.as_str().expect("icon entries are paths");
+            assert!(
+                manifest.join(rel).is_file(),
+                "config names a missing icon: {rel}"
+            );
+        }
+    }
+
     #[test]
     fn non_array_json_names_the_shape_it_got() {
         let err = decode_stdin(&InvokeBody::Json(serde_json::json!({"bytes": [1]}))).unwrap_err();
