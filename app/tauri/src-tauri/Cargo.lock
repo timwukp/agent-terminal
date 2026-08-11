@@ -15,6 +15,7 @@ dependencies = [
  "at-client",
  "at-proto",
  "claude-watch",
+ "hooks-model",
  "serde",
  "serde_json",
  "tauri",
@@ -1503,6 +1504,10 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hooks-model"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "html5ever"
