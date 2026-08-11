@@ -1,10 +1,11 @@
 // Window shell: sidebar / terminal / claude panel (app/design/ux-spec.md).
 // Claude panel fills in with PR6-PR9.
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import TerminalView from "./terminal/Terminal";
 import { TauriTransport } from "./terminal/transport";
 import Sidebar from "./sidebar/Sidebar";
 import { TauriControlApi } from "./sidebar/api";
+import { decideNotify, deliverNotification } from "./notify";
 
 export default function App() {
   const transport = useMemo(() => new TauriTransport(), []);
@@ -25,11 +26,48 @@ export default function App() {
   // session, then typed, and nothing happened".
   const [focusNonce, setFocusNonce] = useState(0);
 
+  // Notifications (app/design/notifications.md): per-session mute, and a
+  // sidebar badge for turns that completed while the window was unfocused
+  // — the badge is also the whole story when OS delivery is unavailable
+  // (unbundled macOS dev binaries cannot post to the notification center).
+  const [muted, setMuted] = useState<ReadonlySet<string>>(new Set());
+  const [done, setDone] = useState<ReadonlySet<string>>(new Set());
+  // Latest-refs: onTurnDone is read through a ref in TerminalView, so it
+  // is deliberately not identity-stable — but reading state directly here
+  // would still close over the render it was created in.
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
+  const onTurnDone = (_reason: "bell" | "idle", lastLine: string) => {
+    const name = activeRef.current;
+    if (name === null) return;
+    const d = decideNotify(document.hasFocus(), mutedRef.current.has(name));
+    if (d.badge) setDone((s) => new Set(s).add(name));
+    if (d.notify) void deliverNotification(name, lastLine);
+  };
+
+  const toggleMute = (name: string) =>
+    setMuted((s) => {
+      const next = new Set(s);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   const select = (name: string) => {
     setClosed(undefined);
     setStdinError(null);
     setActive(name);
     setFocusNonce((n) => n + 1);
+    // Selecting a session is looking at it; its "finished" mark is served.
+    setDone((s) => {
+      if (!s.has(name)) return s;
+      const next = new Set(s);
+      next.delete(name);
+      return next;
+    });
   };
   // Stable identity: Terminal re-attaches when this changes.
   const onStdinError = useCallback((m: string) => setStdinError(m), []);
@@ -37,7 +75,14 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", margin: 0, fontFamily: "system-ui" }}>
       <aside style={{ width: 220, borderRight: "1px solid #ccc", padding: 8 }}>
-        <Sidebar api={api} active={active} onSelect={select} />
+        <Sidebar
+          api={api}
+          active={active}
+          onSelect={select}
+          muted={muted}
+          done={done}
+          onToggleMute={toggleMute}
+        />
       </aside>
       <main style={{ flex: 1, position: "relative", background: "#1e2228" }}>
         {active === null ? (
@@ -53,6 +98,7 @@ export default function App() {
               onClosed={setClosed}
               onStdinError={onStdinError}
               focusNonce={focusNonce}
+              onTurnDone={onTurnDone}
             />
             {stdinError !== null && (
               <p

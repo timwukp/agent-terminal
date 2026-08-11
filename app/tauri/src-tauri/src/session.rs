@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
 
+use crate::idle;
 use at_client::{connect, Event};
 use at_proto as proto;
 
@@ -49,6 +50,11 @@ enum CtrlEvent {
     SessionExited {
         exit_status: i32,
     },
+    /// The attached session was demonstrably working (sustained output)
+    /// and has now been silent long enough to call it finished. Emitted by
+    /// the idle machine (src/idle.rs); the webview decides whether that
+    /// becomes an OS notification — focus and mute state live there.
+    TurnDone {},
     PaneExited {
         pane_id: u8,
         exit_status: i32,
@@ -114,11 +120,35 @@ pub async fn attach_session(
         client.shutdown().await;
     });
 
-    // Reader pump: daemon events → channel (tagged binary).
+    // Reader pump: daemon events → channel (tagged binary). Also hosts the
+    // idle machine: this task sees every OUTPUT regardless of pane count,
+    // and unlike a webview timer it is never throttled when the window is
+    // occluded — which is exactly when a notification matters.
     tokio::spawn(async move {
-        while let Some(ev) = rx.recv().await {
+        let mut machine = idle::Machine::new(idle::Config::default());
+        loop {
+            // Race the next event against the machine's deadline. No
+            // deadline (IDLE) means nothing to time out — just wait.
+            let ev = if let Some(deadline) = machine.next_deadline() {
+                tokio::select! {
+                    ev = rx.recv() => ev,
+                    () = tokio::time::sleep_until(deadline.into()) => {
+                        if machine.on_tick(std::time::Instant::now()) {
+                            send_ctrl(&chan, &CtrlEvent::TurnDone {});
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                rx.recv().await
+            };
+            let Some(ev) = ev else { return };
             match ev {
                 Event::Output(bytes) => {
+                    // Snapshots deliberately do NOT feed the machine: a
+                    // snapshot is a repaint of existing state on attach,
+                    // not the child producing anything.
+                    machine.on_output(std::time::Instant::now());
                     let mut buf = Vec::with_capacity(1 + bytes.len());
                     buf.push(0x30);
                     buf.extend_from_slice(&bytes);

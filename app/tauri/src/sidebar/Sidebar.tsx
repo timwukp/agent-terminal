@@ -11,9 +11,19 @@ export interface SidebarProps {
   api: ControlApi;
   active: string | null;
   onSelect(name: string): void;
+  /** Sessions whose completion notifications are silenced. */
+  muted?: ReadonlySet<string>;
+  /** Sessions that finished a turn while the window was unfocused; the
+   * mark is the fallback when OS notifications cannot be delivered, and
+   * it survives a mute — muting silences the pop-up, not the record. */
+  done?: ReadonlySet<string>;
+  /** Toggle notification mute for one session. A row button rather than
+   * the design doc's context menu: right-click is already kill, and a
+   * two-item menu for one toggle is more chrome than the toggle. */
+  onToggleMute?(name: string): void;
 }
 
-export default function Sidebar({ api, active, onSelect }: SidebarProps) {
+export default function Sidebar({ api, active, onSelect, muted, done, onToggleMute }: SidebarProps) {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +76,11 @@ export default function Sidebar({ api, active, onSelect }: SidebarProps) {
       <h2 style={{ fontSize: 14, margin: "4px 0" }}>Sessions</h2>
       <ul style={{ listStyle: "none", padding: 0, margin: 0, flex: 1, overflowY: "auto" }}>
         {sessions.map((s) => (
-          <li key={s.name}>
+          // Two sibling buttons, not a control nested inside a control: a
+          // button inside a button is invalid HTML, double-announces to
+          // screen readers, and needs a stopPropagation hack to keep the
+          // mute click from also attaching.
+          <li key={s.name} style={{ display: "flex", alignItems: "center" }}>
             <button
               onClick={() => onSelect(s.name)}
               onContextMenu={(e) => {
@@ -74,8 +88,8 @@ export default function Sidebar({ api, active, onSelect }: SidebarProps) {
                 void kill(s.name);
               }}
               style={{
-                display: "block",
-                width: "100%",
+                flex: 1,
+                minWidth: 0,
                 textAlign: "left",
                 padding: "6px 8px",
                 border: "none",
@@ -88,6 +102,12 @@ export default function Sidebar({ api, active, onSelect }: SidebarProps) {
               title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s)`}
             >
               {s.name}
+              {done?.has(s.name) === true && (
+                <span title="finished while you were away" style={{ color: "#3fb950" }}>
+                  {" "}
+                  ✓
+                </span>
+              )}
               {s.npanes != null && s.npanes > 1 && (
                 <span style={{ opacity: 0.75 }}> {s.npanes}⧉</span>
               )}
@@ -96,6 +116,28 @@ export default function Sidebar({ api, active, onSelect }: SidebarProps) {
                 <span style={{ float: "right", opacity: 0.6, fontSize: 11 }}>{s.nclients}●</span>
               )}
             </button>
+            {onToggleMute && (
+              <button
+                aria-label={
+                  muted?.has(s.name) === true
+                    ? `unmute notifications for ${s.name}`
+                    : `mute notifications for ${s.name}`
+                }
+                aria-pressed={muted?.has(s.name) === true}
+                title={muted?.has(s.name) === true ? "notifications muted" : "mute notifications"}
+                onClick={() => onToggleMute(s.name)}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  opacity: muted?.has(s.name) === true ? 0.9 : 0.35,
+                  fontSize: 11,
+                  padding: "2px 4px",
+                  cursor: "pointer",
+                }}
+              >
+                {muted?.has(s.name) === true ? "🔕" : "🔔"}
+              </button>
+            )}
           </li>
         ))}
         {sessions.length === 0 && !error && (

@@ -228,6 +228,16 @@ one-click templates for a new Claude or shell session; kill a session; keyboard
 input; click-to-focus inside splits; a toolbar for split / zoom / close-pane;
 and an outline on the active pane so a split session shows where input goes.
 
+The GUI also tells you when a session **finishes a long task while you are
+elsewhere**: two triggers, OR-ed — the terminal bell (xterm's parser, so OSC
+title writes don't ring it), and an output-idle machine in the Rust core
+(sustained output ≥10 s, then ≥5 s of silence; a one-line `ls` never
+notifies). A focused window never notifies — you are already watching. Each
+session row has a 🔔/🔕 toggle; muting silences the pop-up but the row still
+gets a ✓ mark, which also covers the case where the OS notification cannot be
+delivered at all (macOS only shows notifications for real `.app` bundles, so
+the unbundled debug binary always falls back to the ✓).
+
 One implementation note worth recording: the protocol's layout message carries
 no zoom flag, and none was added. While a pane is zoomed the daemon already
 reports its rectangle as the full view (other panes keep their tiled

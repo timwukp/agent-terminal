@@ -41,6 +41,9 @@ vi.mock("@xterm/xterm", () => {
     onData() {
       return { dispose() {} };
     }
+    onBell() {
+      return { dispose() {} };
+    }
   }
   return { Terminal: FakeTerm };
 });
@@ -102,7 +105,10 @@ vi.mock("../terminal/transport.ts", () => ({
  * button exactly as a real click does. Returns the row button. */
 async function openSession() {
   const view = render(<App />);
-  const row = await view.findByRole("button", { name: /work/ });
+  // Anchored: the mute button's accessible name is "mute notifications
+  // for work", which /work/ would also match. The row's name STARTS with
+  // the session name.
+  const row = await view.findByRole("button", { name: /^work/ });
   focusSpy.mockClear();
   await act(async () => {
     fireEvent.click(row);
