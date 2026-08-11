@@ -181,8 +181,10 @@ agent-terminal new -s work -- claude
 ## GUI 客戶端(`app/`,早期預覽)
 
 桌面客戶端位於 [`app/tauri`](app/tauri) — Tauri + xterm.js,走的是同一個 Unix
-socket,沒有新增任何網路監聽。它**不**屬於 `make install` 流程;由你自行編譯,
-可以打包成可雙擊的 app,也可以只建 debug 執行檔:
+socket,沒有新增任何網路監聽。attach 時會回填 daemon 側的歷史紀錄(最多為
+ring 的 10,000 行),所以滑鼠滾輪能一路捲回 GUI 連上**之前**的輸出。它**不**
+屬於 `make install` 流程;由你自行編譯,可以打包成可雙擊的 app,也可以只建
+debug 執行檔:
 
 ```sh
 cd app/tauri && npm ci

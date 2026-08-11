@@ -8,7 +8,8 @@
 //! posture). Event framing over the channel is one leading tag byte so
 //! the JS side can route without JSON-parsing terminal data:
 //!   0x30 raw output bytes            (feed to xterm verbatim)
-//!   0x31 snapshot: u16 cols, u16 rows LE, then blob (feed verbatim)
+//!   0x31 snapshot: u16 cols, u16 rows, u64 sb_lines LE, then blob
+//!   0x33 scrollback: u64 first_seq, u32 nlines LE, {u32 len, bytes}...
 //!   0x4a JSON control event (layout, err, exits, closed)
 
 use serde::Serialize;
@@ -157,13 +158,18 @@ pub async fn attach_session(
                     }
                 }
                 Event::Snapshot {
-                    cols, rows, blob, ..
+                    cols,
+                    rows,
+                    sb_lines,
+                    blob,
                 } => {
-                    let mut buf = Vec::with_capacity(5 + blob.len());
-                    buf.push(0x31);
-                    buf.extend_from_slice(&cols.to_le_bytes());
-                    buf.extend_from_slice(&rows.to_le_bytes());
-                    buf.extend_from_slice(&blob);
+                    let buf = snapshot_frame(cols, rows, sb_lines, &blob);
+                    if chan.send(InvokeResponseBody::Raw(buf)).is_err() {
+                        return;
+                    }
+                }
+                Event::Scrollback { first_seq, lines } => {
+                    let buf = scrollback_frame(first_seq, &lines);
                     if chan.send(InvokeResponseBody::Raw(buf)).is_err() {
                         return;
                     }
@@ -206,9 +212,8 @@ pub async fn attach_session(
                     return;
                 }
                 // Sidebar traffic (session lists) rides the control
-                // connection, not the attach one; scrollback/pong unused
-                // in v1 rendering.
-                Event::SessionList(_) | Event::Scrollback { .. } | Event::Pong(_) => {}
+                // connection, not the attach one; pong unused in v1.
+                Event::SessionList(_) | Event::Pong(_) => {}
             }
         }
     });
@@ -219,6 +224,37 @@ pub async fn attach_session(
         let _ = old.cmd_tx.try_send(Cmd::Shutdown);
     }
     Ok(())
+}
+
+/// Channel frame 0x31: the daemon's repaint plus how many lines of
+/// history it holds, so the webview knows whether (and how far back) to
+/// backfill before painting.
+fn snapshot_frame(cols: u16, rows: u16, sb_lines: u64, blob: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(13 + blob.len());
+    buf.push(0x31);
+    buf.extend_from_slice(&cols.to_le_bytes());
+    buf.extend_from_slice(&rows.to_le_bytes());
+    buf.extend_from_slice(&sb_lines.to_le_bytes());
+    buf.extend_from_slice(blob);
+    buf
+}
+
+/// Channel frame 0x33: one MSG_SCROLLBACK_DATA page, re-framed. The
+/// daemon's length-prefixed line list is kept as-is (lines are ANSI text
+/// that may contain any byte, so a delimiter cannot frame them), but
+/// first_seq is re-encoded rather than passed through: the webview pages
+/// by it, and a format it parses must be one this side provably wrote.
+fn scrollback_frame(first_seq: u64, lines: &[Vec<u8>]) -> Vec<u8> {
+    let total: usize = lines.iter().map(|l| 4 + l.len()).sum();
+    let mut buf = Vec::with_capacity(13 + total);
+    buf.push(0x33);
+    buf.extend_from_slice(&first_seq.to_le_bytes());
+    buf.extend_from_slice(&(lines.len() as u32).to_le_bytes());
+    for line in lines {
+        buf.extend_from_slice(&(line.len() as u32).to_le_bytes());
+        buf.extend_from_slice(line);
+    }
+    buf
 }
 
 /// Queue one frame for the writer task.
@@ -288,6 +324,55 @@ pub async fn stdin_data(
 mod tests {
     use super::*;
     use tauri::ipc::InvokeBody;
+
+    /// The webview parses these frames byte-by-byte (transport.ts
+    /// routeMessage); a one-byte layout drift there shows up as garbage
+    /// fed to xterm, not as an error. Pin the exact layout here.
+    #[test]
+    fn snapshot_frame_layout_is_tag_cols_rows_sblines_blob() {
+        let buf = snapshot_frame(0x0201, 0x0403, 0x0807_0605, b"\x1b[2J");
+        assert_eq!(buf[0], 0x31);
+        assert_eq!(&buf[1..3], &[0x01, 0x02], "cols LE");
+        assert_eq!(&buf[3..5], &[0x03, 0x04], "rows LE");
+        assert_eq!(
+            &buf[5..13],
+            &[0x05, 0x06, 0x07, 0x08, 0, 0, 0, 0],
+            "sb_lines u64 LE"
+        );
+        assert_eq!(&buf[13..], b"\x1b[2J", "blob starts at offset 13");
+    }
+
+    #[test]
+    fn scrollback_frame_length_prefixes_each_line() {
+        let lines = vec![b"one".to_vec(), vec![], b"\x1b[31mred".to_vec()];
+        let buf = scrollback_frame(7, &lines);
+        assert_eq!(buf[0], 0x33);
+        assert_eq!(&buf[1..9], &7u64.to_le_bytes(), "first_seq LE");
+        assert_eq!(
+            &buf[9..13],
+            &3u32.to_le_bytes(),
+            "nlines counts empty lines too"
+        );
+        // one
+        assert_eq!(&buf[13..17], &3u32.to_le_bytes());
+        assert_eq!(&buf[17..20], b"one");
+        // the empty line still gets its prefix — dropping it would shift
+        // every later line's seq accounting by one
+        assert_eq!(&buf[20..24], &0u32.to_le_bytes());
+        // SGR bytes pass through un-mangled
+        assert_eq!(&buf[24..28], &8u32.to_le_bytes());
+        assert_eq!(&buf[28..], b"\x1b[31mred");
+    }
+
+    #[test]
+    fn scrollback_frame_with_no_lines_is_a_valid_empty_page() {
+        // The daemon answers an out-of-ring request with zero lines; the
+        // webview uses that as its backfill termination signal, so the
+        // frame must still carry the header.
+        let buf = scrollback_frame(0, &[]);
+        assert_eq!(buf.len(), 13);
+        assert_eq!(&buf[9..13], &0u32.to_le_bytes());
+    }
 
     #[test]
     fn raw_body_is_the_fast_path() {
@@ -399,6 +484,22 @@ pub async fn resize(
 #[tauri::command]
 pub async fn select_pane(state: tauri::State<'_, SessionState>, pane_id: u8) -> Result<(), String> {
     send_frame(&state, proto::select_pane(proto::SelectMode::ById, pane_id)).await
+}
+
+/// Ask the daemon for a page of the active pane's history. The answer
+/// arrives on the attach channel as an 0x33 frame; the webview drives the
+/// paging loop because only it knows how much history it wants to show.
+#[tauri::command]
+pub async fn scrollback_req(
+    state: tauri::State<'_, SessionState>,
+    start_seq: u64,
+    max_lines: u32,
+) -> Result<(), String> {
+    send_frame(
+        &state,
+        proto::scrollback_req(start_seq, max_lines, proto::PANE_ACTIVE),
+    )
+    .await
 }
 
 #[tauri::command]

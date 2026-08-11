@@ -10,6 +10,7 @@ import type { PaneRect, Transport } from "./transport";
 import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
+import { Backfill } from "./backfill";
 import { readCellMetrics } from "./overlay";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
@@ -83,7 +84,11 @@ export default function TerminalView({
     if (!host) return;
 
     const term = new XTerm({
-      scrollback: 0, // history lives daemon-side; copy-mode/scrollback UI later
+      // Sized to the daemon's own ring (SB_MEM_LINES_DEFAULT): attach
+      // backfills up to that much history, and everything after attach
+      // accumulates client-side, so the wheel scrolls back seamlessly
+      // across the attach point.
+      scrollback: 10000,
       fontFamily: "ui-monospace, Menlo, monospace",
       fontSize: 13,
     });
@@ -127,6 +132,38 @@ export default function TerminalView({
       },
     );
 
+    // Attach-time history backfill (see backfill.ts for the ordering
+    // story). The machine decides WHAT happens in which order; these
+    // sinks are the only place that knows it happens to an xterm.
+    const backfill = new Backfill({
+      // Stored lines carry raw SGR and do not self-reset — bracket each
+      // one exactly like the CLI pager does (pager.c pager_draw), or one
+      // red line bleeds into every line after it.
+      writeLine: (line) => {
+        term.write("\x1b[0m");
+        term.write(line);
+        term.write("\x1b[0m\r\n");
+      },
+      padToScrollback: () => {
+        // rows-1 newlines: enough to scroll the last written line off
+        // the top from any cursor position, never one more (which would
+        // put a spurious blank line into scrollback).
+        term.write("\n".repeat(Math.max(0, term.rows - 1)));
+      },
+      applySnapshot: (_cols, _rows, blob) => {
+        // Grid was already resized when the snapshot arrived (below);
+        // here the stashed repaint finally lands.
+        term.write(blob);
+      },
+      writeOutput: (bytes) => term.write(bytes),
+      request: (startSeq, maxLines) => {
+        // A failed request (detached mid-fetch) has no response frame;
+        // the machine's stall timer converts that into paint-without-
+        // history rather than a terminal that never renders.
+        void transport.scrollbackReq(startSeq, maxLines).catch(() => backfill.onStall());
+      },
+    });
+
     const attach = async () => {
       // cols/rows 0 means "adopt the session's current size", verified
       // against the daemon: session_resize() early-returns on a zero
@@ -136,21 +173,24 @@ export default function TerminalView({
       // took the user's claude session from 111x54 to 93x48. The grid is
       // then sized from the snapshot in onSnapshot.
       await transport.attach(session, 0, 0, {
-        onOutput: (bytes) => term.write(bytes),
-        onSnapshot: (cols, rows, blob) => {
+        onOutput: (bytes) => backfill.onOutput(bytes),
+        onSnapshot: (cols, rows, sbLines, blob) => {
           // The blob addresses rows absolutely for exactly cols×rows;
-          // resize the grid first so the repaint lands intact. This is
-          // also how the viewer learns the session's real geometry.
+          // resize the grid first so the repaint lands intact — and so
+          // history lines written before the repaint wrap at the
+          // session's width, not the mount-default 80. This is also how
+          // the viewer learns the session's real geometry.
           if (term.cols !== cols || term.rows !== rows) {
             term.resize(cols, rows);
             scaleToFit();
           }
-          term.write(blob);
+          backfill.onSnapshot(cols, rows, sbLines, blob);
           // Cell metrics change exactly when the grid or font does, and a
           // snapshot follows every geometry change — so this is the one
           // refresh point that cannot go stale.
           setMetrics(readCellMetrics(term));
         },
+        onScrollback: (firstSeq, lines) => backfill.onScrollback(firstSeq, lines),
         onCtrl: (ev) => {
           if (disposed) return;
           if (ev.kind === "layout") {
@@ -233,6 +273,7 @@ export default function TerminalView({
       window.removeEventListener("focus", onWindowFocus);
       window.removeEventListener("resize", onResize);
       host.removeEventListener("click", onClick);
+      backfill.dispose();
       bell.dispose();
       data.dispose();
       void transport.detach();

@@ -20,6 +20,7 @@ fn main() {
             session::stdin_data,
             session::resize,
             session::select_pane,
+            session::scrollback_req,
             session::zoom_toggle,
             session::split_pane,
             session::close_pane,

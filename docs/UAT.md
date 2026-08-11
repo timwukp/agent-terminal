@@ -116,6 +116,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-15 | overlay tracks the window | with a split session, resize the window smaller | outlines shrink with the letter-boxed view and stay glued to their panes |
 | GUI-16 | done notification | attach to a session, run `sleep 12 && echo done` via a loop that prints every second for ≥10 s, focus another app, wait ~5 s after it stops | ✓ appears on the session row; an OS notification appears **only if running from a real `.app` bundle** (`npm run bundle`, then launch the `.app`) — the unbundled debug binary shows the ✓ alone, by design |
 | GUI-17 | mute + focus rules | mute the session (🔕), repeat GUI-16; then repeat unmuted with the window focused | muted: ✓ but no pop-up; focused: neither — and selecting the session clears its ✓ |
+| GUI-18 | wheel scrolls into history | in a CLI attach, generate ≥3 screens of output (`seq 1 200`), detach, attach in the GUI, scroll the wheel up | output from **before** the GUI attached is there, continuous across the attach point (no gap, no duplicated screen); scrolling to the bottom resumes live following, and typing snaps back to the prompt |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
