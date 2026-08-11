@@ -183,8 +183,9 @@ agent-terminal new -s work -- claude
 桌面客戶端位於 [`app/tauri`](app/tauri) — Tauri + xterm.js,走的是同一個 Unix
 socket,沒有新增任何網路監聽。attach 時會回填 daemon 側的歷史紀錄(最多為
 ring 的 10,000 行),所以滑鼠滾輪能一路捲回 GUI 連上**之前**的輸出。⌘/Ctrl
-`+` `−` `0` 縮放字級,不會改變 session 的格線;視窗本身永遠不會擅自調整
-session 尺寸——工具列的 ⤢ 按鈕才會,而且所有 attach 中的檢視端都會一起重排。
+`+` `−` `0` 縮放字級,不會改變 session 的格線;視窗永遠不會擅自調整**別人
+建立的** session 尺寸——工具列的 ⤢ 按鈕(或大片留白裡的提示)才會,且所有
+attach 中的檢視端一起重排;GUI 自己建立的 session 則在誕生時就貼合視窗一次。
 右側可收合面板顯示 Claude Code 的即時狀態,讀自 `~/.claude`(終端協定
 本身保持與工作負載無關):**Usage** 分頁是每份 transcript 的輸入/輸出/
 快取 token 總量與每分鐘輸出 sparkline;**Hooks** 分頁列出 `settings.json`

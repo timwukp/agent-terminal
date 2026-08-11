@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  FIT_HINT_MIN_FRACTION,
   FIT_MIN_COLS,
   FIT_MIN_ROWS,
   FONT_DEFAULT,
@@ -7,6 +8,8 @@ import {
   FONT_MIN,
   fitGrid,
   isAtBottom,
+  letterboxFraction,
+  makeOneShotSet,
   nextFontSize,
   windowTitle,
   zoomActionForKey,
@@ -69,6 +72,37 @@ describe("fitGrid", () => {
   it("refuses unmeasurable input instead of sending a garbage grid", () => {
     expect(fitGrid(0, 700, 8, 17)).toBeNull(); // hidden host
     expect(fitGrid(1000, 700, 0, 17)).toBeNull(); // metrics not ready
+  });
+});
+
+describe("letterboxFraction", () => {
+  it("an 80×24 session in a big window is mostly letterbox (the complaint)", () => {
+    // ~624×312 of terminal in a 1400×900 window ≈ 84% dead space.
+    const f = letterboxFraction(1400, 900, 624, 312);
+    expect(f).toBeGreaterThan(FIT_HINT_MIN_FRACTION);
+    expect(f).toBeCloseTo(1 - (624 * 312) / (1400 * 900), 5);
+  });
+  it("a fitted session leaves only a sliver — below the hint threshold", () => {
+    // One partial cell row/column of margin.
+    expect(letterboxFraction(1400, 900, 1396, 892)).toBeLessThan(FIT_HINT_MIN_FRACTION);
+  });
+  it("unmeasurable input yields 0, not a garbage hint", () => {
+    expect(letterboxFraction(0, 900, 624, 312)).toBe(0);
+    expect(letterboxFraction(1400, 900, 0, 312)).toBe(0);
+  });
+  it("a terminal larger than the host never goes negative", () => {
+    expect(letterboxFraction(800, 600, 1000, 700)).toBe(0);
+  });
+});
+
+describe("makeOneShotSet", () => {
+  it("consume answers true exactly once per add", () => {
+    const s = makeOneShotSet();
+    s.add("claude-1");
+    expect(s.consume("claude-1")).toBe(true);
+    // Re-selecting the session later must NOT re-impose geometry.
+    expect(s.consume("claude-1")).toBe(false);
+    expect(s.consume("never-added")).toBe(false);
   });
 });
 

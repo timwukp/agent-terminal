@@ -11,7 +11,15 @@ import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
 import { Backfill } from "./backfill";
-import { FONT_DEFAULT, fitGrid, isAtBottom, nextFontSize, zoomActionForKey } from "./viewControls";
+import {
+  FIT_HINT_MIN_FRACTION,
+  FONT_DEFAULT,
+  fitGrid,
+  isAtBottom,
+  letterboxFraction,
+  nextFontSize,
+  zoomActionForKey,
+} from "./viewControls";
 import { onThemeChange, resolveTokens, theme } from "../theme";
 import { xtermTheme } from "./xtermTheme";
 import { readCellMetrics } from "./overlay";
@@ -44,6 +52,12 @@ export interface TerminalProps {
    * machine saw sustained work end. Carries the last non-empty screen
    * line so a notification can say WHAT finished. */
   onTurnDone?: (reason: "bell" | "idle", lastLine: string) => void;
+  /** Consumed once after the first snapshot: true = fit the session to
+   * this window now. App answers true only for a session THIS GUI just
+   * created (we chose its 80×24 default; resizing our own newborn is
+   * not imposing on anyone). CLI-created sessions always answer false —
+   * the no-imposed-geometry rule stands. */
+  autoFit?: () => boolean;
 }
 
 /** Bottom-most non-empty row of the visible screen. */
@@ -63,6 +77,7 @@ export default function TerminalView({
   onStdinError,
   focusNonce,
   onTurnDone,
+  autoFit,
 }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<PaneRect[]>([]);
@@ -77,6 +92,29 @@ export default function TerminalView({
   const [scale, setScale] = useState(1);
   // The viewport is scrolled up: new output is arriving out of sight.
   const [behind, setBehind] = useState(false);
+  // A large letterbox around a small session reads as "reserved space"
+  // (a real user asked what the empty half was FOR — twice). When it
+  // dominates the window, the dead space labels itself with a
+  // click-to-fit hint. Null = no hint.
+  const [fitHint, setFitHint] = useState<{ cols: number; rows: number } | null>(null);
+  // Latest-ref like onTurnDoneRef below: the attach effect must not
+  // depend on it, must not capture a stale one.
+  const autoFitRef = useRef(autoFit);
+  autoFitRef.current = autoFit;
+
+  // The one sanctioned way the GUI changes a session's geometry: the
+  // user pressed ⤢ / clicked the hint, or the session is our own
+  // newborn (autoFit). Shared by all three entry points.
+  const fitToWindow = () => {
+    const term = termRef.current;
+    const host = hostRef.current;
+    const m = term ? readCellMetrics(term) : null;
+    if (!term || !host || !m) return;
+    const grid = fitGrid(host.clientWidth, host.clientHeight, m.cellWidth, m.cellHeight);
+    if (grid && (grid.cols !== term.cols || grid.rows !== term.rows)) {
+      void transport.resize(grid.cols, grid.rows);
+    }
+  };
   // Latest-ref: the attach effect must not depend on this callback (a
   // re-attach per render would drop and rebuild the connection), but it
   // must also not capture a stale one — the parent's handler closes over
@@ -157,6 +195,12 @@ export default function TerminalView({
       // the panes they outline exactly when the window is small — the
       // case where a user is most likely to be squinting at panes.
       setScale(k);
+      // When the dead space around the terminal dominates, label it —
+      // otherwise it reads as "reserved for something" (it is not).
+      const frac = letterboxFraction(host.clientWidth, host.clientHeight, w * k, h * k);
+      setFitHint(
+        frac > FIT_HINT_MIN_FRACTION ? { cols: term.cols, rows: term.rows } : null,
+      );
     };
 
     let disposed = false;
@@ -208,6 +252,11 @@ export default function TerminalView({
       },
     });
 
+    // Auto-fit fires once, on the first snapshot (grid + cell metrics
+    // are both real by then), and only if App says this session is our
+    // newborn.
+    let sawFirstSnapshot = false;
+
     const attach = async () => {
       // cols/rows 0 means "adopt the session's current size", verified
       // against the daemon: session_resize() early-returns on a zero
@@ -233,6 +282,10 @@ export default function TerminalView({
           // snapshot follows every geometry change — so this is the one
           // refresh point that cannot go stale.
           setMetrics(readCellMetrics(term));
+          if (!sawFirstSnapshot) {
+            sawFirstSnapshot = true;
+            if (autoFitRef.current?.() === true) fitToWindow();
+          }
         },
         onScrollback: (firstSeq, lines) => backfill.onScrollback(firstSeq, lines),
         onCtrl: (ev) => {
@@ -356,23 +409,32 @@ export default function TerminalView({
         onSplitHorizontal={() => void transport.splitPane(true)}
         onZoomToggle={() => void transport.zoomToggle()}
         onClose={() => void transport.closePane()}
-        onFitToWindow={() => {
-          // The one sanctioned way the GUI changes a session's geometry:
-          // the user asked. Auto-resize stays banned (the attach comment
-          // above measured why); GUI-created sessions default to 80×24,
-          // so a large window letterboxes until this is pressed.
-          const term = termRef.current;
-          const host = hostRef.current;
-          const m = term ? readCellMetrics(term) : null;
-          if (!term || !host || !m) return;
-          const grid = fitGrid(host.clientWidth, host.clientHeight, m.cellWidth, m.cellHeight);
-          if (grid && (grid.cols !== term.cols || grid.rows !== term.rows)) {
-            void transport.resize(grid.cols, grid.rows);
-          }
-        }}
+        onFitToWindow={fitToWindow}
         paneCount={layout?.panes.length ?? 1}
         zoomed={zoomed}
       />
+      {fitHint !== null && (
+        <button
+          onClick={fitToWindow}
+          title="The dark area holds nothing — the session's grid is just smaller than the window. Click to resize the session to fill it (every attached viewer reflows)."
+          style={{
+            position: "absolute",
+            bottom: 48,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1,
+            background: "transparent",
+            color: theme.textMuted,
+            border: `1px dashed ${theme.border}`,
+            borderRadius: 6,
+            padding: "4px 12px",
+            fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          empty space — session is {fitHint.cols}×{fitHint.rows} · ⤢ fit to window
+        </button>
+      )}
       {behind && (
         <button
           onClick={() => {

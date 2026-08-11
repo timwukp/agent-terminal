@@ -72,3 +72,38 @@ export function fitGrid(
     rows: Math.max(FIT_MIN_ROWS, Math.floor(hostH / cellH)),
   };
 }
+
+/** Fraction of the host area the letterbox (dead space around the
+ * scaled terminal) occupies, 0..1. Unmeasurable input → 0: no reliable
+ * number, no hint — a hint that appears from garbage measurements is
+ * worse than none. */
+export function letterboxFraction(
+  hostW: number,
+  hostH: number,
+  scaledTermW: number,
+  scaledTermH: number,
+): number {
+  if (hostW <= 0 || hostH <= 0 || scaledTermW <= 0 || scaledTermH <= 0) return 0;
+  const used = Math.min(scaledTermW, hostW) * Math.min(scaledTermH, hostH);
+  return 1 - used / (hostW * hostH);
+}
+
+/** Show the in-letterbox fit hint only when the dead space is a real
+ * fraction of the window — a sliver of margin is normal geometry, not
+ * a problem worth labeling. */
+export const FIT_HINT_MIN_FRACTION = 0.25;
+
+/** One-shot name registry: consume(name) answers true exactly once per
+ * add(name). Carries the "auto-fit exactly this newborn session, and
+ * never again" rule — a second consume (re-selecting the session later)
+ * must NOT re-impose geometry the user may have changed since. */
+export function makeOneShotSet(): {
+  add(name: string): void;
+  consume(name: string): boolean;
+} {
+  const names = new Set<string>();
+  return {
+    add: (name) => void names.add(name),
+    consume: (name) => names.delete(name),
+  };
+}

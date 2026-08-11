@@ -75,6 +75,44 @@ afterEach(() => {
   lastTerm = null;
 });
 
+describe("auto-fit wiring", () => {
+  function capturingTransport() {
+    let events: { onSnapshot(c: number, r: number, s: number, b: Uint8Array): void } | null = null;
+    return {
+      t: {
+        ...transport(),
+        attach: (_s: string, _c: number, _r: number, ev: typeof events) => {
+          events = ev;
+          return Promise.resolve();
+        },
+      },
+      snapshot: (cols = 80, rows = 24) =>
+        events?.onSnapshot(cols, rows, 0, new Uint8Array()),
+    };
+  }
+
+  it("consults autoFit exactly once, on the first snapshot", async () => {
+    const { t, snapshot } = capturingTransport();
+    const autoFit = vi.fn(() => false);
+    render(
+      <TerminalView
+        transport={t as never}
+        session="s"
+        onClosed={() => {}}
+        autoFit={autoFit}
+      />,
+    );
+    await act(async () => {});
+    expect(autoFit).not.toHaveBeenCalled(); // not at attach — at first snapshot
+    await act(async () => snapshot());
+    expect(autoFit).toHaveBeenCalledTimes(1);
+    // A later snapshot (geometry change) must not consult again — the
+    // user may have resized the session since; re-imposing is the bug.
+    await act(async () => snapshot(100, 40));
+    expect(autoFit).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("terminal theme wiring", () => {
   it("constructs xterm with the resolved token theme", async () => {
     render(<TerminalView transport={transport() as never} session="s" onClosed={() => {}} />);
