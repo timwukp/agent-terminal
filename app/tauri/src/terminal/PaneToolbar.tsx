@@ -49,10 +49,18 @@ export default function PaneToolbar({
         opacity: 0.85,
       }}
     >
-      <button style={btn} onClick={onSplitVertical} title="Split left/right">
+      <button
+        style={btn}
+        onClick={onSplitVertical}
+        title="Split left/right — the split lives in the session (CLI viewers see it too)"
+      >
         ▯▯
       </button>
-      <button style={btn} onClick={onSplitHorizontal} title="Split top/bottom">
+      <button
+        style={btn}
+        onClick={onSplitHorizontal}
+        title="Split top/bottom — the split lives in the session (CLI viewers see it too)"
+      >
         ▤
       </button>
       <button

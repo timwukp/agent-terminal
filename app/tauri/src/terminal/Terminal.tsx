@@ -11,6 +11,7 @@ import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
 import { Backfill } from "./backfill";
+import { FONT_DEFAULT, isAtBottom, nextFontSize, zoomActionForKey } from "./viewControls";
 import { readCellMetrics } from "./overlay";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
@@ -72,6 +73,8 @@ export default function TerminalView({
   const [layout, setLayout] = useState<LayoutState | null>(null);
   const [metrics, setMetrics] = useState<CellMetrics | null>(null);
   const [scale, setScale] = useState(1);
+  // The viewport is scrolled up: new output is arriving out of sight.
+  const [behind, setBehind] = useState(false);
   // Latest-ref: the attach effect must not depend on this callback (a
   // re-attach per render would drop and rebuild the connection), but it
   // must also not capture a stale one — the parent's handler closes over
@@ -90,10 +93,42 @@ export default function TerminalView({
       // across the attach point.
       scrollback: 10000,
       fontFamily: "ui-monospace, Menlo, monospace",
-      fontSize: 13,
+      fontSize: FONT_DEFAULT,
     });
     term.open(host);
     termRef.current = term;
+
+    // ⌘/Ctrl +/−/0: resize the glyphs, not the grid — the grid belongs
+    // to the session. Swallow every event type of a matched chord;
+    // acting on keydown only, or '=' leaks to the shell on keypress.
+    term.attachCustomKeyEventHandler((ev) => {
+      const action = zoomActionForKey(ev);
+      if (action === null) return true;
+      if (ev.type === "keydown") {
+        const next = nextFontSize(term.options.fontSize ?? FONT_DEFAULT, action);
+        if (next !== term.options.fontSize) {
+          term.options.fontSize = next;
+          // The renderer re-measures on its own schedule; scale and
+          // overlay metrics must wait for the new cell size to exist.
+          requestAnimationFrame(() => {
+            scaleToFit();
+            setMetrics(readCellMetrics(term));
+          });
+        }
+      }
+      return false;
+    });
+
+    // "You are scrolled up" tracking. onScroll covers viewport moves;
+    // onWriteParsed covers the buffer growing underneath a parked
+    // viewport (xterm holds the view still, so no scroll event fires —
+    // exactly the case the pill exists for).
+    const updateBehind = () => {
+      const buf = term.buffer.active;
+      setBehind(!isAtBottom(buf.viewportY, buf.baseY));
+    };
+    const scrollEv = term.onScroll(updateBehind);
+    const writeEv = term.onWriteParsed(updateBehind);
 
     // The grid is the session's, so it cannot be reflowed to the window.
     // Instead the rendered terminal is scaled to fit inside it, letter-
@@ -274,6 +309,8 @@ export default function TerminalView({
       window.removeEventListener("resize", onResize);
       host.removeEventListener("click", onClick);
       backfill.dispose();
+      scrollEv.dispose();
+      writeEv.dispose();
       bell.dispose();
       data.dispose();
       void transport.detach();
@@ -312,6 +349,31 @@ export default function TerminalView({
         paneCount={layout?.panes.length ?? 1}
         zoomed={zoomed}
       />
+      {behind && (
+        <button
+          onClick={() => {
+            termRef.current?.scrollToBottom();
+            termRef.current?.focus();
+          }}
+          title="Jump to the live bottom"
+          style={{
+            position: "absolute",
+            bottom: 12,
+            right: 16,
+            zIndex: 2,
+            background: "#2b6cb0",
+            color: "#fff",
+            border: "none",
+            borderRadius: 12,
+            padding: "3px 10px",
+            fontSize: 12,
+            cursor: "pointer",
+            opacity: 0.9,
+          }}
+        >
+          ↓ bottom
+        </button>
+      )}
     </div>
   );
 }
