@@ -12,6 +12,8 @@ import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
 import { Backfill } from "./backfill";
 import { FONT_DEFAULT, fitGrid, isAtBottom, nextFontSize, zoomActionForKey } from "./viewControls";
+import { onThemeChange, resolveTokens, theme } from "../theme";
+import { xtermTheme } from "./xtermTheme";
 import { readCellMetrics } from "./overlay";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
@@ -94,9 +96,16 @@ export default function TerminalView({
       scrollback: 10000,
       fontFamily: "ui-monospace, Menlo, monospace",
       fontSize: FONT_DEFAULT,
+      // Cells and chrome from the same tokens — xterm's canvas cannot
+      // evaluate var(), so it gets the resolved hex (xtermTheme.ts).
+      theme: xtermTheme(resolveTokens()),
     });
     term.open(host);
     termRef.current = term;
+
+    const themeSub = onThemeChange(() => {
+      term.options.theme = xtermTheme(resolveTokens());
+    });
 
     // ⌘/Ctrl +/−/0: resize the glyphs, not the grid — the grid belongs
     // to the session. Swallow every event type of a matched chord;
@@ -309,6 +318,7 @@ export default function TerminalView({
       window.removeEventListener("resize", onResize);
       host.removeEventListener("click", onClick);
       backfill.dispose();
+      themeSub();
       scrollEv.dispose();
       writeEv.dispose();
       bell.dispose();
@@ -375,7 +385,7 @@ export default function TerminalView({
             bottom: 12,
             right: 16,
             zIndex: 2,
-            background: "#2b6cb0",
+            background: theme.accent,
             color: "#fff",
             border: "none",
             borderRadius: 12,

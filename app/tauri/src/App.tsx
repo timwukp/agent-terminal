@@ -136,7 +136,7 @@ export default function App() {
                   right: 0,
                   margin: 0,
                   padding: "6px 10px",
-                  background: "#7f1d1d",
+                  background: theme.dangerStrong,
                   color: "#fff",
                   fontSize: 12,
                 }}
