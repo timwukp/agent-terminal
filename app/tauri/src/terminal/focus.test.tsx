@@ -181,8 +181,12 @@ describe("keyboard focus after a sidebar click", () => {
     (row as HTMLElement).focus();
     focusSpy.mockClear();
     // The letter-box margin belongs to the host div, not to xterm's own
-    // element, so xterm would not self-focus from this click.
-    const host = view.container.querySelector("main > div") as HTMLElement;
+    // element, so xterm would not self-focus from this click. The host is
+    // the wrapper's first child (the overlay/toolbar are its siblings);
+    // it is absolutely inset 0, so in a real window every click in the
+    // region physically lands on it — fireEvent must target it directly
+    // because DOM events bubble up, not down.
+    const host = view.container.querySelector("main > div > div") as HTMLElement;
     expect(host).toBeTruthy();
     await act(async () => {
       fireEvent.click(host);

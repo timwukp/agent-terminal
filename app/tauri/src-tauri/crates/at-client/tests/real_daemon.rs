@@ -669,3 +669,93 @@ async fn attach_with_zero_dims_adopts_size_without_resizing() {
     creator.shutdown().await;
     d.stop().await;
 }
+
+/// The GUI derives "a pane is zoomed" from MSG_LAYOUT geometry, because
+/// LAYOUT carries no zoom flag (proto.h:0x35) and the only `zoomed` field
+/// on the wire rides SESSION_LIST2 on the *control* connection. The
+/// inference: at >= 2 panes, exactly one pane whose rect covers the whole
+/// view means that pane is zoomed (session.c:588 gives the zoomed pane
+/// x=0,y=0,cols=view_cols,rows=view_rows while others keep tree rects).
+///
+/// This test exists because that is an inference about someone else's
+/// implementation detail, not a documented contract: if the daemon ever
+/// stops giving the zoomed pane the full view, the GUI's zoom indicator
+/// goes wrong silently, and this fails loudly instead.
+#[tokio::test]
+async fn zoom_is_visible_in_layout_geometry() {
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+    let (mut c, mut rx) = connect(&d.sock(), proto::CLIENT_CAP_PANES)
+        .await
+        .expect("connect");
+    c.send(&proto::new_session(80, 24, "zoomgeo", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        if let Event::Snapshot { .. } = next_ev(&mut rx).await {
+            break;
+        }
+    }
+
+    /// Port of app/tauri/src/terminal/zoom.ts, kept deliberately identical.
+    fn zoomed_pane_id(panes: &[proto::PaneRect], cols: u16, rows: u16) -> Option<u8> {
+        if panes.len() < 2 {
+            return None;
+        }
+        let full: Vec<_> = panes
+            .iter()
+            .filter(|p| p.x == 0 && p.y == 0 && p.cols == cols && p.rows == rows)
+            .collect();
+        match full.as_slice() {
+            [only] => Some(only.id),
+            _ => None,
+        }
+    }
+
+    async fn next_layout(rx: &mut at_client::EventRx) -> proto::Layout {
+        loop {
+            match next_ev(rx).await {
+                Event::Layout(l) if l.panes.len() == 2 => return l,
+                Event::Layout(_) | Event::Output(_) | Event::Snapshot { .. } => continue,
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    c.send(&proto::split_pane(false, proto::PANE_ACTIVE))
+        .await
+        .unwrap();
+    let split = next_layout(&mut rx).await;
+    assert_eq!(
+        zoomed_pane_id(&split.panes, split.view_cols, split.view_rows),
+        None,
+        "a plain side-by-side split must not read as zoomed"
+    );
+
+    c.send(&proto::select_pane(proto::SelectMode::ZoomToggle, 0))
+        .await
+        .unwrap();
+    let zoomed = next_layout(&mut rx).await;
+    let zid = zoomed_pane_id(&zoomed.panes, zoomed.view_cols, zoomed.view_rows);
+    assert_eq!(
+        zid,
+        Some(zoomed.active_id),
+        "the zoomed pane must be the active one; panes={:?}",
+        zoomed.panes
+    );
+
+    c.send(&proto::select_pane(proto::SelectMode::ZoomToggle, 0))
+        .await
+        .unwrap();
+    let unzoomed = next_layout(&mut rx).await;
+    assert_eq!(
+        zoomed_pane_id(&unzoomed.panes, unzoomed.view_cols, unzoomed.view_rows),
+        None,
+        "toggling zoom off must return to tiled rects; panes={:?}",
+        unzoomed.panes
+    );
+
+    c.shutdown().await;
+    d.stop().await;
+}

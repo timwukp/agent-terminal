@@ -225,7 +225,16 @@ keyboard is dead. A unit test asserts the shipped policy keeps that scheme.
 What works today: a sidebar listing live sessions with pane count, zoom badge
 and client count (the same data as `ls`, polled); click to attach and render;
 one-click templates for a new Claude or shell session; kill a session; keyboard
-input; click-to-focus inside splits.
+input; click-to-focus inside splits; a toolbar for split / zoom / close-pane;
+and an outline on the active pane so a split session shows where input goes.
+
+One implementation note worth recording: the protocol's layout message carries
+no zoom flag, and none was added. While a pane is zoomed the daemon already
+reports its rectangle as the full view (other panes keep their tiled
+rectangles), so the GUI *derives* zoom from geometry it receives anyway. That
+inference rests on another component's implementation detail, so an integration
+test drives split/zoom/unzoom against a real daemon and fails loudly if the
+geometry contract ever changes.
 
 Two properties are worth stating because they are easy to assume wrong:
 

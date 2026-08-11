@@ -3,12 +3,24 @@
 // included) — there is deliberately no pane-rendering code here; panes
 // exist client-side only as click targets from MSG_LAYOUT.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import type { PaneRect, Transport } from "./transport";
+import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
+import { readCellMetrics } from "./overlay";
+import { zoomedPaneId } from "./zoom";
+import PaneOverlay from "./PaneOverlay";
+import PaneToolbar from "./PaneToolbar";
+
+interface LayoutState {
+  panes: PaneRect[];
+  activeId: number;
+  viewCols: number;
+  viewRows: number;
+}
 
 export interface TerminalProps {
   transport: Transport;
@@ -35,6 +47,14 @@ export default function TerminalView({
   const hostRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<PaneRect[]>([]);
   const termRef = useRef<XTerm | null>(null);
+  // Overlay inputs. The panes also live in panesRef because the click
+  // handler is a DOM listener registered once — reading state there would
+  // capture the mount-time value. State here exists to re-render the
+  // overlay; the ref exists to be read from the closure. Both are set from
+  // the same layout event, so they cannot disagree.
+  const [layout, setLayout] = useState<LayoutState | null>(null);
+  const [metrics, setMetrics] = useState<CellMetrics | null>(null);
+  const [scale, setScale] = useState(1);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -62,6 +82,10 @@ export default function TerminalView({
       if (!w || !h) return;
       const k = Math.min(host.clientWidth / w, host.clientHeight / h, 1);
       el.style.transform = `scale(${k})`;
+      // The overlay must carry the same transform or its boxes drift off
+      // the panes they outline exactly when the window is small — the
+      // case where a user is most likely to be squinting at panes.
+      setScale(k);
     };
 
     let disposed = false;
@@ -100,11 +124,25 @@ export default function TerminalView({
             scaleToFit();
           }
           term.write(blob);
+          // Cell metrics change exactly when the grid or font does, and a
+          // snapshot follows every geometry change — so this is the one
+          // refresh point that cannot go stale.
+          setMetrics(readCellMetrics(term));
         },
         onCtrl: (ev) => {
           if (disposed) return;
-          if (ev.kind === "layout") panesRef.current = ev.panes;
-          else if (ev.kind === "closed") onClosed?.(ev.error);
+          if (ev.kind === "layout") {
+            panesRef.current = ev.panes;
+            setLayout({
+              panes: ev.panes,
+              activeId: ev.active_id,
+              viewCols: ev.view_cols,
+              viewRows: ev.view_rows,
+            });
+            // A layout can arrive before any snapshot has measured cells
+            // (split of a session attached mid-life); measure here too.
+            setMetrics(readCellMetrics(term));
+          } else if (ev.kind === "closed") onClosed?.(ev.error);
           else if (ev.kind === "session_exited") onClosed?.(null);
         },
       });
@@ -135,16 +173,11 @@ export default function TerminalView({
       // and cell sizes stay in unscaled CSS units.
       const rect = el.getBoundingClientRect();
       const k = rect.width / el.offsetWidth || 1;
-      const core = (term as unknown as {
-        _core: { _renderService: { dimensions: { css: { cell: { width: number; height: number } } } } };
-      })._core;
-      const cell = core._renderService.dimensions.css.cell;
-      const id = paneAtPixel(
-        (e.clientX - rect.left) / k,
-        (e.clientY - rect.top) / k,
-        { cellWidth: cell.width, cellHeight: cell.height },
-        panesRef.current,
-      );
+      // Same guarded reader the overlay uses: one place touches xterm's
+      // private metrics, and both consumers degrade the same way.
+      const m = readCellMetrics(term);
+      if (!m) return;
+      const id = paneAtPixel((e.clientX - rect.left) / k, (e.clientY - rect.top) / k, m, panesRef.current);
       if (id !== null) void transport.selectPane(id);
     };
     host.addEventListener("click", onClick);
@@ -183,5 +216,29 @@ export default function TerminalView({
     termRef.current?.focus();
   }, [focusNonce]);
 
-  return <div ref={hostRef} style={{ width: "100%", height: "100%" }} />;
+  const zoomed =
+    layout !== null && zoomedPaneId(layout.panes, layout.viewCols, layout.viewRows) !== null;
+
+  return (
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      {/* xterm owns everything inside this div; React must not render
+        * children into it or the two will fight over the DOM. Overlay and
+        * toolbar are siblings above it instead. */}
+      <div ref={hostRef} style={{ position: "absolute", inset: 0 }} />
+      <PaneOverlay
+        panes={layout?.panes ?? []}
+        activeId={layout?.activeId ?? 0}
+        metrics={metrics}
+        scale={scale}
+      />
+      <PaneToolbar
+        onSplitVertical={() => void transport.splitPane(false)}
+        onSplitHorizontal={() => void transport.splitPane(true)}
+        onZoomToggle={() => void transport.zoomToggle()}
+        onClose={() => void transport.closePane()}
+        paneCount={layout?.panes.length ?? 1}
+        zoomed={zoomed}
+      />
+    </div>
+  );
 }
