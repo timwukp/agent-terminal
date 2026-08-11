@@ -111,6 +111,9 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
 | GUI-11 | typing after clicking the sidebar | click the session row you are **already** on, then type | keystrokes reach the session; focus is not left on the sidebar button |
 | GUI-12 | IPC carries raw bytes | run the GUI from a shell so stderr is visible, type one key | **no** `IPC custom protocol failed` line; if it appears, `connect-src` is missing `ipc:` and every keystroke will be refused |
+| GUI-13 | active-pane outline | split a throwaway session via the toolbar, click each pane in turn | the outline sits exactly on the clicked pane's edges (not offset, not scaled wrong); single pane shows no outline |
+| GUI-14 | toolbar ops | on a throwaway session: split ▯▯, split ▤, zoom, unzoom, close | each button does what its tooltip says; zoom button shows pressed state while zoomed; close is absent at one pane |
+| GUI-15 | overlay tracks the window | with a split session, resize the window smaller | outlines shrink with the letter-boxed view and stay glued to their panes |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
