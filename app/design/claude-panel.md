@@ -72,9 +72,16 @@ Parse `~/.claude/settings.json` → `hooks` into a table:
   → the pattern list it scans for). Heuristics are labeled as such; the
   raw script is one click away and is the truth.
 - **Execution visibility gap:** hooks write no log today, so "what got
-  blocked when" is not observable. Proposal (opt-in, documented here, not
-  auto-installed): hook scripts append a JSONL line
-  `{ts, hook, tool, decision, reason}` to `~/.claude/hooks/hooks.log`;
-  the GUI tails that file when present and shows a recent-events list.
-  Absent the log, the card states plainly that execution history is not
-  recorded.
+  blocked when" is not observable. The opt-in convention that closes it
+  — a hash-chained JSONL at `~/.claude/hooks/hooks.log`, tamper-EVIDENT
+  by design and honest about not being tamper-proof — lives in
+  [hook-log.md](hook-log.md). The GUI tails and chain-verifies the file
+  when present; absent the log, the card states plainly that execution
+  history is not recorded.
+- **Panel-update transport decision (2026-08-11):** the Usage/Hooks/
+  security cards each poll their Tauri command at the sidebar's 2 s
+  cadence while visible — a handful of stats per poll, components
+  unmount when hidden. A single multiplexed event channel (the KiroCrew
+  pattern) is deliberately deferred until a genuinely streaming source
+  exists (PR7 OTEL); when it lands, all panel consumers migrate to one
+  `claude-events` channel at once.

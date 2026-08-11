@@ -45,6 +45,18 @@ function apiOf(snap: HooksSnapshot, script = "#!/bin/sh\n# Blocks: git push\nexi
       this.scriptCalls.push(command);
       return Promise.resolve(script);
     },
+    logSnapshot() {
+      // SecurityCard has its own test file; here the log is just absent.
+      return Promise.resolve({
+        path: "/home/u/.claude/hooks/hooks.log",
+        exists: false,
+        events: [],
+        total: 0,
+        malformed: 0,
+        chain_ok: true,
+        break_at: null,
+      });
+    },
   } satisfies HooksApi & { calls: number; scriptCalls: string[] };
 }
 

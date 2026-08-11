@@ -13,6 +13,7 @@
 //! order that actually encodes precedence) is preserved.
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// One row of the hooks table. One row per COMMAND, not per matcher
 /// group: the real-world norm is one group carrying several commands
@@ -85,6 +86,76 @@ pub fn parse_settings(json: &str) -> HooksConfig {
                 }
             }
         }
+    }
+    out
+}
+
+// ---- hook-log chain verification (design: app/design/hook-log.md) ----
+
+/// One displayed hook execution. All fields are free text the GUI
+/// renders; `decision` gets a color, never semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookLogEvent {
+    pub ts: String,
+    pub hook: String,
+    pub event: String,
+    pub tool: String,
+    pub decision: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ChainReport {
+    pub events: Vec<HookLogEvent>,
+    pub malformed: u64,
+    /// First 0-based line index where the chain fails — a wrong `prev`,
+    /// or a line that is not JSON. None = intact. Everything AFTER a
+    /// break still parses and displays: a break is a fact about the
+    /// file, not a reason to hide history.
+    pub break_at: Option<usize>,
+}
+
+/// SHA-256 of one raw line (no trailing newline), lowercase hex — the
+/// value the NEXT line's `prev` must carry.
+pub fn line_hash(line: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(line.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Verify a hook log: every line's `prev` must equal the hash of the
+/// line before it ("GENESIS" for line 0). Lenient like every parser in
+/// this crate — a bad line is counted and breaks the chain, but
+/// verification and display continue past it.
+pub fn verify_chain(lines: &[&str]) -> ChainReport {
+    let mut out = ChainReport::default();
+    let mut expected = "GENESIS".to_string();
+    for (i, line) in lines.iter().enumerate() {
+        let parsed = serde_json::from_str::<serde_json::Value>(line).ok();
+        let Some(v) = parsed else {
+            out.malformed += 1;
+            if out.break_at.is_none() {
+                out.break_at = Some(i);
+            }
+            // The next line's prev is the hash of these RAW bytes
+            // regardless of their JSON-ness — the chain runs over
+            // bytes, so verification continues through a bad line.
+            expected = line_hash(line);
+            continue;
+        };
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if field("prev") != expected && out.break_at.is_none() {
+            out.break_at = Some(i);
+        }
+        out.events.push(HookLogEvent {
+            ts: field("ts"),
+            hook: field("hook"),
+            event: field("event"),
+            tool: field("tool"),
+            decision: field("decision"),
+            reason: field("reason"),
+        });
+        expected = line_hash(line);
     }
     out
 }

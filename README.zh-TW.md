@@ -188,7 +188,9 @@ session 尺寸——工具列的 ⤢ 按鈕才會,而且所有 attach 中的檢�
 右側可收合面板顯示 Claude Code 的即時狀態,讀自 `~/.claude`(終端協定
 本身保持與工作負載無關):**Usage** 分頁是每份 transcript 的輸入/輸出/
 快取 token 總量與每分鐘輸出 sparkline;**Hooks** 分頁列出 `settings.json`
-裡的 hook 規則,附唯讀的腳本檢視器(GUI 永不寫入 Claude Code 的設定)。
+裡的 hook 規則,附唯讀的腳本檢視器(GUI 永不寫入 Claude Code 的設定),
+以及一張安全卡片,尾隨選擇性啟用的雜湊鏈 hook 執行日誌
+(`app/design/hook-log.md`——設計上可偵測竄改,並誠實標明不防竄改)。
 它**不**屬於 `make install` 流程;由你自行編譯,可以打包成可雙擊的 app,
 也可以只建 debug 執行檔:
 

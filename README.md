@@ -206,7 +206,10 @@ live Claude Code state, read from `~/.claude` (the terminal protocol
 itself stays workload-agnostic): a **Usage** tab with per-transcript
 in/out/cache token totals and an output-per-minute sparkline, and a
 **Hooks** tab listing the hook rules from `settings.json` with a
-read-only script viewer (the GUI never writes Claude Code's config).
+read-only script viewer (the GUI never writes Claude Code's config) and
+a security card that tails the opt-in, hash-chained hook execution log
+(`app/design/hook-log.md` — tamper-evident by design, and honest about
+not being tamper-proof).
 It is **not**
 part of the `make install` flow; you build it yourself, either as a
 double-clickable app or as a bare debug binary:
