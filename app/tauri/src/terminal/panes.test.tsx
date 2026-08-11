@@ -42,6 +42,13 @@ vi.mock("@xterm/xterm", () => {
     onBell() {
       return { dispose() {} };
     }
+    attachCustomKeyEventHandler() {}
+    onScroll() {
+      return { dispose() {} };
+    }
+    onWriteParsed() {
+      return { dispose() {} };
+    }
   }
   return { Terminal: FakeTerm };
 });
@@ -134,9 +141,9 @@ describe("pane overlay", () => {
 describe("pane toolbar", () => {
   it("split buttons send the split orientation on the transport", async () => {
     const { t, view } = await mount();
-    fireEvent.click(view.getByTitle("Split left/right"));
+    fireEvent.click(view.getByTitle(/^Split left\/right/));
     expect(t.splitPane).toHaveBeenCalledWith(false);
-    fireEvent.click(view.getByTitle("Split top/bottom"));
+    fireEvent.click(view.getByTitle(/^Split top\/bottom/));
     expect(t.splitPane).toHaveBeenCalledWith(true);
   });
 

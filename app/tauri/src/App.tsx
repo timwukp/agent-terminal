@@ -1,8 +1,9 @@
 // Window shell: sidebar / terminal / claude panel (app/design/ux-spec.md).
 // Claude panel fills in with PR6-PR9.
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import TerminalView from "./terminal/Terminal";
 import { TauriTransport } from "./terminal/transport";
+import { windowTitle } from "./terminal/viewControls";
 import Sidebar from "./sidebar/Sidebar";
 import { TauriControlApi } from "./sidebar/api";
 import { decideNotify, deliverNotification } from "./notify";
@@ -25,6 +26,17 @@ export default function App() {
   // remount TerminalView, and that case is exactly "I clicked the
   // session, then typed, and nothing happened".
   const [focusNonce, setFocusNonce] = useState(0);
+
+  // ⌘-Tab, the Dock, and screenshots all read the window title; make it
+  // say which session this window is looking at.
+  useEffect(() => {
+    document.title = windowTitle(active);
+  }, [active]);
+
+  // The Claude panel is roadmap, not product, until PR6 fills it in —
+  // 260px of placeholder on every window is rent with no tenant. Kept
+  // reachable (collapsed to a handle) so the roadmap stays visible.
+  const [claudeOpen, setClaudeOpen] = useState(false);
 
   // Notifications (app/design/notifications.md): per-session mute, and a
   // sidebar badge for turns that completed while the window was unfocused
@@ -125,9 +137,37 @@ export default function App() {
           </p>
         )}
       </main>
-      <aside style={{ width: 260, borderLeft: "1px solid #ccc", padding: 8 }}>
-        <h2 style={{ fontSize: 14, margin: "4px 0" }}>Claude</h2>
-        <p style={{ fontSize: 12, color: "#888" }}>tokens / hooks / security land in PR6-PR9</p>
+      <aside
+        style={{
+          width: claudeOpen ? 260 : 24,
+          borderLeft: "1px solid #ccc",
+          padding: claudeOpen ? 8 : 0,
+          overflow: "hidden",
+        }}
+      >
+        <button
+          onClick={() => setClaudeOpen((v) => !v)}
+          aria-expanded={claudeOpen}
+          title={claudeOpen ? "Collapse the Claude panel" : "Expand the Claude panel"}
+          style={{
+            width: claudeOpen ? "auto" : "100%",
+            height: claudeOpen ? "auto" : "100%",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            fontSize: 12,
+            color: "#888",
+            padding: claudeOpen ? "2px 4px" : 0,
+          }}
+        >
+          {claudeOpen ? "»" : "«"}
+        </button>
+        {claudeOpen && (
+          <>
+            <h2 style={{ fontSize: 14, margin: "4px 0" }}>Claude</h2>
+            <p style={{ fontSize: 12, color: "#888" }}>tokens / hooks / security land in PR6-PR9</p>
+          </>
+        )}
       </aside>
     </div>
   );

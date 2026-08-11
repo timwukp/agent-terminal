@@ -99,7 +99,7 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
                 cursor: "pointer",
                 fontSize: 13,
               }}
-              title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s)`}
+              title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s) — right-click kills (asks first)`}
             >
               {s.name}
               {done?.has(s.name) === true && (

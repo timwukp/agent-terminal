@@ -48,6 +48,13 @@ vi.mock("@xterm/xterm", () => {
       lastBell = h;
       return { dispose() {} };
     }
+    attachCustomKeyEventHandler() {}
+    onScroll() {
+      return { dispose() {} };
+    }
+    onWriteParsed() {
+      return { dispose() {} };
+    }
   }
   return { Terminal: FakeTerm };
 });
