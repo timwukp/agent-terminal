@@ -48,3 +48,27 @@ export function isAtBottom(viewportY: number, baseY: number): boolean {
 export function windowTitle(active: string | null): string {
   return active === null ? "agent-terminal" : `${active} — agent-terminal`;
 }
+
+/** Grid floor for fit-to-window: below this a shell is unusable and
+ * several TUIs misrender; a tiny window fits a small-but-sane grid. */
+export const FIT_MIN_COLS = 20;
+export const FIT_MIN_ROWS = 5;
+
+/** The grid that fills a host of the given pixel size at the current
+ * cell metrics — the number an explicit "fit session to window" action
+ * sends as MSG_RESIZE. Floor, never round: a rounded-up column falls
+ * outside the window and wraps every full-width line. Null when a
+ * dimension is unmeasurable (unmounted, hidden, or zero-size cell) —
+ * callers must skip the resize, not send a garbage grid. */
+export function fitGrid(
+  hostW: number,
+  hostH: number,
+  cellW: number,
+  cellH: number,
+): { cols: number; rows: number } | null {
+  if (hostW <= 0 || hostH <= 0 || cellW <= 0 || cellH <= 0) return null;
+  return {
+    cols: Math.max(FIT_MIN_COLS, Math.floor(hostW / cellW)),
+    rows: Math.max(FIT_MIN_ROWS, Math.floor(hostH / cellH)),
+  };
+}

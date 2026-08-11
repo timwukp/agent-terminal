@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  FIT_MIN_COLS,
+  FIT_MIN_ROWS,
   FONT_DEFAULT,
   FONT_MAX,
   FONT_MIN,
+  fitGrid,
   isAtBottom,
   nextFontSize,
   windowTitle,
@@ -52,6 +55,20 @@ describe("isAtBottom", () => {
   });
   it("empty buffer (both zero) is at bottom, not 'behind'", () => {
     expect(isAtBottom(0, 0)).toBe(true);
+  });
+});
+
+describe("fitGrid", () => {
+  it("floors to whole cells — a rounded-up column wraps every line", () => {
+    // 1000/8.4 = 119.04…, 700/17 = 41.2…
+    expect(fitGrid(1000, 700, 8.4, 17)).toEqual({ cols: 119, rows: 41 });
+  });
+  it("clamps a tiny window to the usable floor", () => {
+    expect(fitGrid(50, 30, 8, 17)).toEqual({ cols: FIT_MIN_COLS, rows: FIT_MIN_ROWS });
+  });
+  it("refuses unmeasurable input instead of sending a garbage grid", () => {
+    expect(fitGrid(0, 700, 8, 17)).toBeNull(); // hidden host
+    expect(fitGrid(1000, 700, 0, 17)).toBeNull(); // metrics not ready
   });
 });
 

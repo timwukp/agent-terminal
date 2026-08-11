@@ -183,8 +183,10 @@ agent-terminal new -s work -- claude
 桌面客戶端位於 [`app/tauri`](app/tauri) — Tauri + xterm.js,走的是同一個 Unix
 socket,沒有新增任何網路監聽。attach 時會回填 daemon 側的歷史紀錄(最多為
 ring 的 10,000 行),所以滑鼠滾輪能一路捲回 GUI 連上**之前**的輸出。⌘/Ctrl
-`+` `−` `0` 縮放字級,不會改變 session 的格線。它**不**屬於 `make install`
-流程;由你自行編譯,可以打包成可雙擊的 app,也可以只建 debug 執行檔:
+`+` `−` `0` 縮放字級,不會改變 session 的格線;視窗本身永遠不會擅自調整
+session 尺寸——工具列的 ⤢ 按鈕才會,而且所有 attach 中的檢視端都會一起重排。
+它**不**屬於 `make install` 流程;由你自行編譯,可以打包成可雙擊的 app,也
+可以只建 debug 執行檔:
 
 ```sh
 cd app/tauri && npm ci
