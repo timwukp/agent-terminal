@@ -159,6 +159,14 @@ agent-terminal new -s prod -- ssh user@host
 `~/.ssh/config`、known_hosts 與你的 SSH agent。agent-terminal 本身不含任何
 SSH 或密碼學程式碼。
 
+### Session 環境
+
+session 內的程式看到的是 `TERM_PROGRAM=agent-terminal`——而不是 daemon
+當初碰巧從哪個終端啟動;殘留的 `TERM_PROGRAM_VERSION` / `TERM_SESSION_ID`
+會被移除。依終端身分調整行為的程式(Claude Code 就是)否則會去適配一個
+它根本沒在對話的終端;看到陌生身分時它們會退回可攜的通用行為,而那正是
+中間這層 VT 引擎實際支援的。(tmux ≥ 3.2 也是這麼做的。)
+
 ### 典型工作流
 
 ```sh

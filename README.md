@@ -174,6 +174,17 @@ This runs your **system OpenSSH client** inside the session — it inherits
 `~/.ssh/config`, known_hosts, and your SSH agent. agent-terminal contains
 no SSH or cryptographic code of its own.
 
+### Session environment
+
+Programs inside a session see `TERM_PROGRAM=agent-terminal` — not the
+terminal the daemon happened to be launched from. Stale
+`TERM_PROGRAM_VERSION` / `TERM_SESSION_ID` values are removed. Programs
+that branch on terminal identity (Claude Code among them) would
+otherwise adapt to a terminal they are not actually talking to; an
+unknown identity makes them fall back to portable behavior, which is
+what the VT engine in the middle actually supports. (tmux ≥ 3.2 does
+the same.)
+
 ### Typical workflows
 
 ```sh

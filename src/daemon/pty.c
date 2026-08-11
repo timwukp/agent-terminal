@@ -66,6 +66,13 @@ int pty_spawn(pty_child *out, char *const argv[], uint16_t cols, uint16_t rows,
         sigprocmask(SIG_SETMASK, &empty, NULL);
 
         if (term_env) setenv("TERM", term_env, 1);
+        /* The child inherits the daemon's environment, so TERM_PROGRAM /
+         * TERM_PROGRAM_VERSION describe whatever terminal the daemon was
+         * launched from (or nothing under launchd) — either way not the
+         * terminal the app is actually talking to. It is talking to us. */
+        setenv("TERM_PROGRAM", "agent-terminal", 1);
+        unsetenv("TERM_PROGRAM_VERSION");
+        unsetenv("TERM_SESSION_ID");
         execvp(argv[0], argv);
         /* The exec failed and this child IS the session: whatever it writes
          * to the slave is the session's screen, and the final-screen flush
