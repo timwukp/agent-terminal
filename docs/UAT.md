@@ -109,6 +109,8 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
 | GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
 | GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
+| GUI-11 | typing after clicking the sidebar | click the session row you are **already** on, then type | keystrokes reach the session; focus is not left on the sidebar button |
+| GUI-12 | IPC carries raw bytes | run the GUI from a shell so stderr is visible, type one key | **no** `IPC custom protocol failed` line; if it appears, `connect-src` is missing `ipc:` and every keystroke will be refused |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -173,6 +175,60 @@ undelivered input raises a visible banner, because a console error is invisible 
 person typing. app-ci.yml asserts the guard still fires — neutering `check_frontend()`
 makes that step fail, so it cannot rot into a no-op.
 
+### Round 3 (2026-08-11, against the production daemon)
+
+Same report as round 2 — "typing does nothing" — and the round 2 fix made it
+*harder* to diagnose, because the banner it added confidently named the wrong
+cause. The tester rebuilt `dist/` as instructed, which changed nothing: the
+bundle was already one minute old.
+
+Two distinct defects were behind it, and the first one hid the second.
+
+1. **The app's CSP blocked Tauri's own IPC.** On macOS the IPC call is a `fetch`
+   to `ipc://localhost/<command>` (`tauri-2.11.5/scripts/core.js`,
+   `convertFileSrc`) while the page is served from `tauri://localhost`. With
+   `default-src 'self'` and no `connect-src`, that cross-scheme request is
+   refused, so Tauri logs `IPC custom protocol failed` and falls back to
+   `postMessage`. The fallback re-serializes the whole envelope through
+   `JSON.stringify`, whose replacer turns a `Uint8Array` into `Array.from(val)`
+   (`scripts/process-ipc-message-fn.js:26`) — the postMessage path
+   **structurally cannot** carry raw bytes. `stdin_data` is the only command
+   that sends raw bytes, which is exactly why rendering, the sidebar and
+   session switching were all fine while the keyboard was dead. Fixed by adding
+   `connect-src 'self' ipc: http://ipc.localhost`.
+2. **Round 2's own guard turned a slow path into a dead keyboard.** That guard
+   rejected any JSON body as "stale frontend". But a JSON byte array is a
+   *legitimate* encoding produced by Tauri's fallback, and refusing it drops
+   100% of input. It now decodes both shapes: `Raw` is the fast path, a byte
+   array is accepted, and out-of-range elements are an error rather than a
+   silent `as u8` truncation. The word "stale" is gone from that message, and a
+   test asserts it stays gone.
+
+Causality was established by A/B rebuild of identical code: with `ipc:` present,
+`stdin_data` receives `Raw 3 bytes` and returns `Ok(())`; with `ipc:` deleted,
+the fallback warning returns and every keystroke arrives as JSON. Four mutants —
+restoring the rejection, deleting `ipc:`, dropping `connect-src` entirely, and
+truncating with `as u8` — each fail exactly one of the new tests.
+
+A third bug was fixed on the way in and is what the round 2 banner was masking:
+clicking a sidebar row left DOM focus on the button, and xterm.js focuses itself
+only on a mousedown inside its own element — so clicking the session you were
+already on did not remount the component and could not recover focus. The host
+now bumps a nonce on every selection, focus is taken on any click in the
+terminal region including the letter-box margin, and it is reclaimed when the
+window regains focus. Five jsdom tests cover it; removing the mount-time call
+that turned out to be dead code failed nothing, which is what identified it as
+duplicated rather than untested.
+
+**Method note.** What ended three rounds of guessing was instrumenting both ends
+of one path rather than reasoning about it: a temporary command mirroring the
+webview's console into the process's stderr, plus a capture-phase `keydown` log
+recording the focused element. The first line of output named the cause. Before
+that, attach, SNAPSHOT rendering and the daemon's input path had each been proven
+working in isolation, which is what narrowed it to the keystroke path — but not
+one of those checks could see a CSP violation, because the failure was in the
+browser layer between them.
+
 ### GUI testing notes
 
 1. **Sample CPU before believing "slow".** An idle process that feels laggy is dropping
@@ -187,7 +243,23 @@ makes that step fail, so it cannot rot into a no-op.
 5. **Automating clicks via `osascript` triggers an Accessibility prompt** and can return
    `missing value` even when the click landed. It is a test-harness artifact; the GUI itself
    needs no such permission.
-6. **Check the binary's mtime against `dist/`'s before testing the GUI at all.** The
+6. **Run the GUI from a shell with stderr captured, and instrument the webview
+   before theorising.** The window has no console, so a JS error or a CSP
+   violation is invisible — three rounds of "typing does nothing" had three
+   different causes and the browser layer could not be seen from either side.
+   A throwaway `#[tauri::command]` that `eprintln!`s what the frontend's
+   `console` receives costs minutes and names the cause in its first line.
+7. **A diagnostic that guesses a cause is worse than one that describes the
+   symptom.** Round 2's "stale frontend: rebuild dist/" was right about the
+   payload shape and wrong about why, so round 3's tester followed it and
+   rebuilt a bundle that was already current. Report the shape observed; only
+   name a cause the code can actually distinguish.
+8. **Do not launch a second GUI window while someone is at the keyboard.** A
+   test GUI on an isolated `XDG_RUNTIME_DIR` takes focus when it opens, so
+   clicks and keys meant for another window land in it — this created an
+   unintended session in the test daemon. Isolation contained it, but the
+   input hazard is real; drive test instances headlessly instead.
+9. **Check the binary's mtime against `dist/`'s before testing the GUI at all.** The
    frontend is embedded at compile time, so a Rust-only rebuild produces a binary
    pairing new commands with old JavaScript — and that binary's symptom is a *product*
    symptom. Round 2 spent real time on "typing does nothing" that was a binary built

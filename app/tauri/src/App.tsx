@@ -18,10 +18,18 @@ export default function App() {
   // dist/ rejected every keystroke and looked like a broken product.
   const [stdinError, setStdinError] = useState<string | null>(null);
 
+  // Every sidebar interaction leaves DOM focus on the button that was
+  // clicked, so the terminal has to be told to take it back. Bumped even
+  // when the name is unchanged: clicking the active session does not
+  // remount TerminalView, and that case is exactly "I clicked the
+  // session, then typed, and nothing happened".
+  const [focusNonce, setFocusNonce] = useState(0);
+
   const select = (name: string) => {
     setClosed(undefined);
     setStdinError(null);
     setActive(name);
+    setFocusNonce((n) => n + 1);
   };
   // Stable identity: Terminal re-attaches when this changes.
   const onStdinError = useCallback((m: string) => setStdinError(m), []);
@@ -44,6 +52,7 @@ export default function App() {
               session={active}
               onClosed={setClosed}
               onStdinError={onStdinError}
+              focusNonce={focusNonce}
             />
             {stdinError !== null && (
               <p

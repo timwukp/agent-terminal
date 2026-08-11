@@ -18,6 +18,11 @@ export interface TerminalProps {
    * console message is invisible to the person typing — a build with a
    * stale frontend rejected every key and read as a product bug. */
   onStdinError?: (message: string) => void;
+  /** Bumped by the host to demand keyboard focus. Clicking anything in
+   * the sidebar moves DOM focus to that button, and a click on the
+   * already-active session does not remount this component, so mount-time
+   * focus alone leaves the user typing into a button. */
+  focusNonce?: number;
 }
 
 export default function TerminalView({
@@ -25,9 +30,11 @@ export default function TerminalView({
   session,
   onClosed,
   onStdinError,
+  focusNonce,
 }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<PaneRect[]>([]);
+  const termRef = useRef<XTerm | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -39,6 +46,7 @@ export default function TerminalView({
       fontSize: 13,
     });
     term.open(host);
+    termRef.current = term;
 
     // The grid is the session's, so it cannot be reflowed to the window.
     // Instead the rendered terminal is scaled to fit inside it, letter-
@@ -58,10 +66,10 @@ export default function TerminalView({
 
     let disposed = false;
 
-    // Keyboard focus: xterm only focuses itself on a mousedown inside
-    // the terminal element, so without this the window opens with input
-    // going nowhere — keys are typed and simply vanish.
-    term.focus();
+    // Mount-time focus is NOT taken here: the focusNonce effect below runs
+    // on mount as well as on every bump, so a call here is dead weight.
+    // Verified by mutation — deleting it failed nothing, which is the
+    // signal that it was duplicated rather than that the test was weak.
 
     // Input is queued until ATTACH resolves; see stdinQueue.ts. Sending
     // before then hits "not attached" and the byte is gone.
@@ -114,7 +122,12 @@ export default function TerminalView({
 
     // Click-to-focus: pixel → cell → pane id → SELECT_PANE mode 0.
     const onClick = (e: MouseEvent) => {
-      if (panesRef.current.length < 2) return; // single pane: nothing to focus
+      // Keyboard focus first, unconditionally. A click that lands on the
+      // letter-box margin rather than the terminal element is still the
+      // user saying "type here", and xterm only self-focuses on a
+      // mousedown inside its own element.
+      term.focus();
+      if (panesRef.current.length < 2) return; // single pane: no pane to select
       const el = term.element;
       if (!el) return;
       // Measure against the terminal element, not the host: it is the
@@ -145,15 +158,30 @@ export default function TerminalView({
     const onResize = () => scaleToFit();
     window.addEventListener("resize", onResize);
 
+    // Returning to the app must return the caret too. Switching away
+    // (to a browser, to PowerPoint) and back otherwise leaves focus on
+    // whatever last held it, which reads as a dead keyboard.
+    const onWindowFocus = () => term.focus();
+    window.addEventListener("focus", onWindowFocus);
+
     return () => {
       disposed = true;
+      window.removeEventListener("focus", onWindowFocus);
       window.removeEventListener("resize", onResize);
       host.removeEventListener("click", onClick);
       data.dispose();
       void transport.detach();
+      termRef.current = null;
       term.dispose();
     };
   }, [transport, session, onClosed, onStdinError]);
+
+  // Take focus back whenever the host asks. Separate from the attach
+  // effect on purpose: clicking the session you are already on must
+  // refocus without tearing down a working attachment.
+  useEffect(() => {
+    termRef.current?.focus();
+  }, [focusNonce]);
 
   return <div ref={hostRef} style={{ width: "100%", height: "100%" }} />;
 }

@@ -212,6 +212,16 @@ old JavaScript against new commands — which looks like a broken app rather tha
 a broken build (it rejected every keystroke once). The build script fails with
 the fix instructions if `dist/` is missing or older than `src/`.
 
+One consequence of embedding the frontend is that the app's **Content Security
+Policy is functional configuration, not hardening decoration**. Tauri's IPC on
+macOS is a `fetch` to `ipc://localhost/<command>` while the page itself is served
+from `tauri://localhost` — a different scheme — so a policy without `ipc:` in
+`connect-src` blocks it. Tauri then falls back to `postMessage`, which
+JSON-encodes its payload and therefore *cannot* carry raw bytes. The only
+command that sends raw bytes is terminal input, so the visible symptom is
+oddly specific: rendering, the sidebar and session switching all work, and the
+keyboard is dead. A unit test asserts the shipped policy keeps that scheme.
+
 What works today: a sidebar listing live sessions with pane count, zoom badge
 and client count (the same data as `ls`, polled); click to attach and render;
 one-click templates for a new Claude or shell session; kill a session; keyboard
