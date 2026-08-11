@@ -12,6 +12,9 @@ export interface SidebarProps {
   api: ControlApi;
   active: string | null;
   onSelect(name: string): void;
+  /** A session THIS sidebar just created (before onSelect fires). The
+   * app uses it to fit newborns to the window once. */
+  onCreated?(name: string): void;
   /** Sessions whose completion notifications are silenced. */
   muted?: ReadonlySet<string>;
   /** Sessions that finished a turn while the window was unfocused; the
@@ -24,7 +27,15 @@ export interface SidebarProps {
   onToggleMute?(name: string): void;
 }
 
-export default function Sidebar({ api, active, onSelect, muted, done, onToggleMute }: SidebarProps) {
+export default function Sidebar({
+  api,
+  active,
+  onSelect,
+  onCreated,
+  muted,
+  done,
+  onToggleMute,
+}: SidebarProps) {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +66,7 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
     );
     try {
       await api.newSession(name, tpl.argv, 80, 24);
+      onCreated?.(name);
       await refresh();
       onSelect(name);
     } catch (e) {

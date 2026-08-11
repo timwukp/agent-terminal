@@ -11,6 +11,7 @@ import { TauriUsageApi } from "./panels/usageApi";
 import HooksPanel from "./panels/HooksPanel";
 import { TauriHooksApi } from "./panels/hooksApi";
 import { decideNotify, deliverNotification } from "./notify";
+import { makeOneShotSet } from "./terminal/viewControls";
 import { theme } from "./theme";
 
 export default function App() {
@@ -20,6 +21,13 @@ export default function App() {
   const hooksApi = useMemo(() => new TauriHooksApi(), []);
   // The inactive tab's panel unmounts, which stops its polling for free.
   const [claudeTab, setClaudeTab] = useState<"usage" | "hooks">("usage");
+
+  // Sessions THIS GUI created get fitted to the window once, at first
+  // attach: their 80×24 default was our choice, and we are their only
+  // viewer at birth. One-shot — a later re-select must not re-impose
+  // geometry the user may have changed. CLI-created sessions are never
+  // in this set, so they are never auto-resized.
+  const autoFitNewborn = useMemo(() => makeOneShotSet(), []);
   const [active, setActive] = useState<string | null>(
     () => new URLSearchParams(window.location.search).get("session"),
   );
@@ -110,6 +118,7 @@ export default function App() {
           api={api}
           active={active}
           onSelect={select}
+          onCreated={(name) => autoFitNewborn.add(name)}
           muted={muted}
           done={done}
           onToggleMute={toggleMute}
@@ -130,6 +139,7 @@ export default function App() {
               onStdinError={onStdinError}
               focusNonce={focusNonce}
               onTurnDone={onTurnDone}
+              autoFit={() => autoFitNewborn.consume(active)}
             />
             {stdinError !== null && (
               <p

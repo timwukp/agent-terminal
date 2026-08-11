@@ -200,8 +200,10 @@ same Unix socket, no network listener added. On attach it backfills the
 daemon-side history (up to the ring's 10 000 lines), so the mouse wheel
 scrolls back through output from before the GUI ever connected. ⌘/Ctrl `+`
 `−` `0` zoom the glyphs without reflowing the session's grid; the window
-never resizes a session on its own — the toolbar's ⤢ button does it on
-request (every attached viewer reflows). A collapsible right panel shows
+never resizes a session someone else created — the toolbar's ⤢ button
+(or the hint shown in a large letterbox) does it on request, and every
+attached viewer reflows; sessions the GUI itself creates are fitted to
+the window once at birth. A collapsible right panel shows
 live Claude Code state, read from `~/.claude` (the terminal protocol
 itself stays workload-agnostic): a **Usage** tab with per-transcript
 in/out/cache token totals and an output-per-minute sparkline, and a
