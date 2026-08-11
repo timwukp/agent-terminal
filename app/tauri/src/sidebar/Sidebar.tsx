@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ControlApi, SessionRow, Template } from "./api";
 import { nextSessionName } from "./api";
+import { theme } from "../theme";
 
 const POLL_MS = 2000;
 
@@ -94,7 +95,7 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
                 padding: "6px 8px",
                 border: "none",
                 borderRadius: 4,
-                background: s.name === active ? "#2b6cb0" : "transparent",
+                background: s.name === active ? theme.accent : "transparent",
                 color: s.name === active ? "#fff" : "inherit",
                 cursor: "pointer",
                 fontSize: 13,
@@ -103,7 +104,7 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
             >
               {s.name}
               {done?.has(s.name) === true && (
-                <span title="finished while you were away" style={{ color: "#3fb950" }}>
+                <span title="finished while you were away" style={{ color: theme.good }}>
                   {" "}
                   ✓
                 </span>
@@ -141,15 +142,15 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
           </li>
         ))}
         {sessions.length === 0 && !error && (
-          <li style={{ fontSize: 12, color: "#888", padding: 8 }}>no sessions</li>
+          <li style={{ fontSize: 12, color: theme.textMuted, padding: 8 }}>no sessions</li>
         )}
       </ul>
       {error && (
-        <p style={{ fontSize: 11, color: "#c33", margin: "4px 0" }} role="alert">
+        <p style={{ fontSize: 11, color: theme.danger, margin: "4px 0" }} role="alert">
           {error}
         </p>
       )}
-      <div style={{ borderTop: "1px solid #ccc", paddingTop: 6 }}>
+      <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 6 }}>
         {templates.map((t) => (
           <button
             key={t.label}
@@ -161,6 +162,10 @@ export default function Sidebar({ api, active, onSelect, muted, done, onToggleMu
               padding: "6px 8px",
               fontSize: 12,
               cursor: "pointer",
+              background: theme.surface,
+              color: theme.text,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 4,
             }}
           >
             + {t.label}

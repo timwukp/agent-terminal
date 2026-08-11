@@ -201,7 +201,10 @@ daemon-side history (up to the ring's 10 000 lines), so the mouse wheel
 scrolls back through output from before the GUI ever connected. ⌘/Ctrl `+`
 `−` `0` zoom the glyphs without reflowing the session's grid; the window
 never resizes a session on its own — the toolbar's ⤢ button does it on
-request (every attached viewer reflows). It is **not**
+request (every attached viewer reflows). A collapsible right panel shows
+live Claude Code token usage (per-transcript in/out/cache totals and an
+output-per-minute sparkline, read from `~/.claude/projects` — the
+terminal protocol itself stays workload-agnostic). It is **not**
 part of the `make install` flow; you build it yourself, either as a
 double-clickable app or as a bare debug binary:
 

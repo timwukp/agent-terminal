@@ -6,11 +6,15 @@ import { TauriTransport } from "./terminal/transport";
 import { windowTitle } from "./terminal/viewControls";
 import Sidebar from "./sidebar/Sidebar";
 import { TauriControlApi } from "./sidebar/api";
+import TokenPanel from "./panels/TokenPanel";
+import { TauriUsageApi } from "./panels/usageApi";
 import { decideNotify, deliverNotification } from "./notify";
+import { theme } from "./theme";
 
 export default function App() {
   const transport = useMemo(() => new TauriTransport(), []);
   const api = useMemo(() => new TauriControlApi(), []);
+  const usageApi = useMemo(() => new TauriUsageApi(), []);
   const [active, setActive] = useState<string | null>(
     () => new URLSearchParams(window.location.search).get("session"),
   );
@@ -33,10 +37,9 @@ export default function App() {
     document.title = windowTitle(active);
   }, [active]);
 
-  // The Claude panel is roadmap, not product, until PR6 fills it in —
-  // 260px of placeholder on every window is rent with no tenant. Kept
-  // reachable (collapsed to a handle) so the roadmap stays visible.
-  const [claudeOpen, setClaudeOpen] = useState(false);
+  // Open by default now that it has a tenant (the token panel); the
+  // collapse handle remains for people who want the pixels back.
+  const [claudeOpen, setClaudeOpen] = useState(true);
 
   // Notifications (app/design/notifications.md): per-session mute, and a
   // sidebar badge for turns that completed while the window was unfocused
@@ -85,8 +88,19 @@ export default function App() {
   const onStdinError = useCallback((m: string) => setStdinError(m), []);
 
   return (
-    <div style={{ display: "flex", height: "100vh", margin: 0, fontFamily: "system-ui" }}>
-      <aside style={{ width: 220, borderRight: "1px solid #ccc", padding: 8 }}>
+    <div
+      style={{
+        display: "flex",
+        height: "100vh",
+        margin: 0,
+        fontFamily: "system-ui",
+        // One dark surface system end to end (theme.ts) — the light
+        // chrome around a dark terminal read as two different apps.
+        background: theme.bg,
+        color: theme.text,
+      }}
+    >
+      <aside style={{ width: 220, borderRight: `1px solid ${theme.border}`, padding: 8 }}>
         <Sidebar
           api={api}
           active={active}
@@ -96,9 +110,9 @@ export default function App() {
           onToggleMute={toggleMute}
         />
       </aside>
-      <main style={{ flex: 1, position: "relative", background: "#1e2228" }}>
+      <main style={{ flex: 1, position: "relative", background: theme.bgMain }}>
         {active === null ? (
-          <p style={{ color: "#888", padding: 16, fontSize: 13 }}>
+          <p style={{ color: theme.textMuted, padding: 16, fontSize: 13 }}>
             select a session, or create one from a template
           </p>
         ) : closed === undefined ? (
@@ -132,7 +146,7 @@ export default function App() {
             )}
           </>
         ) : (
-          <p style={{ color: "#ccc", padding: 16, fontSize: 13 }}>
+          <p style={{ color: theme.textMuted, padding: 16, fontSize: 13 }}>
             {closed === null ? "session ended" : `connection closed: ${closed}`}
           </p>
         )}
@@ -140,9 +154,9 @@ export default function App() {
       <aside
         style={{
           width: claudeOpen ? 260 : 24,
-          borderLeft: "1px solid #ccc",
+          borderLeft: `1px solid ${theme.border}`,
           padding: claudeOpen ? 8 : 0,
-          overflow: "hidden",
+          overflow: claudeOpen ? "auto" : "hidden",
         }}
       >
         <button
@@ -156,18 +170,13 @@ export default function App() {
             background: "transparent",
             cursor: "pointer",
             fontSize: 12,
-            color: "#888",
+            color: theme.textMuted,
             padding: claudeOpen ? "2px 4px" : 0,
           }}
         >
           {claudeOpen ? "»" : "«"}
         </button>
-        {claudeOpen && (
-          <>
-            <h2 style={{ fontSize: 14, margin: "4px 0" }}>Claude</h2>
-            <p style={{ fontSize: 12, color: "#888" }}>tokens / hooks / security land in PR6-PR9</p>
-          </>
-        )}
+        {claudeOpen && <TokenPanel api={usageApi} />}
       </aside>
     </div>
   );
