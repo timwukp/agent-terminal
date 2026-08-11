@@ -120,6 +120,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-19 | font zoom | with the terminal focused, press ⌘+ a few times, ⌘−, then ⌘0; type `=` and `0` bare afterwards | glyphs grow/shrink between 9 and 24 pt and ⌘0 restores the default; the **grid does not reflow** (CLI `ls` geometry unchanged); bare `=`/`0` still reach the shell |
 | GUI-20 | jump-to-bottom pill | scroll up in a busy session (`while true; do date; sleep 1; done`), wait, then click the "↓ bottom" pill | the pill appears only while scrolled up, output keeps flowing beneath, and the click lands the view back on the live prompt and focuses it; the pill is gone at the bottom |
 | GUI-21 | window title + Claude panel | switch between two sessions; click the `«` strip on the right edge, then `»` | the window title follows the active session (visible in ⌘-Tab); the Claude panel expands to its placeholder and collapses back to a thin strip |
+| GUI-22 | fit session to window | attach to a small session (GUI-created ones start 80×24) in a large window, note the dark letterbox, press ⤢; check a CLI attach afterwards | the session reflows to fill the window (letterbox gone); the CLI viewer shows the SAME new geometry — the resize belongs to the session, and only this button ever sends it |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.

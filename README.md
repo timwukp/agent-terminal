@@ -199,7 +199,9 @@ A desktop client lives in [`app/tauri`](app/tauri) — Tauri + xterm.js over the
 same Unix socket, no network listener added. On attach it backfills the
 daemon-side history (up to the ring's 10 000 lines), so the mouse wheel
 scrolls back through output from before the GUI ever connected. ⌘/Ctrl `+`
-`−` `0` zoom the glyphs without reflowing the session's grid. It is **not**
+`−` `0` zoom the glyphs without reflowing the session's grid; the window
+never resizes a session on its own — the toolbar's ⤢ button does it on
+request (every attached viewer reflows). It is **not**
 part of the `make install` flow; you build it yourself, either as a
 double-clickable app or as a bare debug binary:
 

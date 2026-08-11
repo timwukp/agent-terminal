@@ -11,7 +11,7 @@ import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
 import { Backfill } from "./backfill";
-import { FONT_DEFAULT, isAtBottom, nextFontSize, zoomActionForKey } from "./viewControls";
+import { FONT_DEFAULT, fitGrid, isAtBottom, nextFontSize, zoomActionForKey } from "./viewControls";
 import { readCellMetrics } from "./overlay";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
@@ -346,6 +346,20 @@ export default function TerminalView({
         onSplitHorizontal={() => void transport.splitPane(true)}
         onZoomToggle={() => void transport.zoomToggle()}
         onClose={() => void transport.closePane()}
+        onFitToWindow={() => {
+          // The one sanctioned way the GUI changes a session's geometry:
+          // the user asked. Auto-resize stays banned (the attach comment
+          // above measured why); GUI-created sessions default to 80×24,
+          // so a large window letterboxes until this is pressed.
+          const term = termRef.current;
+          const host = hostRef.current;
+          const m = term ? readCellMetrics(term) : null;
+          if (!term || !host || !m) return;
+          const grid = fitGrid(host.clientWidth, host.clientHeight, m.cellWidth, m.cellHeight);
+          if (grid && (grid.cols !== term.cols || grid.rows !== term.rows)) {
+            void transport.resize(grid.cols, grid.rows);
+          }
+        }}
         paneCount={layout?.panes.length ?? 1}
         zoomed={zoomed}
       />

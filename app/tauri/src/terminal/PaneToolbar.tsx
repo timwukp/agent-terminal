@@ -10,6 +10,10 @@ export interface PaneToolbarProps {
   onSplitHorizontal(): void;
   onZoomToggle(): void;
   onClose(): void;
+  /** Resize the SESSION to this window — the only place the GUI ever
+   * imposes geometry, because the user pressed it. Every attached
+   * viewer reflows (say so in the tooltip, not in a surprise). */
+  onFitToWindow(): void;
   /** Panes in the session; close is hidden at 1 because closing the only
    * pane means killing the session, which belongs to the sidebar's
    * confirm-guarded path, not to a single-click toolbar button. */
@@ -33,6 +37,7 @@ export default function PaneToolbar({
   onSplitHorizontal,
   onZoomToggle,
   onClose,
+  onFitToWindow,
   paneCount,
   zoomed,
 }: PaneToolbarProps) {
@@ -49,6 +54,13 @@ export default function PaneToolbar({
         opacity: 0.85,
       }}
     >
+      <button
+        style={btn}
+        onClick={onFitToWindow}
+        title="Fit session to window — resizes the session itself, every attached viewer reflows"
+      >
+        ⤢
+      </button>
       <button
         style={btn}
         onClick={onSplitVertical}
