@@ -205,31 +205,127 @@ async fn send_frame(state: &tauri::State<'_, SessionState>, frame: Vec<u8>) -> R
     tx.send(Cmd::Frame(frame)).await.map_err(|e| e.to_string())
 }
 
+/// Decode a keystroke payload from whichever IPC body shape arrived.
+///
+/// Two shapes are legitimate, because Tauri picks the transport, not us:
+///
+/// * `Raw` — the custom-protocol path (`ipc://localhost/...` POST). The
+///   ArrayBuffer arrives verbatim; this is the fast path.
+/// * `Json` array of byte-sized numbers — the `postMessage` fallback.
+///   `sendIpcMessage` re-serializes the whole envelope, and its
+///   `JSON.stringify` replacer turns a `Uint8Array` into `Array.from(val)`
+///   (tauri-2.11.5/scripts/process-ipc-message-fn.js:26), so raw bytes
+///   *cannot* survive that path. Measured: with `connect-src` missing the
+///   `ipc:` scheme, the custom protocol fetch is CSP-blocked, Tauri falls
+///   back, and every single keystroke arrives here as JSON.
+///
+/// The fallback is accepted rather than rejected on purpose. It costs
+/// throughput, not correctness — whereas refusing it makes the keyboard
+/// completely dead, which is what a real UAT run produced.
+fn decode_stdin(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(b) => Ok(b.clone()),
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| format!("stdin payload has a non-byte element: {v}"))
+            })
+            .collect(),
+        // Anything else is a frontend/backend mismatch rather than a
+        // transport choice, so name the shape instead of guessing a cause.
+        tauri::ipc::InvokeBody::Json(v) => Err(format!(
+            "stdin_data needs a byte array or a bytes payload, got {v}"
+        )),
+    }
+}
+
 /// Terminal input. Takes the raw IPC body instead of a named `bytes`
 /// argument: the webview sends an ArrayBuffer, which arrives as
 /// `InvokeBody::Raw`, and a named arg cannot be deserialized from a
 /// bytes payload at all (tauri::ipc::CommandItem::deserialize_json).
-/// Raw also skips JSON-encoding every keystroke as a number array.
 #[tauri::command]
 pub async fn stdin_data(
     state: tauri::State<'_, SessionState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    let bytes = match request.body() {
-        tauri::ipc::InvokeBody::Raw(b) => b.as_slice(),
-        // Only a stale frontend sends JSON here, and it does so for EVERY
-        // keystroke — so say which half is old rather than describing the
-        // payload. Measured: a binary built from fixed Rust plus an old
-        // dist/ rejected 100% of input, and it read as a product bug.
-        tauri::ipc::InvokeBody::Json(_) => {
-            return Err(
-                "stale frontend: stdin_data needs a bytes payload — rebuild dist/ \
-                        (cd app/tauri && npm run build) and rebuild the binary"
-                    .into(),
-            )
+    let bytes = decode_stdin(request.body())?;
+    send_frame(&state, proto::stdin_data(&bytes)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::ipc::InvokeBody;
+
+    #[test]
+    fn raw_body_is_the_fast_path() {
+        let body = InvokeBody::Raw(vec![0x1b, 0x5b, 0x41]);
+        assert_eq!(decode_stdin(&body).unwrap(), vec![0x1b, 0x5b, 0x41]);
+    }
+
+    #[test]
+    fn postmessage_fallback_array_is_accepted() {
+        // The shape Tauri's postMessage path produces for a Uint8Array.
+        // Rejecting this is what made the keyboard dead in UAT: the
+        // custom-protocol fetch was CSP-blocked, so EVERY keystroke came
+        // through here.
+        let body = InvokeBody::Json(serde_json::json!([27, 91, 73]));
+        assert_eq!(decode_stdin(&body).unwrap(), vec![27, 91, 73]);
+    }
+
+    #[test]
+    fn empty_array_decodes_to_no_bytes() {
+        let body = InvokeBody::Json(serde_json::json!([]));
+        assert_eq!(decode_stdin(&body).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn out_of_range_and_negative_elements_are_rejected() {
+        // A byte array is the contract; 256 and -1 mean the sender is not
+        // encoding bytes, which must not be silently truncated to u8.
+        for v in [serde_json::json!([256]), serde_json::json!([-1])] {
+            let err = decode_stdin(&InvokeBody::Json(v)).unwrap_err();
+            assert!(err.contains("non-byte"), "unexpected error: {err}");
         }
-    };
-    send_frame(&state, proto::stdin_data(bytes)).await
+    }
+
+    /// The CSP is load-bearing, not decoration. On macOS the IPC fetch
+    /// targets `ipc://localhost/<cmd>` (tauri-2.11.5/scripts/core.js
+    /// convertFileSrc) while the page is served from `tauri://localhost`,
+    /// so a policy without the `ipc:` scheme blocks it, Tauri falls back
+    /// to postMessage, and raw byte payloads stop being possible.
+    /// Mutation-verified by hand: deleting `ipc:` and rebuilding
+    /// reproduced "IPC custom protocol failed" plus a JSON body for every
+    /// keystroke; restoring it produced `Raw` bodies again.
+    #[test]
+    fn csp_permits_the_ipc_scheme_for_the_custom_protocol() {
+        let conf = include_str!("../tauri.conf.json");
+        let v: serde_json::Value = serde_json::from_str(conf).expect("tauri.conf.json is valid");
+        let csp = v["app"]["security"]["csp"]
+            .as_str()
+            .expect("csp is a string");
+        let connect = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("connect-src"))
+            .unwrap_or_else(|| panic!("no connect-src directive in csp: {csp}"));
+        assert!(
+            connect.split_whitespace().any(|s| s == "ipc:"),
+            "connect-src must allow the ipc: scheme, got: {connect}"
+        );
+    }
+
+    #[test]
+    fn non_array_json_names_the_shape_it_got() {
+        let err = decode_stdin(&InvokeBody::Json(serde_json::json!({"bytes": [1]}))).unwrap_err();
+        assert!(err.contains("byte array"), "unexpected error: {err}");
+        // Must NOT blame a stale build: the real cause of a JSON body was
+        // a CSP that blocked the custom protocol, and the stale-frontend
+        // wording sent a UAT session chasing a rebuild that changed nothing.
+        assert!(!err.contains("stale"), "misleading cause in: {err}");
+    }
 }
 
 #[tauri::command]

@@ -195,6 +195,15 @@ cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
 而不是建置壞了(曾經因此拒絕了每一次按鍵)。當 `dist/` 不存在、或比 `src/`
 更舊時,build script 會直接失敗並附上修復指令。
 
+把前端嵌進二進位檔還有一個後果:這個 app 的 **Content Security Policy 是會影響
+功能的設定,不是裝飾性的加固**。macOS 上 Tauri 的 IPC 是一個發往
+`ipc://localhost/<command>` 的 `fetch`,而頁面本身由 `tauri://localhost` 提供
+— 兩者 scheme 不同 — 所以 `connect-src` 若少了 `ipc:` 就會被擋掉。Tauri 接著
+會退回 `postMessage`,而那條路徑會把 payload 做 JSON 編碼,因此**無法**傳遞
+原始位元組。唯一會傳原始位元組的指令是終端機輸入,所以症狀非常特定:渲染、
+側邊欄、切換 session 全都正常,只有鍵盤是死的。有一個單元測試會確認實際出貨的
+policy 保留了那個 scheme。
+
 目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
 (與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
 Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格。
