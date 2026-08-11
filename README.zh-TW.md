@@ -181,8 +181,19 @@ agent-terminal new -s work -- claude
 ## GUI 客戶端(`app/`,早期預覽)
 
 桌面客戶端位於 [`app/tauri`](app/tauri) — Tauri + xterm.js,走的是同一個 Unix
-socket,沒有新增任何網路監聽。它**不**屬於 `make install` 流程,也還沒有發佈
-版本;請當作自行編譯的預覽版。
+socket,沒有新增任何網路監聽。它**不**屬於 `make install` 流程;由你自行編譯,
+可以打包成可雙擊的 app,也可以只建 debug 執行檔:
+
+```sh
+cd app/tauri && npm ci
+npm run bundle       # → src-tauri/target/release/bundle/macos/agent-terminal.app
+```
+
+`.app` 的意義不只是方便:**macOS 只為真正的 `.app` bundle 顯示 OS 通知**,
+所以完成通知的彈窗只存在於打包版。它是 ad-hoc 簽章——本機執行沒問題,但
+不能發佈。想放進 Launchpad 就拖到 `/Applications`。
+
+開發時用裸執行檔重建比較快:
 
 ```sh
 cd app/tauri

@@ -197,8 +197,20 @@ agent-terminal new -s work -- claude
 
 A desktop client lives in [`app/tauri`](app/tauri) — Tauri + xterm.js over the
 same Unix socket, no network listener added. It is **not** part of the
-`make install` flow and has no release build yet; treat it as a preview you
-build yourself.
+`make install` flow; you build it yourself, either as a double-clickable app
+or as a bare debug binary:
+
+```sh
+cd app/tauri && npm ci
+npm run bundle       # → src-tauri/target/release/bundle/macos/agent-terminal.app
+```
+
+The `.app` matters beyond convenience: **macOS only shows OS notifications for
+real `.app` bundles**, so the done-notification pop-up exists only in the
+bundled build. It is ad-hoc signed — fine to run locally, not distributable.
+Drag it to `/Applications` if you want it in Launchpad.
+
+For development, the bare binary is faster to rebuild:
 
 ```sh
 cd app/tauri
