@@ -35,6 +35,21 @@ export interface TerminalProps {
    * already-active session does not remount this component, so mount-time
    * focus alone leaves the user typing into a button. */
   focusNonce?: number;
+  /** The session finished a turn: BEL rang (xterm's parser — a raw 0x07
+   * scan would false-positive on every OSC title write), or the Rust idle
+   * machine saw sustained work end. Carries the last non-empty screen
+   * line so a notification can say WHAT finished. */
+  onTurnDone?: (reason: "bell" | "idle", lastLine: string) => void;
+}
+
+/** Bottom-most non-empty row of the visible screen. */
+function lastNonEmptyLine(term: XTerm): string {
+  const buf = term.buffer.active;
+  for (let y = buf.length - 1; y >= 0; y--) {
+    const text = buf.getLine(y)?.translateToString(true).trim();
+    if (text) return text;
+  }
+  return "";
 }
 
 export default function TerminalView({
@@ -43,6 +58,7 @@ export default function TerminalView({
   onClosed,
   onStdinError,
   focusNonce,
+  onTurnDone,
 }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<PaneRect[]>([]);
@@ -55,6 +71,12 @@ export default function TerminalView({
   const [layout, setLayout] = useState<LayoutState | null>(null);
   const [metrics, setMetrics] = useState<CellMetrics | null>(null);
   const [scale, setScale] = useState(1);
+  // Latest-ref: the attach effect must not depend on this callback (a
+  // re-attach per render would drop and rebuild the connection), but it
+  // must also not capture a stale one — the parent's handler closes over
+  // mute state that changes.
+  const onTurnDoneRef = useRef(onTurnDone);
+  onTurnDoneRef.current = onTurnDone;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -142,6 +164,8 @@ export default function TerminalView({
             // A layout can arrive before any snapshot has measured cells
             // (split of a session attached mid-life); measure here too.
             setMetrics(readCellMetrics(term));
+          } else if (ev.kind === "turn_done") {
+            onTurnDoneRef.current?.("idle", lastNonEmptyLine(term));
           } else if (ev.kind === "closed") onClosed?.(ev.error);
           else if (ev.kind === "session_exited") onClosed?.(null);
         },
@@ -156,6 +180,13 @@ export default function TerminalView({
       stdin.push(new TextEncoder().encode(s));
       // Echo comes from the far end; keep the local view scrolled there.
       term.scrollToBottom();
+    });
+
+    // The bell trigger. Reliable single-pane only: composited multi-pane
+    // frames rebuild from grid state and drop BEL (protocol-notes.md
+    // trap #1) — the idle machine covers that case until MSG_PANE_BELL.
+    const bell = term.onBell(() => {
+      if (!disposed) onTurnDoneRef.current?.("bell", lastNonEmptyLine(term));
     });
 
     // Click-to-focus: pixel → cell → pane id → SELECT_PANE mode 0.
@@ -202,6 +233,7 @@ export default function TerminalView({
       window.removeEventListener("focus", onWindowFocus);
       window.removeEventListener("resize", onResize);
       host.removeEventListener("click", onClick);
+      bell.dispose();
       data.dispose();
       void transport.detach();
       termRef.current = null;

@@ -39,6 +39,9 @@ vi.mock("@xterm/xterm", () => {
     onData() {
       return { dispose() {} };
     }
+    onBell() {
+      return { dispose() {} };
+    }
   }
   return { Terminal: FakeTerm };
 });
