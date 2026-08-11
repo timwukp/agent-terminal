@@ -7,6 +7,7 @@ mod control;
 mod idle;
 mod session;
 mod templates;
+mod usage;
 
 fn main() {
     tauri::Builder::default()
@@ -15,6 +16,7 @@ fn main() {
         // binary degrades to the sidebar badge (docs/UAT.md GUI-16).
         .plugin(tauri_plugin_notification::init())
         .manage(session::SessionState::default())
+        .manage(usage::UsageState::default())
         .invoke_handler(tauri::generate_handler![
             session::attach_session,
             session::stdin_data,
@@ -29,6 +31,7 @@ fn main() {
             control::new_session,
             control::kill_session,
             templates::list_templates,
+            usage::usage_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
