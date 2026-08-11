@@ -1,0 +1,26 @@
+/* Design tokens as CSS custom properties, keyed off [data-theme] on the
+ * root element (the KiroCrew pattern: one attribute, N theme blocks).
+ * theme.ts is the typed accessor over these; xtermTheme.ts derives the
+ * terminal's ITheme from the SAME values via resolveTokens(), so chrome
+ * and terminal cells can never disagree.
+ *
+ * Only "dark" ships today. A new theme = one more block here plus a
+ * palette-validator pass for the chart accent (see theme.ts); no TS
+ * changes required. */
+
+:root[data-theme="dark"] {
+  --bg: #14171c;
+  --bg-main: #1e2228;
+  --surface: #1f242c;
+  --border: #2d333d;
+  --text: #dfe4ea;
+  --text-muted: #8b949e;
+  --accent: #2b6cb0;
+  --good: #3fb950;
+  --danger: #e5534b;
+  --danger-strong: #7f1d1d;
+}
+
+body {
+  margin: 0;
+}
