@@ -19,6 +19,7 @@ fn main() {
         .manage(session::SessionState::default())
         .manage(usage::UsageState::default())
         .manage(hooks::HooksState::default())
+        .manage(hooks::HookLogState::default())
         .invoke_handler(tauri::generate_handler![
             session::attach_session,
             session::stdin_data,
@@ -36,6 +37,7 @@ fn main() {
             usage::usage_snapshot,
             hooks::hooks_snapshot,
             hooks::read_hook_script,
+            hooks::hook_log_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

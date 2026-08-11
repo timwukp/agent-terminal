@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import type { HooksApi, HooksSnapshot } from "./hooksApi";
 import { commandBasename, isScriptPath } from "./hooksApi";
+import SecurityCard from "./SecurityCard";
 import { theme } from "../theme";
 
 const POLL_MS = 2000;
@@ -168,6 +169,7 @@ export default function HooksPanel({ api }: { api: HooksApi }) {
           )}
         </div>
       )}
+      <SecurityCard api={api} />
     </div>
   );
 }

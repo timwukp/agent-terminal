@@ -17,11 +17,32 @@ export interface HooksSnapshot {
   malformed: number;
 }
 
+export interface HookLogEvent {
+  ts: string;
+  hook: string;
+  event: string;
+  tool: string;
+  decision: string;
+  reason: string;
+}
+
+export interface HookLogSnapshot {
+  path: string;
+  exists: boolean;
+  events: HookLogEvent[];
+  total: number;
+  malformed: number;
+  chain_ok: boolean;
+  break_at: number | null;
+}
+
 export interface HooksApi {
   snapshot(): Promise<HooksSnapshot>;
   /** Source of a configured hook script. Rejects for inline commands
    * and for anything not currently in the snapshot (hooks.rs gate). */
   readScript(command: string): Promise<string>;
+  /** Recent hook executions + chain verdict (app/design/hook-log.md). */
+  logSnapshot(): Promise<HookLogSnapshot>;
 }
 
 export class TauriHooksApi implements HooksApi {
@@ -30,6 +51,9 @@ export class TauriHooksApi implements HooksApi {
   }
   readScript(command: string): Promise<string> {
     return invoke("read_hook_script", { command });
+  }
+  logSnapshot(): Promise<HookLogSnapshot> {
+    return invoke("hook_log_snapshot");
   }
 }
 
