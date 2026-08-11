@@ -185,10 +185,12 @@ socket,沒有新增任何網路監聽。attach 時會回填 daemon 側的歷史�
 ring 的 10,000 行),所以滑鼠滾輪能一路捲回 GUI 連上**之前**的輸出。⌘/Ctrl
 `+` `−` `0` 縮放字級,不會改變 session 的格線;視窗本身永遠不會擅自調整
 session 尺寸——工具列的 ⤢ 按鈕才會,而且所有 attach 中的檢視端都會一起重排。
-右側可收合面板顯示 Claude Code 的即時 token 用量(每份 transcript 的
-輸入/輸出/快取總量與每分鐘輸出 sparkline,讀自 `~/.claude/projects`——
-終端協定本身保持與工作負載無關)。它**不**屬於 `make install` 流程;由你
-自行編譯,可以打包成可雙擊的 app,也可以只建 debug 執行檔:
+右側可收合面板顯示 Claude Code 的即時狀態,讀自 `~/.claude`(終端協定
+本身保持與工作負載無關):**Usage** 分頁是每份 transcript 的輸入/輸出/
+快取 token 總量與每分鐘輸出 sparkline;**Hooks** 分頁列出 `settings.json`
+裡的 hook 規則,附唯讀的腳本檢視器(GUI 永不寫入 Claude Code 的設定)。
+它**不**屬於 `make install` 流程;由你自行編譯,可以打包成可雙擊的 app,
+也可以只建 debug 執行檔:
 
 ```sh
 cd app/tauri && npm ci

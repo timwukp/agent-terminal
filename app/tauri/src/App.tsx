@@ -8,6 +8,8 @@ import Sidebar from "./sidebar/Sidebar";
 import { TauriControlApi } from "./sidebar/api";
 import TokenPanel from "./panels/TokenPanel";
 import { TauriUsageApi } from "./panels/usageApi";
+import HooksPanel from "./panels/HooksPanel";
+import { TauriHooksApi } from "./panels/hooksApi";
 import { decideNotify, deliverNotification } from "./notify";
 import { theme } from "./theme";
 
@@ -15,6 +17,9 @@ export default function App() {
   const transport = useMemo(() => new TauriTransport(), []);
   const api = useMemo(() => new TauriControlApi(), []);
   const usageApi = useMemo(() => new TauriUsageApi(), []);
+  const hooksApi = useMemo(() => new TauriHooksApi(), []);
+  // The inactive tab's panel unmounts, which stops its polling for free.
+  const [claudeTab, setClaudeTab] = useState<"usage" | "hooks">("usage");
   const [active, setActive] = useState<string | null>(
     () => new URLSearchParams(window.location.search).get("session"),
   );
@@ -176,7 +181,33 @@ export default function App() {
         >
           {claudeOpen ? "»" : "«"}
         </button>
-        {claudeOpen && <TokenPanel api={usageApi} />}
+        {claudeOpen && (
+          <>
+            <div role="tablist" style={{ display: "flex", gap: 4, margin: "2px 0 6px" }}>
+              {(["usage", "hooks"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  role="tab"
+                  aria-selected={claudeTab === tab}
+                  onClick={() => setClaudeTab(tab)}
+                  style={{
+                    flex: 1,
+                    padding: "3px 0",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 4,
+                    background: claudeTab === tab ? theme.accent : "transparent",
+                    color: claudeTab === tab ? "#fff" : theme.textMuted,
+                  }}
+                >
+                  {tab === "usage" ? "Usage" : "Hooks"}
+                </button>
+              ))}
+            </div>
+            {claudeTab === "usage" ? <TokenPanel api={usageApi} /> : <HooksPanel api={hooksApi} />}
+          </>
+        )}
       </aside>
     </div>
   );
