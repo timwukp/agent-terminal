@@ -138,9 +138,18 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-25 | hooks tab | open the right panel, switch to **Hooks**; click a rule row; temporarily rename ~/.claude/settings.json and switch tabs back and forth (restore after) | rules from the real settings.json appear grouped by event (this machine: two PreToolUse/Bash rows); clicking shows the script source read-only; with the file missing the tab says so honestly instead of erroring |
 | GUI-26 | hook-log chain badge | with no ~/.claude/hooks/hooks.log: read the security card; then hand-build a 2-line valid chain per app/design/hook-log.md, watch; edit line 1's reason in an editor; delete the file | absent → "no hook log" pointing at the doc; valid chain → green "chain verified · 2 events" with the events listed newest-first; after the edit → red "chain broken at line 2" with history still shown; deleted → back to the absent state |
 | GUI-27 | letterbox labels itself + newborns fit | attach a small CLI-created session in a big window; then create a new session from a template | small session: a dashed hint sits in the dead space naming the grid ("session 80×24 · ⤢ fit to window"); clicking it fills the window and the hint disappears; the GUI-created session arrives already window-sized, no hint, no button press |
+| GUI-28 | **viewer refuses a symlink** | with the throwaway hook rule below in place, click its row and read the script; then `ln -sf ~/.ssh/id_rsa /tmp/uat-hook.sh` (any file you can name works — a `printf MARKER > /tmp/uat-secret` is the polite version) and click the row again | first click: the script source. After the swap: a refusal naming a non-regular file, and **none of the target's bytes appear** — the check is per click, so no restart is involved; deleting the link and restoring the real file serves it again |
+| GUI-29 | **oversize script truncates visibly** | `python3 -c 'open("/tmp/uat-hook.sh","w").write("#x\n"*800000)'` (≈2.3 MiB), click the row, scroll to the end of the viewer | the source renders and ends in a visible notice that the script is larger than 1 MiB and only the first 1 MiB is shown, pointing at the file; the panel stays responsive and the window does not grow by the file's size |
+| GUI-30 | hook log tolerates a hostile writer | with a valid 2-line chain (GUI-26) present, append 3 MiB with no newline in it (`python3 -c 'open(P,"a").write("x"*3_000_000)'`), watch the card for ~10 s; then append a single `\n` followed by a fresh valid line | the card keeps updating throughout (no freeze, no ballooning memory): the unterminated line is counted as malformed rather than buffered, the badge reports the chain broken, and the following newline resynchronizes so the new event is listed |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
+
+**The hook rule for GUI-28/GUI-29 must be inert.** The panel lists rules by event and
+matcher without regard to whether they can fire, so add the throwaway to
+`~/.claude/settings.json` under a matcher that matches no tool (`"matcher":
+"UatNeverMatches"`) with `"command": "/tmp/uat-hook.sh"`, and remove it afterwards. A rule
+with a real matcher would have Claude Code *execute* the file — including the 2.3 MiB one.
 
 ### Round 1 (2026-08-10, against the production daemon)
 
@@ -430,6 +439,85 @@ that skips the split, `MAX_CLIENTS 128` (so the flood no longer denies anything,
 fail the *positive control* rather than pass the test), and a reap whose log line changed but
 whose behavior did not. Full gate: 9 unit suites under ASan/UBSan (6,352 checks, 0 failures),
 25/25 integration scripts on release, release build with 0 warnings.
+
+## Security round 3 (2026-08-12): the GUI's read gate and its plugin ACL
+
+The webview is inside the trust boundary by design — this is a client for spawning shells, so
+gating the argv it sends would be theatre while `stdin_data` exists. What is *not* inside the
+boundary is the filesystem the panel reads on the user's behalf, and the hook rules it reads
+come from a file two other programs write. Four changes, plus one bug found and deliberately
+left for its own PR:
+
+1. **The read gate followed symlinks** (`hooks.rs`). `Path::is_file` goes through
+   `fs::metadata`, which answers about the symlink *target*, so the "regular file" half of the
+   gate was satisfied by a link. The exact-match-against-the-snapshot half already held — the
+   snapshot is only ever written from `~/.claude/settings.json` and there is no fs-write
+   command — so this is not arbitrary file read; the reachable case is that a hook command
+   normally lives somewhere far more writable than `~/.claude` (`/tmp/guard.sh`, a script
+   inside a checked-out repo), and replacing it in place with a link to `~/.ssh/id_rsa` has the
+   panel render the key on the next click, without the attacker needing read access to the
+   target at all. Fixed with `symlink_metadata` + `file_type().is_file()`, which also rules out
+   a FIFO — one click into a read that never returns, while holding the panel's lock. Because
+   `File::open` follows links and runs after the `lstat`, the opened fd's `(dev, ino)` is
+   compared to the `lstat`'s: the check is on the file that was actually opened, not on what
+   the path meant a moment earlier.
+2. **Both reads are now bounded** (`hooks.rs`). `read_to_string` on a hook script and the
+   log-tail delta were unbounded, in a panel that polls every 2 s. The script cap is 1 MiB with
+   the truncation *stated in the rendered text*, because a viewer whose job is auditing a hook
+   silently showing 1 MiB of 3 is the worst available outcome. The log gets two separate caps:
+   1 MiB per poll (the cursor advances only by what was consumed, so a backlog is verified
+   across the next few polls rather than inside one blocking call, and `N events` therefore
+   counts what has been *verified*), and 1 MiB for a single unterminated line — the per-poll cap
+   bounds work but not memory, since bytes with no newline in them are held for the next poll
+   and accumulate for as long as a writer withholds the newline.
+3. **The webview's plugin ACL was `notification:default`** (`capabilities/default.json`), all
+   16 of the plugin's permissions, against three calls in `notify.ts`. Now those three are
+   named one at a time. Stated honestly: **13 of the 16 name commands
+   `tauri-plugin-notification` 2.3.3 does not register at all** (`init()` registers exactly
+   `is_permission_granted`, `request_permission`, `notify`), so this is least privilege, not a
+   closed hole. It is worth keeping anyway because the ACL is what a future plugin version's
+   new commands would be granted by. The mapping is not greppable from the npm package —
+   `requestPermission()`/`sendNotification()` reach the backend through a `window.Notification`
+   replacement the plugin injects, not through `invoke()` — so `src/capabilities.test.ts`
+   asserts the granted set equals the called set in **both** directions rather than leaving the
+   correspondence to a reader.
+4. **A comment recording why OSC 8 hyperlinks are inert** (`Terminal.tsx`). There is no
+   `linkHandler` and no web-links addon, which is the decision; what needed writing down is that
+   xterm's fallback path is also dead only *by accident*. wry 0.55.1's WKWebView UI delegate
+   implements four methods and `runJavaScriptConfirmPanel` is not among them, so `confirm()`
+   completes false on macOS. Adding the addon, a `linkHandler`, or a webkit2gtk target turns
+   session output — which chooses both the visible text and the destination — into browser
+   navigation.
+
+Two results worth more than the fixes:
+
+- **A mutant whose output is byte-identical means the test watches the wrong quantity.**
+  Removing the script cap (`take(u64::MAX)`) survived the first harness run: the string still
+  got truncated further downstream, so every assertion about the *rendered text* passed — while
+  the process had still read and held the whole file, which is the entire cost being refused.
+  The fix was to the test, not the mutant: `read_capped` returns the byte count it consumed, and
+  the assertion is `read == cap + 1`. Generally, a guard that bounds a *resource* rather than a
+  *result* has to expose an observable, or it cannot be tested at all.
+- **An unschedulable guard belongs in the harness as a named expected survivor.** The
+  `(dev, ino)` comparison only fires if the path is swapped between the `lstat` and the `open`,
+  which no test can schedule deterministically; deleting it kills nothing. Rather than omit that
+  mutant and quietly report a clean sweep, it is run and listed as expected to survive, with
+  `same_file` tested directly on two real files instead.
+
+**One real bug found and not fixed here.** `window.confirm()` completing false on macOS is not
+only about hyperlinks: `Sidebar.tsx` gates session kill on exactly that call, so the GUI's kill
+button is **silently inert** in this build (fail-safe, and GUI-07 was never eyeballed — the
+round-1 note that GUI-05..09 remain unconfirmed is why it went unnoticed). It gets its own
+stacked PR with an in-app confirmation and the missing `Sidebar` test, rather than being folded
+into a security change.
+
+Regression coverage: 5 new tests in `hooks.rs` (9 total in-crate) and
+`src/capabilities.test.ts` (4). Mutation-checked against pre-fix source restored by `cp`: the
+hook gate 9 killed + the 1 named expected survivor above, the capability ACL 5/5 — including
+the two directions of the drift assertion and a vacuity guard, since a test that reads its
+sources through `import.meta.glob` passes trivially if the glob matches nothing. Full gate
+after `npm run build`: vitest 132 tests in 21 files, `cargo test --workspace` 119 tests,
+clippy `-D warnings` clean, `tsc --noEmit` clean, frontend bundle unchanged at 500.85 kB.
 
 ## Reproducing this UAT
 

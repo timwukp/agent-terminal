@@ -126,6 +126,22 @@ export default function TerminalView({
     const host = hostRef.current;
     if (!host) return;
 
+    // No linkHandler and no web-links addon, deliberately. Session output
+    // is untrusted — it is whatever a program in the pane decided to print
+    // — and an OSC 8 hyperlink lets that program choose both the visible
+    // text and an unrelated destination. xterm's built-in fallback for an
+    // activated link is `confirm()` then `window.open()`, and in THIS build
+    // both are inert: wry 0.55.1's WKWebView UI delegate implements only
+    // windowWillClose, runOpenPanel, requestMediaCapturePermission and
+    // createWebViewWithConfiguration — no runJavaScriptConfirmPanel — so
+    // WebKit completes `confirm()` with false and the click stops there.
+    //
+    // That is an accident of a dependency version, not a decision, which
+    // is the reason this comment exists: adding the addon, setting a
+    // linkHandler, or building against webkit2gtk (which does implement the
+    // script dialogs) turns a line of session output into a navigation in
+    // the user's browser. If links are ever wanted, they need an explicit
+    // in-app confirmation showing the resolved URL — not the platform's.
     const term = new XTerm({
       // Sized to the daemon's own ring (SB_MEM_LINES_DEFAULT): attach
       // backfills up to that much history, and everything after attach

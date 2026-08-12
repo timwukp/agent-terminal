@@ -59,7 +59,24 @@ Parse `~/.claude/settings.json` → `hooks` into a table:
 - Grouped by event (PreToolUse, PostToolUse, Stop, …), one row per
   matcher/command pair, with the source file shown (settings.json vs
   project `.claude/settings.json` if we later add per-project scan).
-- Clicking a command shows the script source (read-only viewer).
+- Clicking a command shows the script source (read-only viewer), through a
+  gate with three rules, because a command that reads an arbitrary path on
+  request is an arbitrary-file-read hole rather than a viewer:
+  - The string must **exactly match** a command in the current snapshot,
+    and that snapshot is only ever written from `~/.claude/settings.json`.
+  - The path must still be a **regular file**, checked with `lstat` and
+    confirmed against the opened fd's `(dev, ino)`. A symlink is refused,
+    not followed: a hook command normally lives somewhere far more
+    writable than `~/.claude` — `/tmp/guard.sh`, a script inside a
+    checked-out repo — and replacing it with a link to `~/.ssh/id_rsa`
+    would otherwise have the panel render the key on the next click,
+    without the attacker needing any read access to the target. Requiring
+    a regular file also rules out a FIFO, which would turn one click into
+    a read that never returns while holding the panel's lock.
+  - At most **1 MiB**, and a truncated script says so in the text that is
+    rendered. The panel displays exactly what it is handed, so a silent
+    truncation would read as "this is the whole script" — the worst
+    available outcome for a viewer whose job is auditing a hook.
 - **No editing in v1.** Claude Code itself rewrites settings.json;
   concurrent writes from a GUI are a real corruption hazard. Editing
   lands only after the viewer proves stable, with atomic
