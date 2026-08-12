@@ -70,7 +70,8 @@ make install PREFIX="$HOME/.local"    # no sudo; ensure ~/.local/bin is on PATH
 sudo make install                     # or system-wide, PREFIX defaults to /usr/local
 ```
 
-Installs `agent-terminald`, `agent-terminal` and `agent-terminal.1`.
+Installs `agent-terminald`, `agent-terminal`, `agent-terminal.1`, and the two
+service units rendered for this `PREFIX` into `PREFIX/share/agent-terminal/`.
 `make install` depends on `all`, so a separate build step is optional.
 
 The client autospawns the daemon that sits **next to its own binary**, with
@@ -78,6 +79,32 @@ The client autospawns the daemon that sits **next to its own binary**, with
 `build/release/` needs no install at all. An agent installing this unattended
 should prefer `PREFIX="$HOME/.local"`: `sudo` will block on a password prompt
 with no tty.
+
+**Two prefixes at once is the hazard, and it is silent.** `PREFIX` defaults to
+`/usr/local` while the line above recommends `$HOME/.local`, so following this
+file after an earlier `sudo make install` leaves two builds installed. They do
+not conflict at install time — they conflict at connect time, and whichever
+daemon starts first answers the socket, which makes sibling-first autospawn moot
+because it only fires when nothing is answering. The protocol skips frames it
+does not recognize, so an older daemon turns every newer message into a silent
+no-op with no error anywhere: a stale daemon is an unpatched daemon.
+
+Two things follow, both enforced rather than documented:
+
+- `make install` compares the binary it just installed against the other common
+  prefixes and warns, naming both paths, when they differ
+  (`tools/check_install_paths.sh`; skipped when `DESTDIR` is set, since those
+  prefixes then belong to the build host). It warns and exits 0 — a leftover
+  binary must not fail somebody's install.
+- The launchd/systemd units in `contrib/` are **templates** (`*.in`) with a
+  `@BINDIR@` placeholder. `make install` renders them per-`PREFIX`. Copying a
+  template unsubstituted fails loudly instead of starting the wrong binary.
+  `tests/integration/test_install_units.sh` asserts that `contrib/` contains no
+  ready-to-copy unit at all, which is the form that stays true if someone adds
+  one back.
+
+To find out which daemon is actually answering: `agent-terminal version` prints
+the client build, then the daemon's pid, generation and capabilities.
 
 ## 3. Command surface
 

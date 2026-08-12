@@ -41,6 +41,8 @@ permissions, and session directories run exactly as shipped.
 | TC-17 | hostile peer on the socket | a fake daemon binds `default.sock` and answers `attach` with a MSG_ERR whose `msg_len` (65535) exceeds its own frame; then with a well-formed error | first: rc≠0, nothing long printed, no sanitizer report; second: the message still reaches the user | PASS³ |
 | TC-18 | **one client cannot exhaust daemon memory** | over the wire: `NEW_SESSION` at 65535×65535 + `SPLIT_PANE` + a child that keeps printing, then **disconnect**; a 200×50 session alongside it; sample daemon RSS for 4 s; `ls` | `ls` reports `1000x1000` and no `65535` anywhere; the 200×50 session is untouched; peak RSS ≤ 128 MiB | PASS⁴ |
 | TC-19 | **silent connections cannot lock the user out** | 40 `connect()`s that send zero bytes (`MAX_CLIENTS` is 32), held open; probe a real HELLO during the flood, then again after the deadline; separately, a client that HELLOs and then idles 7 s | during: the probe is refused (the denial is real); within ~6 s: a probe completes HELLO and the daemon logs the deadline drop; the idle HELLO'd client still gets its PONG | PASS⁴ |
+| TC-20 | **the shipped service unit names the prefix you installed to** | `make install PREFIX=/opt/at-install-test DESTDIR=…`, then parse the rendered plist with `plistlib` and grep the systemd `ExecStart`; then install again to a *second* prefix | both units exec `<PREFIX>/bin/agent-terminald`, neither contains a placeholder, the template-only note, or `/usr/local/bin`; `<PREFIX>/bin` is first on the launchd `PATH` with `/usr/bin` and `/bin` still present; the default prefix lists `/usr/local/bin` exactly once; the second install re-renders instead of reusing the first | PASS⁵ |
+| TC-21 | **an install that leaves a different daemon elsewhere says so** | drive `tools/check_install_paths.sh` with three synthetic prefixes — a differing binary, a byte-identical one, a symlink to the installed copy — and once with `cmp` hidden by an empty `PATH` | the differing copy warns and the warning names **both** paths; rc is 0 in every case, including the warning one; silence for identical bytes, for the symlink, and for an absent prefix; with `cmp` unavailable it prints `DID NOT RUN` rather than nothing | PASS⁵ |
 
 ¹ TC-07 **failed on the build under test** and exposed BUG-1 (below). It passes since v22.
 ² History was empty for this session — analyzed and confirmed **by design**, two documented
@@ -56,6 +58,13 @@ that already scrolled off survives on disk regardless).
 round 2 below). Measured on the unfixed daemon: `ls` reported `65535x65535` and peak RSS was
 163 MiB; after the clamp, `1000x1000` and 61 MiB. The geometry assertion is the primary one
 precisely because it differs by 65× while RSS differs by only 1.3× against a portable ceiling.
+
+⁵ TC-20/TC-21 are new in security round 4 below and cover the install path rather than the
+running daemon. Both fail against the previous tree: TC-20 because the units had
+`/usr/local/bin` written into them, TC-21 because no check existed. Measured on this machine
+before the change: `/usr/local/bin/agent-terminald` and `~/.local/bin/agent-terminald` were
+byte-identical (`5a61d0dc7306c310…`) **only because the installed plist had been hand-edited**
+to the second path — the shipped copy said the first.
 
 ## BUG-1 (found by TC-07, fixed in v22): reload was dead on macOS
 
@@ -528,6 +537,108 @@ the two directions of the drift assertion and a vacuity guard, since a test that
 sources through `import.meta.glob` passes trivially if the glob matches nothing. Full gate
 after `npm run build`: vitest 132 tests in 21 files, `cargo test --workspace` 119 tests,
 clippy `-D warnings` clean, `tsc --noEmit` clean, frontend bundle unchanged at 500.85 kB.
+
+## Security round 4 (2026-08-12): what the uid boundary really means, and the install path
+
+Rounds 1–3 fixed defects *inside* the trust model. This round is about the model itself, and
+about the one way the project could hand somebody an unpatched daemon while every test stayed
+green. One half changes only words; the other half changes the build.
+
+### The threat model, stated instead of implied
+
+`SECURITY.md` said "single-user, local-only tool" and left the consequence to be inferred. The
+consequence is worth a sentence of its own: the daemon authenticates *who* connects — the
+peer's uid — and then authorizes *everything*. After `MSG_HELLO` any connected client may list
+every session, attach to every session, inject keystrokes into every session, kill any of them,
+and reload the daemon. There is no per-session token and no capability scoping, so **a command
+running inside session A can connect to the socket and take full control of session B** — not
+by exploiting a bug, but by using the protocol as designed.
+
+This is the same model as tmux and screen, and the two layers defending it are the right ones
+and verified correct in round 1 (socket 0600 inside a 0700 directory; peer-uid check
+fail-closed before the protocol is spoken). What they buy is that *other* users cannot reach
+your sessions; within your own uid they buy nothing, because a process running as you is
+indistinguishable from you. It is called out because this project's selling point is running
+*agents* inside sessions, which is exactly where "everything running as you is equally trusted"
+stops matching what people assume.
+
+Two limits on how far such a takeover escalates were re-checked by reading the tree rather than
+quoted from the previous round: session argv reaches **one** `execvp` call site
+(`src/daemon/pty.c:76`) and never a shell — zero occurrences of `system(` or `popen(` anywhere
+under `src/` — so argv content is literal argument bytes, and an argv-injection bug elsewhere
+could start a *wrong program* but could not become metacharacter injection. And there are zero
+`setuid`/`setgid`/`seteuid` calls: `sudo make install` installs a binary that still runs as
+you, so taking over the daemon gains an attacker exactly the privileges they already had. The
+GUI webview is likewise inside the boundary rather than a sandbox, which is why the defenses
+that matter there are the ones keeping *foreign code out of the webview* (no `script-src`
+relaxation, no reachable remote origin, no devtools in release, five production dependencies),
+not a gate on the argv it sends. No code changed for any of this; the point is that a reader of
+`SECURITY.md` should not have to derive it.
+
+### The install path could hand you a stale daemon, silently
+
+This one is a real defect, and it is not in any C file. `make install` defaults to
+`PREFIX=/usr/local`; `AGENTS.md` recommends `PREFIX=$HOME/.local` (sudo blocks on a password
+prompt with no tty, so agents in particular are told to use it); and both service units had
+`/usr/local/bin/agent-terminald` written into them, with a launchd `PATH` block that omitted
+`~/.local/bin`. Follow both documents and launchd or systemd starts whatever sits at
+`/usr/local/bin` — after an earlier install, an **older build**.
+
+Nothing reports that. The client autospawns the `agent-terminald` next to its own binary, but
+only when nothing is answering the socket, so the old daemon wins by answering first; and the
+protocol skips frames it does not recognize, so every message the old build predates becomes a
+silent no-op — new key bindings do nothing, new fields read as absent, no error anywhere. A
+stale daemon is an unpatched daemon, and it looks like a feature that does nothing.
+
+Measured on this machine before the change: `/usr/local/bin/agent-terminald` and
+`~/.local/bin/agent-terminald` were byte-identical (`5a61d0dc7306c310…`) — but only because the
+installed `~/Library/LaunchAgents/dev.agentterminal.daemon.plist` had been **hand-edited** to
+the `.local` path while the repo's shipped copy still said `/usr/local/bin`. The hazard had
+already been worked around by hand, once, by the only person who would have noticed.
+
+Two changes:
+
+1. **The units are templates rendered per-`PREFIX` at install time** (`contrib/*.in` →
+   `PREFIX/share/agent-terminal/`), with the install prefix substituted into launchd's
+   `ProgramArguments[0]`, systemd's `ExecStart`, and the launchd `PATH`. `contrib/` no longer
+   contains a copyable unit at all, and TC-20's first assertion is about the repo rather than
+   the output for that reason: a test that only checked the rendered copy would keep passing if
+   someone re-added a ready-made `.plist` beside the template, and that file *is* the bug. The
+   explanatory paragraph in each template is deleted at render time (`@TEMPLATE_NOTE_BEGIN@` /
+   `…END@`, stripped **before** substitution) so the installed file never claims to be
+   something you still have to edit — the first draft rendered "THIS IS A TEMPLATE" into the
+   usable copy, complete with a substituted path.
+2. **`make install` warns when a byte-different `agent-terminald` exists at another common
+   prefix** (`tools/check_install_paths.sh`, compared with `cmp`, naming both paths). It always
+   exits 0: a leftover binary elsewhere is something to tell the user about, not a reason to
+   fail their `sudo make install`. Under `DESTDIR` the check is skipped and says so, since the
+   prefixes it inspects belong to the build host and not to the staging root.
+
+An unsubstituted placeholder now fails loudly on both platforms rather than starting the wrong
+binary: launchd rejects a `ProgramArguments[0]` that is not an executable path, and systemd
+reads a leading `@` in `ExecStart` as its argv[0]-override prefix, leaving a *relative* path,
+which `ExecStart` does not accept — the unit is refused.
+
+Regression coverage: `tests/integration/test_install_units.sh` (TC-20 + TC-21), 11 assertions.
+13/13 mutants killed, 0 survivors, 0 errors — across the Makefile's render rule and prefix
+handling, both templates, and every branch of the check script (drop the warning, drop the
+`cmp` guard, drop the "both paths" line, reverse the identical-bytes skip). Two mutants first
+came back as harness **ERRORs** rather than survivors, correctly: the mutation regex had drifted
+against the `UNIT_PATH :=` line and edited nothing, and an edit that changes no bytes proves
+nothing about the guard. Restoring the four mutated files was then verified byte-for-byte in
+Python against a deliberate drift control, because the first verification loop was written in
+zsh, where an unquoted `set -- $pair` does not word-split — every "ok" it printed had compared
+an empty string to an empty string.
+
+One finding from this round is a build-system bug worth recording separately: the rendered unit
+initially depended only on its template, not on the *value* of `PREFIX`, so
+`make install PREFIX=/a` followed by `make install PREFIX=/b` reinstalled `/a`'s unit — the
+stale-path bug arriving through the build system instead of through the docs. The first fix, a
+content-compare stamp file, **also failed**, because GNU make 3.81 (what macOS ships) compares
+mtimes at 1-second granularity and the whole sequence runs inside one second. The fix that
+holds is the idiom already used for `$(VERSION_H)`: a `FORCE` prerequisite, render to `$@.tmp`,
+and `cmp -s` then either discard or move — always re-run, but leave the mtime alone when the
+bytes are unchanged. TC-20's second-prefix install is the assertion that pins it.
 
 ## Reproducing this UAT
 
