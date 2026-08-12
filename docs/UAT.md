@@ -39,6 +39,8 @@ permissions, and session directories run exactly as shipped.
 | TC-15 | regression | full unit + integration suites after the TC-07 fix | all green | PASS |
 | TC-16 | **session A cannot forge session B's history** | with session `victim` live, start a second session and write a marker through every fd 3–40 it might have inherited; then read the fd table of a third session's child | no fd of any child names a `.log`; `victim`'s history contains no marker | PASS³ |
 | TC-17 | hostile peer on the socket | a fake daemon binds `default.sock` and answers `attach` with a MSG_ERR whose `msg_len` (65535) exceeds its own frame; then with a well-formed error | first: rc≠0, nothing long printed, no sanitizer report; second: the message still reaches the user | PASS³ |
+| TC-18 | **one client cannot exhaust daemon memory** | over the wire: `NEW_SESSION` at 65535×65535 + `SPLIT_PANE` + a child that keeps printing, then **disconnect**; a 200×50 session alongside it; sample daemon RSS for 4 s; `ls` | `ls` reports `1000x1000` and no `65535` anywhere; the 200×50 session is untouched; peak RSS ≤ 128 MiB | PASS⁴ |
+| TC-19 | **silent connections cannot lock the user out** | 40 `connect()`s that send zero bytes (`MAX_CLIENTS` is 32), held open; probe a real HELLO during the flood, then again after the deadline; separately, a client that HELLOs and then idles 7 s | during: the probe is refused (the denial is real); within ~6 s: a probe completes HELLO and the daemon logs the deadline drop; the idle HELLO'd client still gets its PONG | PASS⁴ |
 
 ¹ TC-07 **failed on the build under test** and exposed BUG-1 (below). It passes since v22.
 ² History was empty for this session — analyzed and confirmed **by design**, two documented
@@ -49,6 +51,11 @@ that already scrolled off survives on disk regardless).
 
 ³ TC-16/TC-17 **failed on v22** and are the security round below. Both pass since the
 `O_CLOEXEC` + `msg_len` fixes, and reverting either fix makes them fail again.
+
+⁴ TC-18/TC-19 likewise failed before the geometry clamp and the HELLO deadline (security
+round 2 below). Measured on the unfixed daemon: `ls` reported `65535x65535` and peak RSS was
+163 MiB; after the clamp, `1000x1000` and 61 MiB. The geometry assertion is the primary one
+precisely because it differs by 65× while RSS differs by only 1.3× against a portable ceiling.
 
 ## BUG-1 (found by TC-07, fixed in v22): reload was dead on macOS
 
@@ -342,6 +349,75 @@ observed failing against the pre-fix source restored by `cp` — the fd-table as
 write probe and the `msg_len` length assertion independently — and the `_Static_assert` was
 observed failing the build. Full gate after the fixes: 8 unit suites under ASan (0 failures),
 24/24 integration scripts on release, release build with 0 warnings.
+
+## Security round 2 (2026-08-12): denial of service by a same-uid client
+
+The uid is this daemon's entire trust boundary, so "authenticate harder" is not an available
+defense — any process running as the user may connect and is fully authorized. What *is*
+available is refusing to let one client consume an unbounded share of memory or of the client
+slot table, which matters more here than in a plain multiplexer: the product exists so that a
+long-running agent survives, and a daemon killed by the OOM killer takes every session's PTY
+with it. Three fixes, each with the guard observed failing:
+
+1. **Geometry was clamped by the VT engine but not by the model** (`session.c`, 3 entry
+   points; `server.c`, 3 wire sites). libvt clamps its own grid to 1000×1000 *before*
+   `calloc`, so the engine allocation was never the problem — but `session`/`pane` kept the
+   raw `u16` the client sent, and the compositor pads every row out to `pane.cols` while
+   drawing only the cells the engine holds. At `cols=65535` that is ~64 KiB of spaces per row
+   and ~64 MB per frame, rebuilt on the 20 ms tick while any pane is dirty. Two properties
+   make it worse than a large allocation: it costs the attacker nothing but a `connect()`, and
+   it **survives the attacking client disconnecting**, because `session_composite_all` does
+   not check for an attached client (`ls` shows `0 clients, 2 panes` and the cost continues).
+   The clamp went in where geometry *enters* the model, so every rectangle derived from it
+   later — layout reflow, zoom, split — is bounded by construction; a clamp at those derived
+   sites would mask a layout bug instead of bounding an input. `VT_ROWS_MAX`/`VT_COLS_MAX`
+   moved into the public `vt.h` for the same reason: a limit a caller cannot see is a limit
+   the caller cannot honor, and it is the caller's unclamped copy that does the damage.
+   Beyond the audited list, a **third** entry point turned up while fixing it —
+   `session_import_pane` reads per-pane geometry straight out of the handoff state file
+   rather than deriving it from the (clamped) view, so a torn file reaches the compositor
+   without passing the wire clamp at all.
+2. **`PRE_HELLO_BUDGET` bounds bytes, not time** (`server.c`, `main.c`). A peer that connects
+   and sends *nothing* spends none of that budget and holds its slot forever; at
+   `MAX_CLIENTS 32`, `server_accept` then has no slot and closes every real client
+   immediately, so one process with 32 idle sockets locks the user out of their own sessions.
+   The fix is a per-client `connected_at` and a 5 s deadline, necessarily driven by the daemon
+   tick rather than the read path: a silent peer generates no readable event, so no amount of
+   care where bytes arrive can ever notice it. 5 s is ~3 orders of magnitude above a local
+   HELLO round trip, which is the margin that keeps it from firing on a real client.
+3. **`reflow_node` had no cycle guard** (`layout.c`). Node indices are raw `int8_t` that can
+   arrive from a handoff state file; `handoff.c` range-clamps them, which buys safe *indexing*
+   but says nothing about termination, so `child[0] == self` — or any edge back to an ancestor
+   — recursed until the stack died. A depth cap of `LAYOUT_NODES` cannot reject a legitimate
+   layout, since `LAYOUT_MAX_LEAVES` is 6 and the deepest real tree is 5. The misleading
+   comment at the `handoff.c` clamp was corrected to say which property it actually buys.
+
+Two **methodological results** worth more than the fixes:
+
+- **The intuitive attack frame was silently defeated by an unrelated defense.** The first
+  probe pipelined HELLO + NEW_SESSION + SPLIT_PANE, which coalesce into one read; that read
+  exceeds `PRE_HELLO_BUDGET` while `hello_done` is false, so the daemon disconnected the
+  probe as garbage and reported a *clean* 2 MiB daemon with no session at all. Same shape as
+  round 1's NUL-terminated `%.*s` frame: a probe that never reaches the vulnerable code looks
+  exactly like a daemon that is not vulnerable. The shipped test reads HELLO_OK before sending
+  anything else, and says why in a comment.
+- **RSS is the wrong primary assertion.** 163 MiB exceeds the portable 128 MiB ceiling by only
+  1.3×, so the check is one machine away from being a coin flip; the daemon's own `ls` output
+  differs by 65× (`65535x65535` vs `1000x1000`) and is exact. RSS is kept as an explicitly
+  weaker second net at the ceiling `test_soak.sh` already proves portable.
+
+Regression coverage: `tests/integration/test_dos_limits.sh` (TC-18 + TC-19) and
+`reflow_survives_cyclic_tree` in `tests/unit/test_layout.c` — four hostile graphs the public
+API cannot construct, where the pass condition is that the test *terminates at all*, plus a
+maximum-depth legal tree as the negative control. Every guard was mutation-checked against
+pre-fix source restored by `cp`: the layout cycle guard 4/4 (each case observed alone, two as
+an ASan stack-overflow and two as a UBSan out-of-range index), and **all nine** assertions of
+the integration test observed failing independently, including the ones a short-circuit would
+otherwise hide — the identity-clamp mutant, an over-eager clamp that squashes 200×50, a probe
+that skips the split, `MAX_CLIENTS 128` (so the flood no longer denies anything, which must
+fail the *positive control* rather than pass the test), and a reap whose log line changed but
+whose behavior did not. Full gate: 9 unit suites under ASan/UBSan (6,352 checks, 0 failures),
+25/25 integration scripts on release, release build with 0 warnings.
 
 ## Reproducing this UAT
 

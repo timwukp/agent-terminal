@@ -27,6 +27,12 @@ void client_geometry(const struct client *c, uint16_t *cols, uint16_t *rows);
 int server_init(const char *socket_path, int inherited_fd);
 void server_shutdown(void);
 
+/* Drop clients that connected but never sent MSG_HELLO. Must be driven by the
+ * daemon tick: a silent peer produces no readable event, so no amount of care
+ * in the read path can reclaim its slot. Without this, MAX_CLIENTS silent
+ * connections deny service to every real client. */
+void server_reap_idle(void);
+
 /* Disconnect every client and hand back the listen fd for the next image to
  * inherit. The socket path is deliberately NOT unlinked. */
 int server_prepare_handoff(void);

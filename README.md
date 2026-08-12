@@ -432,16 +432,18 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,340 checks across 9 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 6,352 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
-  geometry, input-chord scanner, pager, path validation, event loop) — run
-  under ASan+UBSan.
-- **Integration**: 22 end-to-end scripts covering the failure modes this tool
+  geometry including cyclic trees a state file could carry, input-chord
+  scanner, pager, path validation, event loop) — run under ASan+UBSan.
+- **Integration**: 25 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving, pane splits / directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,
-  path-traversal probes, close races, honest error reporting. Run on macOS
-  and Linux in CI on every PR.
+  path-traversal probes, close races, honest error reporting, and the
+  same-uid abuse cases from the security rounds (inherited scrollback fds,
+  oversized geometry, connections that never identify themselves). Run on
+  macOS and Linux in CI on every PR.
 - **End-user UAT with a real Claude Code session** — the actual workload,
   driven through a real pty with real keystrokes, two full rounds (27
   cases): crash-reattach with the same process answering, panes with arrow

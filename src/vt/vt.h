@@ -94,6 +94,18 @@ typedef struct {
 
 typedef struct vt vt;
 
+/* Largest grid the engine will allocate. vt_new/vt_resize clamp SILENTLY to
+ * these, which keeps libvt's own allocation bounded -- but a caller that keeps
+ * its OWN copy of the geometry must clamp with the same limits or the two
+ * diverge, and the divergence is an amplifier rather than a cosmetic mismatch.
+ * The daemon's compositor pads every row out to the caller's pane width while
+ * drawing only the cells the engine holds, so an unclamped 65535-wide pane
+ * emits ~64 KiB of padding per row, ~64 MB per frame, rebuilt on the render
+ * tick. Part of the public contract for that reason: a clamp the caller cannot
+ * see is a clamp the caller cannot honor. */
+#define VT_ROWS_MAX   1000
+#define VT_COLS_MAX   1000
+
 /* Any callback may be NULL. Returns NULL on allocation failure. */
 vt *vt_new(uint16_t rows, uint16_t cols, const vt_callbacks *cb, void *ud);
 void vt_free(vt *v);

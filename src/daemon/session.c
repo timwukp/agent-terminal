@@ -16,6 +16,24 @@
 
 static session g_sessions[MAX_SESSIONS];
 
+/* Geometry arrives as a raw u16 from two untrusted places: a client's
+ * NEW_SESSION/ATTACH/RESIZE, and a handoff state file that may be torn. libvt
+ * clamps its own grid to VT_*_MAX, so the VT allocation was never the problem;
+ * the problem is session/pane keeping the UNCLAMPED copy, because the
+ * compositor pads each row out to pane.cols while drawing only what the engine
+ * holds (composite.c's emit_pane_row). 65535x65535 therefore costs ~64 MB per
+ * composite frame, rebuilt whenever a pane is dirty, and it outlives the client
+ * that asked for it -- session_composite_all does not require an attached
+ * client. Clamp where geometry ENTERS the model so every rectangle derived from
+ * it later (layout reflow, zoom, split) is bounded by construction; the derived
+ * sites deliberately have no clamp of their own, since one there would mask a
+ * layout bug instead of bounding an input.
+ *
+ * Exported (not static) so the wire edge in server.c clamps with the SAME
+ * numbers: two copies of the ternary would be two things to keep in step. */
+uint16_t session_clamp_cols(uint16_t cols) { return cols > VT_COLS_MAX ? VT_COLS_MAX : cols; }
+uint16_t session_clamp_rows(uint16_t rows) { return rows > VT_ROWS_MAX ? VT_ROWS_MAX : rows; }
+
 static void pane_pty_readable(int fd, short revents, void *ud);
 static void session_apply_layout(session *s);
 static void session_send_layout(session *s);
@@ -244,8 +262,8 @@ static session *session_alloc(const char *name, uint16_t cols, uint16_t rows) {
 
     memset(s, 0, sizeof *s);
     strncpy(s->name, name, SESSION_NAME_MAX);
-    s->view_cols = cols ? cols : 80;
-    s->view_rows = rows ? rows : 24;
+    s->view_cols = session_clamp_cols(cols ? cols : 80);
+    s->view_rows = session_clamp_rows(rows ? rows : 24);
     layout_init(&s->lt, 0); /* pane slot 0 fills the view */
     layout_reflow(&s->lt, s->view_cols, s->view_rows);
     s->active_id = 0;
@@ -350,6 +368,11 @@ pane *session_import_pane(session *s, uint8_t slot, uint8_t id, int master_fd,
         errno = EINVAL;
         return NULL;
     }
+    /* Pane geometry is stored per-pane in the state file, NOT recomputed from
+     * the view, so a torn or crafted file reaches the compositor without
+     * passing the view clamp above. */
+    cols = session_clamp_cols(cols);
+    rows = session_clamp_rows(rows);
     /* pane_alloc scans for a free slot from 0; the state file names an exact
      * slot because the layout tree stores pane INDICES. Claim neighbours
      * temporarily? No — just allocate directly into the named slot. */
@@ -939,6 +962,8 @@ void session_stdin(session *s, const uint8_t *data, uint32_t len) {
 }
 
 void session_resize(session *s, uint16_t cols, uint16_t rows) {
+    cols = session_clamp_cols(cols);
+    rows = session_clamp_rows(rows);
     if (!cols || !rows || (cols == s->view_cols && rows == s->view_rows)) return;
     s->view_cols = cols;
     s->view_rows = rows;
