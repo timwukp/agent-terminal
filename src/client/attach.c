@@ -87,10 +87,13 @@ static int hello(int fd) {
         got += (size_t)r;
     }
     if (hdr[4] == MSG_ERR) {
-        if (plen >= 4) {
-            uint16_t mlen = get_u16(payload + 2);
+        /* mlen is a length claimed by whatever answered the socket, so it must
+         * be bounded by the frame we actually read: `payload` is a 4096-byte
+         * STACK buffer, and plen=4 with mlen=65535 would walk 64 KB past it.
+         * Same check as client/main.c's ERR path. */
+        uint16_t mlen = plen >= 4 ? get_u16(payload + 2) : 0;
+        if (mlen && 4u + mlen <= plen)
             fprintf(stderr, "agent-terminal: %.*s\n", (int)mlen, payload + 4);
-        }
         return -1;
     }
     if (hdr[4] != MSG_HELLO_OK) return -1;
@@ -637,8 +640,12 @@ int attach_run(const char *name, char *const argv[], int argc) {
                              * nothing sensible can follow it. */
                             bool fatal = !attached_ok || code == ERR_VERSION;
                             if (!fatal) {
-                                if (len >= 4) {
-                                    uint16_t mlen = get_u16(scratch + 2);
+                                /* Bound the claimed length by the frame: an
+                                 * oversized mlen here reads past the validated
+                                 * bytes into the rest of `scratch`, printing
+                                 * uninitialized heap at the user's terminal. */
+                                uint16_t mlen = len >= 4 ? get_u16(scratch + 2) : 0;
+                                if (mlen && 4u + mlen <= len) {
                                     /* Visible in raw mode: CR+LF positions the
                                      * message on a fresh line; the session's
                                      * next repaint overwrites it. */
@@ -649,10 +656,9 @@ int attach_run(const char *name, char *const argv[], int argc) {
                             }
                             if (pg) { pager_leave(pg); pager_free(pg); pg = NULL; }
                             tty_raw_leave();
-                            if (len >= 4) {
-                                uint16_t mlen = get_u16(scratch + 2);
+                            uint16_t mlen = len >= 4 ? get_u16(scratch + 2) : 0;
+                            if (mlen && 4u + mlen <= len)
                                 fprintf(stderr, "agent-terminal: %.*s\n", (int)mlen, scratch + 4);
-                            }
                             ring_free(&in);
                             free(scratch);
                             close(fd);

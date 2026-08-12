@@ -166,7 +166,7 @@ static int session_dir(const char *name, char *out, size_t outsz) {
  * validated byte size. Truncates the file at the first corrupt record. */
 static uint64_t scan_log(const char *path, uint64_t *valid_size) {
     *valid_size = 0;
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
     uint64_t next = 0, off = 0;
     uint8_t hdr[16];
@@ -221,7 +221,14 @@ scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
     uint64_t next_cur = scan_log(sb->log_path, &valid);
     sb->next_seq = next_cur > next_old ? next_cur : next_old;
 
-    sb->fd = open(sb->log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    /* O_CLOEXEC is load-bearing, not hygiene: this fd is opened by the DAEMON
+     * and every session's child is forked and exec'd from that same process, so
+     * without it a program running in one pane inherits an append-write
+     * descriptor to every other session's and pane's history file — and
+     * `history` and copy-mode present those bytes as authoritative. The rest of
+     * the daemon already closes on exec (lockfile, handoff state, the listener,
+     * client sockets, PTY masters, the signal pipe); these log fds were the gap. */
+    sb->fd = open(sb->log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (sb->fd < 0) {
         free(sb->ring);
         free(sb);
@@ -260,7 +267,9 @@ static void maybe_rotate(scrollback *sb) {
     char old_path[648];
     snprintf(old_path, sizeof old_path, "%s.1", sb->log_path);
     rename(sb->log_path, old_path); /* clobbers previous .1 */
-    sb->fd = open(sb->log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    /* Same reason as sb_open_pane: rotation must not hand a fresh inheritable
+     * fd to the next child a long-lived session spawns. */
+    sb->fd = open(sb->log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     sb->file_size = 0;
 }
 
@@ -334,7 +343,7 @@ void sb_close(scrollback *sb) {
 /* ---- offline log reading (history subcommand, dead sessions) ---- */
 
 static int64_t read_one_log(const char *path, sb_read_cb cb, void *ud) {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     int64_t count = 0;
     uint64_t off = 0;

@@ -107,13 +107,25 @@ static void client_err(client *c, uint16_t code, const char *msg) {
 
 /* ---- request handlers ---- */
 
+/* The list handlers serialize every session into one PROTO_MAX_PAYLOAD buffer,
+ * so their safety is a relationship between three constants declared in two
+ * other headers. Both handlers also break out at the bound below, but a runtime
+ * break silently TRUNCATES the user's session list; this assertion is what
+ * turns "someone raised MAX_SESSIONS" from a buffer overflow into a build
+ * failure. 19 is the per-entry overhead of the larger of the two layouts,
+ * handle_list2: 2 entry-length prefix + 1 name length + 2 cols + 2 rows + 1 live
+ * + 1 nclients + 4 pid + 4 exit status + 1 npanes + 1 zoomed, with the name
+ * itself counted by SESSION_NAME_MAX; the leading 2 is the list's count field. */
+_Static_assert(2 + (size_t)MAX_SESSIONS * (SESSION_NAME_MAX + 19) <= PROTO_MAX_PAYLOAD,
+               "MAX_SESSIONS x max session entry no longer fits one MSG_SESSION_LIST "
+               "payload: raise PROTO_MAX_PAYLOAD or paginate the list message");
+
 static void handle_list(client *c) {
     uint8_t payload[PROTO_MAX_PAYLOAD];
     size_t off = 2;
     uint16_t count = 0;
-    for (int i = 0;; i++) {
+    for (int i = 0; i < MAX_SESSIONS; i++) {
         session *s = session_at(i);
-        if (i >= MAX_SESSIONS) break;
         if (!s) continue;
         size_t nlen = strlen(s->name);
         int ncli = 0;
@@ -125,6 +137,13 @@ static void handle_list(client *c) {
          * while sessions have one pane; `ls` showing panes needs a new
          * message, not an extension of this one. */
         pane *ap = session_active_pane(s);
+        /* Bound the write like handle_list2 does. Today MAX_SESSIONS(64) x
+         * (15 + 63) is far under PROTO_MAX_PAYLOAD, so this never fires — but
+         * the safety was resting entirely on a cap declared in another header,
+         * which makes raising that cap a buffer overflow rather than a
+         * truncated list. */
+        size_t entry = 1 + nlen + 2 + 2 + 1 + 1 + 4 + 4;
+        if (off + entry > sizeof payload) break;
         payload[off++] = (uint8_t)nlen;
         memcpy(payload + off, s->name, nlen);
         off += nlen;

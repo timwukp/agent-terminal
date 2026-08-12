@@ -8,6 +8,14 @@
 BUILD ?= release
 O := build/$(BUILD)
 
+# Stated explicitly because the first rule in this file is the $(VERSION_H)
+# stamp, not `all`, so a bare `make` regenerated one header and built NOTHING
+# while reporting success. The binaries then stayed at whatever a previous
+# `make all` produced, which is the worst possible failure: the test suite
+# relinks its own objects and passes, integration tests run last week's daemon,
+# and a source fix appears not to work. Keep this above the first rule.
+.DEFAULT_GOAL := all
+
 UNAME_S := $(shell uname -s)
 
 CC ?= cc
