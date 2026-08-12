@@ -266,9 +266,12 @@ keyboard is dead. A unit test asserts the shipped policy keeps that scheme.
 
 What works today: a sidebar listing live sessions with pane count, zoom badge
 and client count (the same data as `ls`, polled); click to attach and render;
-one-click templates for a new Claude or shell session; kill a session; keyboard
-input; click-to-focus inside splits; a toolbar for split / zoom / close-pane;
-and an outline on the active pane so a split session shows where input goes.
+one-click templates for a new Claude or shell session; kill a session (right-click,
+asked first by a prompt the app draws itself — a platform `confirm()` dialog is a
+dead button in this webview, so the only destructive action here does not depend
+on one); keyboard input; click-to-focus inside splits; a toolbar for split / zoom /
+close-pane; and an outline on the active pane so a split session shows where input
+goes.
 
 The GUI also tells you when a session **finishes a long task while you are
 elsewhere**: two triggers, OR-ed — the terminal bell (xterm's parser, so OSC

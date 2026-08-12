@@ -117,7 +117,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-04 | CLI coexistence | `agent-terminal attach -s <name>` in a terminal while the GUI shows it | both render the same output live; `ls` shows 2 clients |
 | GUI-05 | session switch | click between two sessions repeatedly | each switch repaints the correct session; input goes to the newly selected one |
 | GUI-06 | templates | click *+ New Claude session* / *+ New shell* | session created with a free name (`claude`, then `claude-2`…), appears in sidebar, renders |
-| GUI-07 | kill | right-click a session, confirm | session ends; row disappears; `ls` agrees |
+| GUI-07 | kill | right-click a throwaway session; read the prompt; press Escape; right-click again and click **Kill**. Do this in a real `.app` bundle, not only the debug binary | the prompt appears **inside the window** in place of the row, naming that session; Escape and Cancel restore the row and kill nothing; Kill ends the session, the row disappears and `ls` agrees. A prompt that never appears means the build regressed to `window.confirm`, which is a no-op on macOS |
 | GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
 | GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
 | GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
@@ -510,6 +510,16 @@ button is **silently inert** in this build (fail-safe, and GUI-07 was never eyeb
 round-1 note that GUI-05..09 remain unconfirmed is why it went unnoticed). It gets its own
 stacked PR with an in-app confirmation and the missing `Sidebar` test, rather than being folded
 into a security change.
+
+**Follow-up, in the next PR:** fixed. The prompt is now rendered by the app, in place of the
+row it is about, with focus on Cancel and Escape to dismiss — and two guards the platform
+dialog never had, because a modal dialog blocks the poll while an in-app one does not: the
+prompt is dropped if its session dies underneath it, and dropped if that name reappears on a
+different pid (the daemon addresses sessions by name, and `nextSessionName` reuses a freed
+one, so a prompt left standing across that gap would kill a session its reader never saw).
+Seven tests in `src/sidebar/Sidebar.test.tsx`, which did not exist; 6/6 mutants killed,
+including restoring `window.confirm` with a spy that *accepts* — a spy returning false would
+be satisfied by a component that does nothing at all, which is precisely the bug.
 
 Regression coverage: 5 new tests in `hooks.rs` (9 total in-crate) and
 `src/capabilities.test.ts` (4). Mutation-checked against pre-fix source restored by `cp`: the

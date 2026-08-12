@@ -26,7 +26,13 @@ One window, three regions:
   template's argv. Defaults ship in `app/tauri/templates.json`
   (`New Claude session` → `["claude"]`, `New shell` → `[$SHELL]`);
   user overrides in `~/.agent-terminal/gui-templates.json`.
-- Right-click → kill session (confirm dialog; `MSG_KILL_SESSION`).
+- Right-click → kill session (`MSG_KILL_SESSION`), asked first by an **in-app**
+  confirmation that replaces the row it is about — never `window.confirm`, which
+  on macOS completes false without showing anything (wry's WKWebView delegate has
+  no `runJavaScriptConfirmPanel`), so a platform dialog here is not a weaker guard
+  but a dead button. Focus lands on Cancel; Escape dismisses; the prompt is
+  dropped if its session dies or its name reappears on a different pid, since the
+  daemon addresses sessions by name and a freed name gets reused.
 
 ## Terminal region
 

@@ -238,7 +238,9 @@ policy 保留了那個 scheme。
 
 目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
 (與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
-Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格;
+Claude 或 shell session;結束 session(右鍵,並且會先詢問——詢問的視窗是 app
+自己畫的,因為平台的 `confirm()` 對話框在這個 webview 裡是死的按鈕,所以這裡
+唯一的破壞性操作不依賴它);鍵盤輸入;在分割中點擊切換焦點窗格;
 分割/縮放/關閉窗格的工具列;以及作用中窗格的外框標示,讓分割的 session
 一眼看出輸入會進到哪裡。
 
