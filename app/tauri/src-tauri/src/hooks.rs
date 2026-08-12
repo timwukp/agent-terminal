@@ -531,7 +531,10 @@ mod tests {
         std::fs::remove_file(&link).unwrap();
         write(&link, "#!/bin/sh\nexit 2\n");
         let src = read_script_gated(&cache, &link.display().to_string()).unwrap();
-        assert!(src.contains("exit 2"), "a real script at the same path must be served");
+        assert!(
+            src.contains("exit 2"),
+            "a real script at the same path must be served"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -549,7 +552,10 @@ mod tests {
         write(&b, "b");
         let ma = std::fs::symlink_metadata(&a).unwrap();
         let fa = std::fs::File::open(&a).unwrap().metadata().unwrap();
-        assert!(same_file(&ma, &fa), "one file through lstat and fstat must match");
+        assert!(
+            same_file(&ma, &fa),
+            "one file through lstat and fstat must match"
+        );
         assert!(
             !same_file(&ma, &std::fs::symlink_metadata(&b).unwrap()),
             "two different files must not compare equal"
@@ -585,7 +591,10 @@ mod tests {
             "the read was not capped: {} bytes came back",
             src.len()
         );
-        assert!(src.contains("truncated"), "a truncated script must say so, not look complete");
+        assert!(
+            src.contains("truncated"),
+            "a truncated script must say so, not look complete"
+        );
         assert_eq!(
             src.len(),
             SCRIPT_READ_MAX as usize + SCRIPT_TRUNCATED.len(),
@@ -595,7 +604,11 @@ mod tests {
         // that: read-then-trim returns the same bytes while still holding
         // the whole file in memory first.
         let (_, read) = read_capped(std::fs::File::open(&script).unwrap()).unwrap();
-        assert_eq!(read, SCRIPT_READ_MAX + 1, "the read itself was never capped");
+        assert_eq!(
+            read,
+            SCRIPT_READ_MAX + 1,
+            "the read itself was never capped"
+        );
 
         // Control: a script exactly AT the cap is complete, and carries no
         // notice — an off-by-one here would libel every large-but-fine file.
@@ -632,8 +645,14 @@ mod tests {
             first.total < lines as u64,
             "one poll consumed all {lines} lines, so the per-poll delta is not bounded"
         );
-        assert!(tail.offset <= LOG_DELTA_MAX, "read past the cap in one poll");
-        assert!(first.chain_ok, "a bounded read must not look like a broken chain");
+        assert!(
+            tail.offset <= LOG_DELTA_MAX,
+            "read past the cap in one poll"
+        );
+        assert!(
+            first.chain_ok,
+            "a bounded read must not look like a broken chain"
+        );
 
         // Nothing was skipped: further polls converge on the whole file.
         let mut last = first;
@@ -643,7 +662,10 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(last.total, lines as u64, "the capped remainder was never read");
+        assert_eq!(
+            last.total, lines as u64,
+            "the capped remainder was never read"
+        );
         assert!(last.chain_ok, "the chain broke across a poll boundary");
         assert_eq!(last.malformed, 0);
         std::fs::remove_dir_all(&dir).ok();
@@ -673,16 +695,33 @@ mod tests {
             }
             s = log_snapshot_at(&path, &mut tail);
         }
-        assert_eq!(tail.offset as usize, huge.len(), "the file was never fully consumed");
-        assert!(tail.partial.is_empty(), "the refused bytes were kept after all");
-        assert_eq!(s.malformed, 1, "the dropped line must be counted exactly once");
-        assert!(!s.chain_ok, "a line that was never hashed cannot leave the chain verified");
+        assert_eq!(
+            tail.offset as usize,
+            huge.len(),
+            "the file was never fully consumed"
+        );
+        assert!(
+            tail.partial.is_empty(),
+            "the refused bytes were kept after all"
+        );
+        assert_eq!(
+            s.malformed, 1,
+            "the dropped line must be counted exactly once"
+        );
+        assert!(
+            !s.chain_ok,
+            "a line that was never hashed cannot leave the chain verified"
+        );
 
         // Resync: the newline that ends the refused line lets real events
         // be read again, so one hostile writer does not blind the panel
         // forever.
         let good = log_line("GENESIS", "after");
-        std::fs::write(&path, format!("{}\n{}\n", String::from_utf8_lossy(&huge), good)).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", String::from_utf8_lossy(&huge), good),
+        )
+        .unwrap();
         let mut s2 = log_snapshot_at(&path, &mut tail);
         for _ in 0..8 {
             if s2.events.len() == 1 {
@@ -690,7 +729,11 @@ mod tests {
             }
             s2 = log_snapshot_at(&path, &mut tail);
         }
-        assert_eq!(s2.events.len(), 1, "no event was parsed after the oversized line");
+        assert_eq!(
+            s2.events.len(),
+            1,
+            "no event was parsed after the oversized line"
+        );
         assert_eq!(s2.events[0].reason, "after");
         std::fs::remove_dir_all(&dir).ok();
     }
