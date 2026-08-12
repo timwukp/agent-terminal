@@ -37,6 +37,8 @@ permissions, and session directories run exactly as shipped.
 | TC-13 | daemon SIGKILL (documented limitation) | SIGKILL the daemon under a live Claude TUI | honest degradation; next `new` works | PASS² |
 | TC-14 | batch automation | `new … -- claude -p '…' < /dev/null`; wait for exit; `history` | marker recoverable after clean exit | PASS |
 | TC-15 | regression | full unit + integration suites after the TC-07 fix | all green | PASS |
+| TC-16 | **session A cannot forge session B's history** | with session `victim` live, start a second session and write a marker through every fd 3–40 it might have inherited; then read the fd table of a third session's child | no fd of any child names a `.log`; `victim`'s history contains no marker | PASS³ |
+| TC-17 | hostile peer on the socket | a fake daemon binds `default.sock` and answers `attach` with a MSG_ERR whose `msg_len` (65535) exceeds its own frame; then with a well-formed error | first: rc≠0, nothing long printed, no sanitizer report; second: the message still reaches the user | PASS³ |
 
 ¹ TC-07 **failed on the build under test** and exposed BUG-1 (below). It passes since v22.
 ² History was empty for this session — analyzed and confirmed **by design**, two documented
@@ -44,6 +46,9 @@ rules compounding: a TUI on the alternate screen never scrolls content into scro
 the final-screen flush runs on session end, which a SIGKILLed daemon never executes. A
 `reload` is the safe upgrade path; SIGKILL loses alt-screen content (primary-screen history
 that already scrolled off survives on disk regardless).
+
+³ TC-16/TC-17 **failed on v22** and are the security round below. Both pass since the
+`O_CLOEXEC` + `msg_len` fixes, and reverting either fix makes them fail again.
 
 ## BUG-1 (found by TC-07, fixed in v22): reload was dead on macOS
 
@@ -280,6 +285,63 @@ browser layer between them.
    symptom. Round 2 spent real time on "typing does nothing" that was a binary built
    2.5 hours before the frontend it was tested against. `build.rs` now refuses to build
    a stale or missing bundle, and app-ci.yml asserts that refusal still happens.
+
+## Security round (2026-08-12, pre-release audit of `main` @ `9a97b36`)
+
+Read-only audits of the daemon, the GUI/IPC surface and repo hygiene, run before the first
+public release on the principle that a fix shipped after a release is an advisory while the
+same fix shipped before it is just release content. The architecture held up — the peer-uid
+check is fail-closed, 0700 directories are enforced by `lstat` and never chmod-repaired, the
+live daemon has **zero** network sockets, argv reaches `execvp` and never a shell, and
+scrollback stores re-serialized cells so `history` cannot replay an escape-injection
+payload. Three implementation gaps inside that model were found and fixed:
+
+1. **Scrollback log fds lacked `O_CLOEXEC`** (`scrollback.c`, 4 call sites) — the one break
+   in an otherwise complete discipline (`lockfile.c`, `handoff.c`, the listener, client
+   sockets, PTY masters and the signal pipe all had it). Because every session's child is
+   `execvp`'d from the daemon that holds those fds, a program running in one pane inherited
+   **append-write** descriptors to every other session's history file, and both `history` and
+   copy-mode present those bytes as authoritative. Measured before the fix: a child's fd
+   table held `8 → victim/scrollback.log` and `10 → bystander/scrollback.log`, and a marker
+   written through fd 8 appeared in the victim's history. After: children hold exactly fds
+   0/1/2, all three on their own PTY slave.
+2. **The client trusted a MSG_ERR `msg_len` it never bounded** (`attach.c`, 3 sites) — the
+   check that already existed and was already correct at `main.c:174` was simply absent here.
+   `payload` is a 4096-byte **stack** buffer, so a peer answering the socket could make
+   `%.*s` scan to the end of it and past it.
+3. **`handle_list` wrote its payload unbounded** (`server.c`) — safe today only by
+   `MAX_SESSIONS 64`, a cap declared in a different header, which made raising that cap a
+   buffer overflow rather than a truncated list.
+
+Two **negative results** from building the tests, kept here because each one is a way this
+round could have reported success while proving nothing:
+
+- The obvious hostile frame for finding 2 — `payload_len=4, msg_len=65535` — **passes against
+  the unbroken code**. `%.*s` stops at the first NUL, and a client that read only 4 bytes
+  leaves the rest of `payload` on a freshly-mapped, zero-filled stack page, so the scan halts
+  immediately and no sanitizer fires. The frame has to *fill* the buffer with NUL-free bytes;
+  then the unbounded code prints 4108 bytes (16-byte prefix + 4092 payload) and the length
+  assertion discriminates. ASan does not report the tail read, so the sanitizer check in that
+  test is a second, weaker net rather than the primary one.
+- A runtime bound for finding 3 can never fire at the real cap (64 × 82 = 5,250 bytes against
+  a 1 MiB buffer), so any test at that cap is vacuous by construction. The load-bearing guard
+  is therefore a `_Static_assert` relating `MAX_SESSIONS`, `SESSION_NAME_MAX` and
+  `PROTO_MAX_PAYLOAD`: raising the cap to 20,000 fails the **build** with a message naming
+  the fix, which is strictly stronger than truncating a user's session list at runtime. The
+  runtime `break` stays as the second layer.
+
+A fourth finding was in the build system rather than the product, and it invalidated an
+earlier run of this round: `make` with no target regenerated one version header and built
+**nothing**, because the first rule in the Makefile is the version stamp and not `all`. The
+unit suites relink their own objects and passed; the integration tests ran a **three-day-old
+daemon**, so the first `O_CLOEXEC` fix appeared not to work. Fixed with an explicit
+`.DEFAULT_GOAL := all`, which also makes the Makefile's own usage comment true.
+
+Regression coverage: `tests/integration/test_fd_isolation.sh` (TC-16 + TC-17). Each guard was
+observed failing against the pre-fix source restored by `cp` — the fd-table assertion, the
+write probe and the `msg_len` length assertion independently — and the `_Static_assert` was
+observed failing the build. Full gate after the fixes: 8 unit suites under ASan (0 failures),
+24/24 integration scripts on release, release build with 0 warnings.
 
 ## Reproducing this UAT
 
