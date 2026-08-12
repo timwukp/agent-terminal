@@ -28,6 +28,16 @@
 #define MAX_CLIENTS 32
 #define CLIENT_OUT_MAX (4u << 20) /* 4 MiB high-water: hit it → disconnect */
 #define PRE_HELLO_BUDGET 64
+/* PRE_HELLO_BUDGET bounds how many BYTES a client may send before HELLO; it
+ * says nothing about TIME, so a peer that connects and sends nothing at all
+ * spends none of it and holds its slot forever. At MAX_CLIENTS such peers
+ * server_accept has no slot left and closes every real client immediately —
+ * one process with 32 open sockets and no traffic locks the user out of their
+ * own sessions. So a client that has not identified itself within this window
+ * loses its slot. 5 s is ~3 orders of magnitude above a local HELLO round trip
+ * (the client sends it immediately after connect, on the same machine), which
+ * is the margin that keeps this from ever firing on a real client. */
+#define HELLO_DEADLINE_MS 5000
 
 typedef struct client {
     int fd;
@@ -35,6 +45,7 @@ typedef struct client {
     bool hello_done;
     uint16_t caps;          /* MSG_HELLO flags (CLIENT_CAP_PANES) */
     uint16_t cols, rows;    /* last geometry from ATTACH/RESIZE */
+    uint64_t connected_at;  /* now_ms() at accept; HELLO_DEADLINE_MS baseline */
     ring in, out;
     session *attached; /* NULL until ATTACH */
     uint8_t scratch[PROTO_MAX_PAYLOAD];
@@ -195,7 +206,13 @@ static void handle_list2(client *c) {
 
 static void handle_new(client *c, const uint8_t *p, size_t len) {
     if (len < 7) { client_err(c, ERR_BAD_REQUEST, "short NEW_SESSION"); return; }
-    uint16_t cols = get_u16(p), rows = get_u16(p + 2);
+    /* Clamped here as well as in the model, so no absurd value is ever
+     * RECORDED: c->cols feeds the smallest-wins vote in session_attach, and a
+     * clamped session paired with a 65535-wide client record is a divergence
+     * waiting for a future reader. Clamp, don't reject — a client is allowed
+     * to ask for a window bigger than we will paint. */
+    uint16_t cols = session_clamp_cols(get_u16(p));
+    uint16_t rows = session_clamp_rows(get_u16(p + 2));
     uint8_t nlen = p[4];
     if ((size_t)5 + nlen + 2 > len || nlen == 0 || nlen > SESSION_NAME_MAX) {
         client_err(c, ERR_BAD_REQUEST, "bad name");
@@ -249,7 +266,8 @@ static void handle_new(client *c, const uint8_t *p, size_t len) {
 
 static void handle_attach(client *c, const uint8_t *p, size_t len) {
     if (len < 6) { client_err(c, ERR_BAD_REQUEST, "short ATTACH"); return; }
-    uint16_t cols = get_u16(p), rows = get_u16(p + 2);
+    uint16_t cols = session_clamp_cols(get_u16(p));      /* see handle_new */
+    uint16_t rows = session_clamp_rows(get_u16(p + 2));
     /* p[4] = pane_id, reserved 0 in v1 */
     uint8_t nlen = p[5];
     if ((size_t)6 + nlen > len || nlen == 0 || nlen > SESSION_NAME_MAX) {
@@ -332,7 +350,10 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
         if (c->attached) session_stdin(c->attached, p, (uint32_t)len);
         break;
     case MSG_RESIZE:
-        if (len >= 4) { c->cols = get_u16(p); c->rows = get_u16(p + 2); }
+        if (len >= 4) { /* see handle_new */
+            c->cols = session_clamp_cols(get_u16(p));
+            c->rows = session_clamp_rows(get_u16(p + 2));
+        }
         if (c->attached && len >= 4) session_resize(c->attached, c->cols, c->rows);
         break;
     case MSG_SPLIT_PANE: {
@@ -504,6 +525,7 @@ static void server_accept(int fd, short revents, void *ud) {
     c->fd = cfd;
     c->in_use = true;
     c->hello_done = false;
+    c->connected_at = now_ms();
     c->attached = NULL;
     ring_init(&c->in, 4096, (size_t)2 * PROTO_MAX_PAYLOAD);
     ring_init(&c->out, 4096, CLIENT_OUT_MAX);
@@ -518,6 +540,23 @@ static void server_accept(int fd, short revents, void *ud) {
         ring_free(&c->in);
         ring_free(&c->out);
         c->in_use = false;
+    }
+}
+
+/* Called from the daemon tick, so the deadline is enforced by wall time rather
+ * than by the silent peer's own traffic — which is the whole point: a peer that
+ * sends nothing generates no events, so nothing in the read path can ever
+ * notice it. Resolution is the 20 ms tick, so the real cutoff is
+ * HELLO_DEADLINE_MS + one tick. */
+void server_reap_idle(void) {
+    uint64_t now = now_ms();
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client *c = &g_clients[i];
+        if (!c->in_use || c->hello_done) continue;
+        if (now - c->connected_at < HELLO_DEADLINE_MS) continue;
+        log_msg(LOG_WARN, "client fd %d sent no HELLO in %d ms, dropping",
+                c->fd, HELLO_DEADLINE_MS);
+        client_disconnect(c);
     }
 }
 

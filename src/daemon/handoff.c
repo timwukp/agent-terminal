@@ -478,7 +478,10 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
             ln->child[0] = (int8_t)q[2];
             ln->child[1] = (int8_t)q[3];
             /* Child indices come from our own writer, but the file could be
-             * torn: clamp so reflow cannot index out of the node array. */
+             * torn: clamp so reflow cannot index out of the node array. This
+             * bounds the INDEX only — it does not make the graph a tree, so
+             * `child[0] == self` still survives this loop. Termination is
+             * reflow_node's depth cap (layout.c), not this clamp. */
             if (ln->child[0] < 0 || ln->child[0] >= LAYOUT_NODES) ln->child[0] = 0;
             if (ln->child[1] < 0 || ln->child[1] >= LAYOUT_NODES) ln->child[1] = 0;
             if (ln->pane_idx >= MAX_PANES_PER_SESSION) ln->pane_idx = 0;

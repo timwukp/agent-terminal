@@ -92,3 +92,20 @@ and shows the most recent events with a badge:
   a break is a fact about the file, not a reason to hide history.
 - No file → the card says plainly that hook executions are not being
   recorded, and points here.
+
+Both reads are bounded, because the file is append-only and nothing
+constrains who appends or how fast:
+
+- **At most 1 MiB per poll.** Nothing is skipped — the cursor advances
+  only by what was consumed, so a backlog is verified across the next few
+  polls instead of inside one blocking call. `N events` therefore counts
+  what has been *verified*, which is the honest number: an unread line has
+  no verdict yet.
+- **At most 1 MiB in one unterminated line.** The per-poll cap bounds work
+  but not memory: bytes with no newline in them are held for the next poll
+  and accumulate for as long as a writer withholds the newline. A hook
+  event is one JSON object on one line, so past that it is not one — it is
+  counted malformed and its bytes are dropped rather than buffered. A
+  dropped line cannot be hashed, so the chain verdict stays broken, which
+  is the accurate report; the next newline resynchronizes, so one bad
+  writer does not blind the card forever.

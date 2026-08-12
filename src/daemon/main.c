@@ -89,6 +89,9 @@ static void raise_nofile_limit(void) {
 static void daemon_tick(void) {
     static uint64_t last_flush;
     session_composite_all();
+    /* Cheap (a 32-slot scan) and it must not be gated on the 1 s flush timer:
+     * an unauthenticated client slot is the resource being reclaimed. */
+    server_reap_idle();
     uint64_t now = now_ms();
     if (now - last_flush >= 1000) {
         session_flush_all();

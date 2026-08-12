@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: app commands are not ACL-gated (verified: attach worked with an empty capability set), but PLUGIN commands are — the webview's notification calls fail silently without the grant below.",
+  "description": "Main window: app commands are not ACL-gated (verified: attach worked with an empty capability set), but PLUGIN commands are — the webview's notification calls fail silently without the grants below. The three are named one at a time rather than taken as notification:default, which is all 16 of the plugin's permissions; src/capabilities.test.ts fails if the set stops matching what src/notify.ts actually calls, in either direction.",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
+  ]
 }

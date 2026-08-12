@@ -80,7 +80,7 @@ ifneq ($(strip $(VT_SRC)),)
   LIBS := $(O)/libvt.a $(LIBS)
 endif
 
-.PHONY: all test fuzz fuzz-regress tools install uninstall clean fmt tidy
+.PHONY: all test fuzz fuzz-regress tools units install uninstall clean fmt tidy
 
 all: $(O)/agent-terminald $(O)/agent-terminal
 
@@ -170,17 +170,68 @@ tools: $(O)/vtdump
 
 # ---- install ----------------------------------------------------------------
 PREFIX ?= /usr/local
+BINDIR := $(PREFIX)/bin
 
-install: all
-	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/man/man1
+# Service units are TEMPLATES, rendered here. Shipping them ready-to-copy meant
+# hardcoding one prefix, and the file then named the wrong path for everyone who
+# followed the other documented one — with the failure mode that a leftover
+# daemon at the hardcoded prefix answers the socket and the protocol's
+# skip-unknown-frames rule turns every newer message into a silent no-op. A
+# stale daemon is an unpatched daemon. See tools/check_install_paths.sh.
+UNIT_IN  := contrib/launchd/dev.agentterminal.daemon.plist.in \
+            contrib/systemd/agent-terminald.service.in
+UNITS    := $(patsubst contrib/%.in,$(O)/contrib/%,$(UNIT_IN))
+
+# The PATH the daemon hands to session commands. BINDIR goes first, but only if
+# the base list does not already contain it — a duplicate entry is harmless to
+# the shell and confusing in a file someone reads.
+UNIT_PATH_BASE := /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+UNIT_PATH := $(if $(findstring :$(BINDIR):,:$(UNIT_PATH_BASE):),$(UNIT_PATH_BASE),$(BINDIR):$(UNIT_PATH_BASE))
+
+# FORCE, and the same compare-by-content dance as $(VERSION_H) above, because a
+# rendered unit depends on the VALUE of PREFIX and no file timestamp records that.
+# `make install PREFIX=/a` then `make install PREFIX=/b` found the output newer
+# than the template and reinstalled /a's unit under /b — the exact stale-path bug
+# these templates exist to remove, arriving through the build system instead of
+# the docs. A stamp file holding the prefix does not fix it either: make 3.81
+# (what macOS ships) compares mtimes at 1-second granularity, so a stamp rewritten
+# in the same second as the unit still reads as "not newer". Re-running sed over a
+# 100-line template costs nothing; the content compare keeps the mtime stable so
+# nothing downstream churns.
+#
+# The delete comes first, so the template-only note — which talks ABOUT the
+# placeholders — is gone before they are substituted. Otherwise the installed
+# file would carry a paragraph telling its reader it is a template, with the
+# placeholder in that paragraph helpfully replaced by the real path.
+$(O)/contrib/%: contrib/%.in FORCE
+	@mkdir -p $(dir $@)
+	@sed -e '/@TEMPLATE_NOTE_BEGIN@/,/@TEMPLATE_NOTE_END@/d' \
+	     -e 's|@BINDIR@|$(BINDIR)|g' \
+	     -e 's|@UNIT_PATH@|$(UNIT_PATH)|g' $< > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm $@.tmp || mv $@.tmp $@
+
+units: $(UNITS)
+
+install: all units
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/man/man1 \
+	           $(DESTDIR)$(PREFIX)/share/agent-terminal
 	install -m 0755 $(O)/agent-terminald $(DESTDIR)$(PREFIX)/bin/
 	install -m 0755 $(O)/agent-terminal $(DESTDIR)$(PREFIX)/bin/
 	install -m 0644 docs/agent-terminal.1 $(DESTDIR)$(PREFIX)/share/man/man1/
+	install -m 0644 $(UNITS) $(DESTDIR)$(PREFIX)/share/agent-terminal/
+	@if [ -n "$(DESTDIR)" ]; then \
+	    echo "note: DESTDIR set, skipping the stale-daemon check — the prefixes it looks at belong to this build host, not to the target root"; \
+	else \
+	    sh tools/check_install_paths.sh "$(PREFIX)/bin"; \
+	fi
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/agent-terminald \
 	      $(DESTDIR)$(PREFIX)/bin/agent-terminal \
-	      $(DESTDIR)$(PREFIX)/share/man/man1/agent-terminal.1
+	      $(DESTDIR)$(PREFIX)/share/man/man1/agent-terminal.1 \
+	      $(DESTDIR)$(PREFIX)/share/agent-terminal/dev.agentterminal.daemon.plist \
+	      $(DESTDIR)$(PREFIX)/share/agent-terminal/agent-terminald.service
+	-rmdir $(DESTDIR)$(PREFIX)/share/agent-terminal 2>/dev/null || true
 
 fuzz-regress: $(FUZZ_REGRESS_BIN)
 	@for t in $(FUZZ_REGRESS_BIN); do echo "== $$t"; $$t fuzz/corpus/vt || exit 1; done

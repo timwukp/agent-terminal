@@ -57,23 +57,39 @@ static void divide(const layout_node *parent, layout_node *a, layout_node *b) {
     }
 }
 
-static void reflow_node(layout *lt, int8_t idx) {
+/* The only recursion in this file, and node indices are raw int8_t that can
+ * reach here from a handoff state file. handoff.c range-clamps them, which buys
+ * safe INDEXING but says nothing about termination: child[0] == idx, or any edge
+ * back to an ancestor, recurses until the stack dies — and a daemon that dies
+ * during reload takes every session's PTY with it, so this is availability, not
+ * just tidiness.
+ *
+ * A valid tree reaches each of the LAYOUT_NODES nodes at most once, so a path
+ * longer than that contains a cycle by definition. The cap can never reject a
+ * legitimate layout: LAYOUT_MAX_LEAVES is 6, so the deepest real tree is 5.
+ * The range checks are repeated here rather than delegated, because layout.c
+ * must not be memory-safe only for as long as a caller in another file keeps
+ * sanitizing its input. */
+static void reflow_node(layout *lt, int8_t idx, int depth) {
+    if (idx < 0 || idx >= LAYOUT_NODES || depth >= LAYOUT_NODES) return;
     layout_node *n = &lt->nodes[idx];
     if (n->leaf) return;
-    layout_node *a = &lt->nodes[n->child[0]];
-    layout_node *b = &lt->nodes[n->child[1]];
+    int8_t c0 = n->child[0], c1 = n->child[1];
+    if (c0 < 0 || c0 >= LAYOUT_NODES || c1 < 0 || c1 >= LAYOUT_NODES) return;
+    layout_node *a = &lt->nodes[c0];
+    layout_node *b = &lt->nodes[c1];
     divide(n, a, b);
-    reflow_node(lt, n->child[0]);
-    reflow_node(lt, n->child[1]);
+    reflow_node(lt, c0, depth + 1);
+    reflow_node(lt, c1, depth + 1);
 }
 
 void layout_reflow(layout *lt, uint16_t view_cols, uint16_t view_rows) {
-    if (lt->root < 0) return;
+    if (lt->root < 0 || lt->root >= LAYOUT_NODES) return;
     layout_node *r = &lt->nodes[lt->root];
     r->x = 0; r->y = 0;
     r->cols = view_cols ? view_cols : 1;
     r->rows = view_rows ? view_rows : 1;
-    reflow_node(lt, lt->root);
+    reflow_node(lt, lt->root, 0);
 }
 
 bool layout_split(layout *lt, uint16_t view_cols, uint16_t view_rows,

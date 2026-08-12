@@ -1,7 +1,7 @@
 // Session dashboard: LIST_SESSIONS2 polled every 2 s, click to switch,
 // template buttons, right-click kill (design: ux-spec.md).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ControlApi, SessionRow, Template } from "./api";
 import { nextSessionName } from "./api";
 import { theme } from "../theme";
@@ -39,10 +39,27 @@ export default function Sidebar({
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // The kill confirmation, in-app. `window.confirm` cannot be used here:
+  // wry 0.55.1's WKWebView UI delegate implements no
+  // runJavaScriptConfirmPanel, so on macOS the call completes FALSE without
+  // showing anything — the guard did not ask, it silently refused, and the
+  // kill button was dead in every packaged build (Terminal.tsx says more).
+  // The pid is remembered with the name because the daemon addresses
+  // sessions by name and a freed name is reused by nextSessionName: without
+  // it, confirming a stale prompt could kill a DIFFERENT session that
+  // arrived at the same name.
+  const [pending, setPending] = useState<{ name: string; pid: number } | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      setSessions(await api.listSessions());
+      const rows = await api.listSessions();
+      setSessions(rows);
+      // A prompt outlives its subject: the child can exit while the
+      // question is on screen, and the name can then come back attached to
+      // a new pid. Either way the answer would no longer be about what was
+      // asked, so the prompt goes rather than the target being re-bound.
+      setPending((p) => (p == null || rows.some((r) => r.name === p.name && r.pid === p.pid) ? p : null));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -74,8 +91,14 @@ export default function Sidebar({
     }
   };
 
+  // Focus lands on Cancel, not on Kill: for a destructive prompt the key
+  // someone is already holding down must not be the one that confirms it.
+  useEffect(() => {
+    if (pending != null) cancelRef.current?.focus();
+  }, [pending]);
+
   const kill = async (name: string) => {
-    if (!window.confirm(`Kill session "${name}"? Its child process ends.`)) return;
+    setPending(null);
     try {
       await api.killSession(name);
       await refresh();
@@ -94,42 +117,97 @@ export default function Sidebar({
           // screen readers, and needs a stopPropagation hack to keep the
           // mute click from also attaching.
           <li key={s.name} style={{ display: "flex", alignItems: "center" }}>
-            <button
-              onClick={() => onSelect(s.name)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                void kill(s.name);
-              }}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                textAlign: "left",
-                padding: "6px 8px",
-                border: "none",
-                borderRadius: 4,
-                background: s.name === active ? theme.accent : "transparent",
-                color: s.name === active ? "#fff" : "inherit",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
-              title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s) — right-click kills (asks first)`}
-            >
-              {s.name}
-              {done?.has(s.name) === true && (
-                <span title="finished while you were away" style={{ color: theme.good }}>
-                  {" "}
-                  ✓
-                </span>
-              )}
-              {s.npanes != null && s.npanes > 1 && (
-                <span style={{ opacity: 0.75 }}> {s.npanes}⧉</span>
-              )}
-              {s.zoomed === true && <span style={{ opacity: 0.75 }}> 🔍</span>}
-              {s.nclients > 0 && (
-                <span style={{ float: "right", opacity: 0.6, fontSize: 11 }}>{s.nclients}●</span>
-              )}
-            </button>
-            {onToggleMute && (
+            {pending?.name === s.name ? (
+              // The question replaces the row it is about, so the name on
+              // screen is the name that will be killed — a prompt floating
+              // elsewhere can be read against the wrong row.
+              <div
+                role="group"
+                aria-label={`confirm killing session ${s.name}`}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setPending(null);
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: "6px 8px",
+                  borderRadius: 4,
+                  border: `1px solid ${theme.danger}`,
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ marginBottom: 4 }}>
+                  Kill <strong>{s.name}</strong>? Its child process ends.
+                </div>
+                <button
+                  onClick={() => void kill(s.name)}
+                  style={{
+                    fontSize: 11,
+                    padding: "2px 8px",
+                    marginRight: 4,
+                    cursor: "pointer",
+                    background: theme.danger,
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 3,
+                  }}
+                >
+                  Kill
+                </button>
+                <button
+                  ref={cancelRef}
+                  onClick={() => setPending(null)}
+                  style={{
+                    fontSize: 11,
+                    padding: "2px 8px",
+                    cursor: "pointer",
+                    background: theme.surface,
+                    color: theme.text,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 3,
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => onSelect(s.name)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setPending({ name: s.name, pid: s.pid });
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  textAlign: "left",
+                  padding: "6px 8px",
+                  border: "none",
+                  borderRadius: 4,
+                  background: s.name === active ? theme.accent : "transparent",
+                  color: s.name === active ? "#fff" : "inherit",
+                  cursor: "pointer",
+                  fontSize: 13,
+                }}
+                title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s) — right-click kills (asks first)`}
+              >
+                {s.name}
+                {done?.has(s.name) === true && (
+                  <span title="finished while you were away" style={{ color: theme.good }}>
+                    {" "}
+                    ✓
+                  </span>
+                )}
+                {s.npanes != null && s.npanes > 1 && (
+                  <span style={{ opacity: 0.75 }}> {s.npanes}⧉</span>
+                )}
+                {s.zoomed === true && <span style={{ opacity: 0.75 }}> 🔍</span>}
+                {s.nclients > 0 && (
+                  <span style={{ float: "right", opacity: 0.6, fontSize: 11 }}>{s.nclients}●</span>
+                )}
+              </button>
+            )}
+            {pending?.name !== s.name && onToggleMute && (
               <button
                 aria-label={
                   muted?.has(s.name) === true

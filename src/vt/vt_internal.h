@@ -30,8 +30,9 @@ typedef enum {
  * off VT_OSC_MAX, the largest sequence body the parser stores, plus room for
  * the ESC ] introducer, a Ps;Pt prefix and the terminator. */
 #define VT_PENDING_MAX (VT_OSC_MAX + 64)
-#define VT_ROWS_MAX   1000
-#define VT_COLS_MAX   1000
+/* VT_ROWS_MAX / VT_COLS_MAX moved to the public vt.h: callers that keep their
+ * own copy of the geometry have to clamp with the same numbers, so the limits
+ * are part of the API, not an implementation detail. */
 #define VT_TABSTOP_WORDS ((VT_COLS_MAX + 31) / 32)
 
 typedef struct {

@@ -42,3 +42,14 @@ Per-session mute toggle in the sidebar context menu.
   (from the GUI's own xterm buffer, not scraped from the wire).
 - macOS permission requested on first notify attempt via the Tauri
   notification plugin; denial degrades silently to a sidebar badge.
+- The webview is granted exactly three plugin commands —
+  `notification:allow-is-permission-granted`, `allow-request-permission`,
+  `allow-notify` — and not `notification:default`, which is all 16 of the
+  plugin's permissions. Thirteen of those name commands
+  `tauri-plugin-notification` does not even register on this platform, so
+  the narrowing is least privilege rather than a closed hole. The mapping
+  from JS name to command is not greppable from the npm package:
+  `requestPermission()` and `sendNotification()` reach the backend through
+  a `window.Notification` replacement the plugin injects, not through
+  `invoke()`. `src/capabilities.test.ts` fails if the granted set stops
+  matching what the source calls, in either direction.

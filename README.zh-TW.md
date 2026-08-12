@@ -47,27 +47,41 @@ make test BUILD=asan   # 可選:在 ASan/UBSan 下跑單元測試
 sudo make install      # 安裝到 /usr/local(可用 PREFIX= 覆寫)
 ```
 
-安裝產物:`agent-terminald`、`agent-terminal`,以及 `agent-terminal(1)`
-man page。
+安裝產物:`agent-terminald`、`agent-terminal`、`agent-terminal(1)` man page,
+以及下面那兩個服務單元檔——它們會依你實際安裝的 `PREFIX` 產生,放在
+`PREFIX/share/agent-terminal/`。
+
+如果另一個 prefix 底下已經裝了**不同的** `agent-terminald`,`make install`
+會出聲告知。兩份副本在安裝時不會衝突,衝突發生在連線時,而且那時沒有任何
+錯誤訊息——見[以服務方式運行 daemon](#以服務方式運行-daemon建議)。
 
 ### 以服務方式運行 daemon(建議)
 
 daemon 會在首次使用時自動啟動,但交給服務管理器可以在崩潰與重開機後自動
-重啟,讓 `attach` 永遠有效:
+重啟,讓 `attach` 永遠有效。請複製 `make install` 產生的那一份——它寫的是
+你安裝的 prefix;`contrib/` 裡的副本是模板,刻意無法直接運行:
 
 **macOS(launchd):**
 ```sh
-cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
+cp "$PREFIX/share/agent-terminal/dev.agentterminal.daemon.plist" ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
 ```
 
 **Linux(systemd user unit):**
 ```sh
 mkdir -p ~/.config/systemd/user
-cp contrib/systemd/agent-terminald.service ~/.config/systemd/user/
+cp "$PREFIX/share/agent-terminal/agent-terminald.service" ~/.config/systemd/user/
 systemctl --user enable --now agent-terminald
 loginctl enable-linger $USER   # 登出後 session 仍然存活
 ```
+
+單元檔是產生的、而不是直接附上一份可複製的,因為裡面寫死一個路徑造成的不只是
+不方便。指向你已經不用的 prefix 的服務單元,啟動的是還留在那裡的**舊**二進位
+檔,而那個 daemon 會先應答 socket——於是客戶端的自動啟動(只在沒有任何 daemon
+應答時才會發生)根本輪不到跑起來。協定會跳過不認識的訊息,所以舊 daemon 之後
+才有的每一則訊息都變成靜默的空操作:新的按鍵綁定毫無反應,而且哪裡都不會印出
+錯誤。**過期的 daemon 就是沒有打上補丁的 daemon。**想知道自己實際在跟哪一個
+對話,用 `agent-terminal version`。
 
 ## 使用方式
 
@@ -197,8 +211,10 @@ attach 中的檢視端一起重排;GUI 自己建立的 session 則在誕生時�
 右側可收合面板顯示 Claude Code 的即時狀態,讀自 `~/.claude`(終端協定
 本身保持與工作負載無關):**Usage** 分頁是每份 transcript 的輸入/輸出/
 快取 token 總量與每分鐘輸出 sparkline;**Hooks** 分頁列出 `settings.json`
-裡的 hook 規則,附唯讀的腳本檢視器(GUI 永不寫入 Claude Code 的設定),
-以及一張安全卡片,尾隨選擇性啟用的雜湊鏈 hook 執行日誌
+裡的 hook 規則,附唯讀的腳本檢視器(GUI 永不寫入 Claude Code 的設定;
+檢視器只讀已設定的 hook 指名的那個路徑,且該路徑當下仍必須是普通檔案 —
+腳本原地被換成 symlink 時是拒絕,而不是跟著走 — 並且最多讀 1 MiB,
+截斷時會在畫面上說明),以及一張安全卡片,尾隨選擇性啟用的雜湊鏈 hook 執行日誌
 (`app/design/hook-log.md`——設計上可偵測竄改,並誠實標明不防竄改)。
 它**不**屬於 `make install` 流程;由你自行編譯,可以打包成可雙擊的 app,
 也可以只建 debug 執行檔:
@@ -236,7 +252,9 @@ policy 保留了那個 scheme。
 
 目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
 (與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
-Claude 或 shell session;結束 session;鍵盤輸入;在分割中點擊切換焦點窗格;
+Claude 或 shell session;結束 session(右鍵,並且會先詢問——詢問的視窗是 app
+自己畫的,因為平台的 `confirm()` 對話框在這個 webview 裡是死的按鈕,所以這裡
+唯一的破壞性操作不依賴它);鍵盤輸入;在分割中點擊切換焦點窗格;
 分割/縮放/關閉窗格的工具列;以及作用中窗格的外框標示,讓分割的 session
 一眼看出輸入會進到哪裡。
 
@@ -289,6 +307,16 @@ Session 結束時,仍在螢幕上的內容也會刷入日誌,所以一則從未�
 
 - Unix socket 位於 0700 目錄、權限 0600,並驗證對端 UID
   (`SO_PEERCRED` / `getpeereid`)。完全沒有任何網路監聽。
+- **UID 就是整條信任邊界,所以 session 之間彼此並沒有隔離。** 任何通過 UID
+  檢查的客戶端,對**每一個** session 都是完全授權的——也就是說,跑在
+  session A 裡的指令可以連上 socket,然後讀取、輸入、或結束 session B。這是
+  按協定設計本來就能做的事,不是利用什麼漏洞。tmux 與 screen 是同一個模型;
+  這裡要明講出來,是因為「在 session 裡跑 agent」正是「所有以你身分執行的東西
+  都同等可信」這個假設最容易跟人的直覺脫節的場景。彼此不該互通的工作負載,
+  要用不同的 UID 或容器隔開,而不是用不同的 session。
+- Session 指令走 `execvp`,**從不經過 shell**——整個 repo 裡沒有 `system()`
+  也沒有 `popen()`——所以 argv 裡的特殊字元只會是字面上的引數位元組。daemon
+  從不是 setuid。
 - VT 解析器 — 不可信輸入的第一線 — 是隔離的、**無 syscall** 的函式庫
   (`src/vt/`),每夜以 libFuzzer 模糊測試,每個 PR 在 ASan+UBSan 下運行,
   並以真實 vttest 錄製檔做黃金重放一致性測試。
@@ -381,15 +409,20 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
 
 三個層次,`main` 上全綠:
 
-- **單元測試**:9 個套件共 6,340 個檢查(VT 解析器逐位元組、協定往返與
-  違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何、輸入按鍵掃描器、
-  翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan 下運行。
-- **整合測試**:22 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
+- **單元測試**:9 個套件共 6,352 個檢查(VT 解析器逐位元組、協定往返與
+  違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
+  環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
+  下運行。
+- **整合測試**:26 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
   `kill -9` 後 reattach、daemon reload 且子行程存活、經協定驅動的窗格分割
   / 方向導航 / 縮放、100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
-  探測、關閉競態、誠實的錯誤回報。每個 PR 在 macOS 與 Linux 的 CI 上運行。
+  探測、關閉競態、誠實的錯誤回報、安全稽核輪次找出的同 uid 濫用案例
+  (被繼承的 scrollback fd、超大幾何、連上後從不表明身分的連線),以及
+  可能留下舊 daemon 應答 socket 的安裝路徑。每個 PR
+  在 macOS 與 Linux 的 CI 上運行。
 - **真實 Claude Code session 的終端使用者驗收測試(UAT)** — 真實工作負載,
-  以真實 pty 與真實按鍵驅動,共兩輪(27 個案例):崩潰後 reattach 且同一個
+  以真實 pty 與真實按鍵驅動,兩輪加上四次安全稽核輪次追加的案例,共 21 個
+  案例:崩潰後 reattach 且同一個
   行程繼續回答、活的 TUI 周圍做窗格方向導航與縮放、對話底下升級 daemon
   二進位檔、多客戶端旁觀、批次 `claude -p` 模式。完整測試日誌 — 案例編號、
   資料、步驟、判定、第一輪抓到的 macOS reload bug,以及 TUI 測試方法 — 見

@@ -128,4 +128,13 @@ void session_detach(session *s, struct client *c);
 void session_stdin(session *s, const uint8_t *data, uint32_t len);
 void session_resize(session *s, uint16_t cols, uint16_t rows);
 
+/* Bound wire/file geometry to what libvt will actually allocate (VT_COLS_MAX /
+ * VT_ROWS_MAX). Every entry point into the model applies these already; they
+ * are exported so the wire edge can bound the value before RECORDING it too,
+ * without a second copy of the limits. See the rationale at the top of
+ * session.c: an unclamped copy of the geometry is an amplifier, because the
+ * compositor pads rows out to the copy while drawing from the engine. */
+uint16_t session_clamp_cols(uint16_t cols);
+uint16_t session_clamp_rows(uint16_t rows);
+
 #endif

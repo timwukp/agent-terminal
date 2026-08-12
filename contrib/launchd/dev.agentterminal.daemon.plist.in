@@ -3,10 +3,29 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   launchd user agent for agent-terminald.
+  @TEMPLATE_NOTE_BEGIN@
+  THIS IS A TEMPLATE, and everything down to the END marker is dropped from the
+  rendered copy — including this paragraph, so that the installed file never
+  claims to be something you still have to edit. `make install` substitutes the
+  placeholders and writes the usable copy to PREFIX/share/agent-terminal/. Copy
+  THAT file, not this one:
 
-  Install:
-    cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
+    make install PREFIX="$HOME/.local"
+    cp "$HOME/.local/share/agent-terminal/dev.agentterminal.daemon.plist" \
+       ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
+
+  It is a template because the path had to be wrong for somebody. A shipped
+  plist naming /usr/local/bin is wrong for everyone who followed AGENTS.md and
+  installed to ~/.local, and the way it is wrong is the bad way: if an older
+  /usr/local/bin/agent-terminald is still there from a previous install, launchd
+  starts THAT one, it answers the socket first, and the client's sibling-first
+  autospawn never runs because a daemon is already answering. The protocol skips
+  frames it predates, so the new client goes quiet rather than erroring — a
+  stale daemon is an unpatched daemon, and it looks like a feature that does
+  nothing. Unsubstituted, this file fails loudly instead, because launchd cannot
+  exec a path that still has the placeholder in it.
+  @TEMPLATE_NOTE_END@
 
   Upgrade the binary without killing your sessions:
     launchctl kill SIGHUP gui/$(id -u)/dev.agentterminal.daemon
@@ -26,18 +45,21 @@
     `launchctl bootout`, only the main process is signalled — a setsid
     grandchild keeps running and reparents to pid 1. So PTY children survive
     an unload here, whereas systemd's default KillMode=control-group would
-    kill them (see contrib/systemd/agent-terminald.service).
+    kill them (see contrib/systemd/agent-terminald.service.in).
   - PATH: launchd gives agents only /usr/bin:/bin:/usr/sbin:/sbin, and the
     daemon's children inherit it. A session command that lives anywhere else
     (~/.local/bin, /opt/homebrew/bin) then dies instantly with exec 127 —
     the session appears to "do nothing". The EnvironmentVariables block
-    below ships the common locations; add yours. ($HOME does not expand in
-    plists — write the absolute path.)
+    below ships the common locations plus your install prefix; add yours.
+    ($HOME does not expand in plists — which is the other reason this is a
+    template: an absolute path is the only thing launchd accepts here, so it
+    cannot be written once for every reader.)
   - For SSH sessions to inherit your agent, launchd must know
     SSH_AUTH_SOCK. On macOS the system launchd sets it for user agents by
     default; if you use a custom agent path, add it to EnvironmentVariables.
-  - Adjust ProgramArguments[0] if you installed somewhere other than
-    /usr/local/bin.
+  - ProgramArguments[0] needs no adjusting: it is your PREFIX/bin, filled in at
+    install time. If you move the binary afterwards, re-run `make install` with
+    the new PREFIX and copy the regenerated file again.
 -->
 <plist version="1.0">
 <dict>
@@ -46,11 +68,11 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>@UNIT_PATH@</string>
     </dict>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/agent-terminald</string>
+        <string>@BINDIR@/agent-terminald</string>
         <string>-f</string>
     </array>
     <key>RunAtLoad</key>

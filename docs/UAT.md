@@ -39,6 +39,10 @@ permissions, and session directories run exactly as shipped.
 | TC-15 | regression | full unit + integration suites after the TC-07 fix | all green | PASS |
 | TC-16 | **session A cannot forge session B's history** | with session `victim` live, start a second session and write a marker through every fd 3–40 it might have inherited; then read the fd table of a third session's child | no fd of any child names a `.log`; `victim`'s history contains no marker | PASS³ |
 | TC-17 | hostile peer on the socket | a fake daemon binds `default.sock` and answers `attach` with a MSG_ERR whose `msg_len` (65535) exceeds its own frame; then with a well-formed error | first: rc≠0, nothing long printed, no sanitizer report; second: the message still reaches the user | PASS³ |
+| TC-18 | **one client cannot exhaust daemon memory** | over the wire: `NEW_SESSION` at 65535×65535 + `SPLIT_PANE` + a child that keeps printing, then **disconnect**; a 200×50 session alongside it; sample daemon RSS for 4 s; `ls` | `ls` reports `1000x1000` and no `65535` anywhere; the 200×50 session is untouched; peak RSS ≤ 128 MiB | PASS⁴ |
+| TC-19 | **silent connections cannot lock the user out** | 40 `connect()`s that send zero bytes (`MAX_CLIENTS` is 32), held open; probe a real HELLO during the flood, then again after the deadline; separately, a client that HELLOs and then idles 7 s | during: the probe is refused (the denial is real); within ~6 s: a probe completes HELLO and the daemon logs the deadline drop; the idle HELLO'd client still gets its PONG | PASS⁴ |
+| TC-20 | **the shipped service unit names the prefix you installed to** | `make install PREFIX=/opt/at-install-test DESTDIR=…`, then parse the rendered plist with `plistlib` and grep the systemd `ExecStart`; then install again to a *second* prefix | both units exec `<PREFIX>/bin/agent-terminald`, neither contains a placeholder, the template-only note, or `/usr/local/bin`; `<PREFIX>/bin` is first on the launchd `PATH` with `/usr/bin` and `/bin` still present; the default prefix lists `/usr/local/bin` exactly once; the second install re-renders instead of reusing the first | PASS⁵ |
+| TC-21 | **an install that leaves a different daemon elsewhere says so** | drive `tools/check_install_paths.sh` with three synthetic prefixes — a differing binary, a byte-identical one, a symlink to the installed copy — and once with `cmp` hidden by an empty `PATH` | the differing copy warns and the warning names **both** paths; rc is 0 in every case, including the warning one; silence for identical bytes, for the symlink, and for an absent prefix; with `cmp` unavailable it prints `DID NOT RUN` rather than nothing | PASS⁵ |
 
 ¹ TC-07 **failed on the build under test** and exposed BUG-1 (below). It passes since v22.
 ² History was empty for this session — analyzed and confirmed **by design**, two documented
@@ -49,6 +53,18 @@ that already scrolled off survives on disk regardless).
 
 ³ TC-16/TC-17 **failed on v22** and are the security round below. Both pass since the
 `O_CLOEXEC` + `msg_len` fixes, and reverting either fix makes them fail again.
+
+⁴ TC-18/TC-19 likewise failed before the geometry clamp and the HELLO deadline (security
+round 2 below). Measured on the unfixed daemon: `ls` reported `65535x65535` and peak RSS was
+163 MiB; after the clamp, `1000x1000` and 61 MiB. The geometry assertion is the primary one
+precisely because it differs by 65× while RSS differs by only 1.3× against a portable ceiling.
+
+⁵ TC-20/TC-21 are new in security round 4 below and cover the install path rather than the
+running daemon. Both fail against the previous tree: TC-20 because the units had
+`/usr/local/bin` written into them, TC-21 because no check existed. Measured on this machine
+before the change: `/usr/local/bin/agent-terminald` and `~/.local/bin/agent-terminald` were
+byte-identical (`5a61d0dc7306c310…`) **only because the installed plist had been hand-edited**
+to the second path — the shipped copy said the first.
 
 ## BUG-1 (found by TC-07, fixed in v22): reload was dead on macOS
 
@@ -110,7 +126,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-04 | CLI coexistence | `agent-terminal attach -s <name>` in a terminal while the GUI shows it | both render the same output live; `ls` shows 2 clients |
 | GUI-05 | session switch | click between two sessions repeatedly | each switch repaints the correct session; input goes to the newly selected one |
 | GUI-06 | templates | click *+ New Claude session* / *+ New shell* | session created with a free name (`claude`, then `claude-2`…), appears in sidebar, renders |
-| GUI-07 | kill | right-click a session, confirm | session ends; row disappears; `ls` agrees |
+| GUI-07 | kill | right-click a throwaway session; read the prompt; press Escape; right-click again and click **Kill**. Do this in a real `.app` bundle, not only the debug binary | the prompt appears **inside the window** in place of the row, naming that session; Escape and Cancel restore the row and kill nothing; Kill ends the session, the row disappears and `ls` agrees. A prompt that never appears means the build regressed to `window.confirm`, which is a no-op on macOS |
 | GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
 | GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
 | GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
@@ -131,9 +147,18 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-25 | hooks tab | open the right panel, switch to **Hooks**; click a rule row; temporarily rename ~/.claude/settings.json and switch tabs back and forth (restore after) | rules from the real settings.json appear grouped by event (this machine: two PreToolUse/Bash rows); clicking shows the script source read-only; with the file missing the tab says so honestly instead of erroring |
 | GUI-26 | hook-log chain badge | with no ~/.claude/hooks/hooks.log: read the security card; then hand-build a 2-line valid chain per app/design/hook-log.md, watch; edit line 1's reason in an editor; delete the file | absent → "no hook log" pointing at the doc; valid chain → green "chain verified · 2 events" with the events listed newest-first; after the edit → red "chain broken at line 2" with history still shown; deleted → back to the absent state |
 | GUI-27 | letterbox labels itself + newborns fit | attach a small CLI-created session in a big window; then create a new session from a template | small session: a dashed hint sits in the dead space naming the grid ("session 80×24 · ⤢ fit to window"); clicking it fills the window and the hint disappears; the GUI-created session arrives already window-sized, no hint, no button press |
+| GUI-28 | **viewer refuses a symlink** | with the throwaway hook rule below in place, click its row and read the script; then `ln -sf ~/.ssh/id_rsa /tmp/uat-hook.sh` (any file you can name works — a `printf MARKER > /tmp/uat-secret` is the polite version) and click the row again | first click: the script source. After the swap: a refusal naming a non-regular file, and **none of the target's bytes appear** — the check is per click, so no restart is involved; deleting the link and restoring the real file serves it again |
+| GUI-29 | **oversize script truncates visibly** | `python3 -c 'open("/tmp/uat-hook.sh","w").write("#x\n"*800000)'` (≈2.3 MiB), click the row, scroll to the end of the viewer | the source renders and ends in a visible notice that the script is larger than 1 MiB and only the first 1 MiB is shown, pointing at the file; the panel stays responsive and the window does not grow by the file's size |
+| GUI-30 | hook log tolerates a hostile writer | with a valid 2-line chain (GUI-26) present, append 3 MiB with no newline in it (`python3 -c 'open(P,"a").write("x"*3_000_000)'`), watch the card for ~10 s; then append a single `\n` followed by a fresh valid line | the card keeps updating throughout (no freeze, no ballooning memory): the unterminated line is counted as malformed rather than buffered, the badge reports the chain broken, and the following newline resynchronizes so the new event is listed |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
+
+**The hook rule for GUI-28/GUI-29 must be inert.** The panel lists rules by event and
+matcher without regard to whether they can fire, so add the throwaway to
+`~/.claude/settings.json` under a matcher that matches no tool (`"matcher":
+"UatNeverMatches"`) with `"command": "/tmp/uat-hook.sh"`, and remove it afterwards. A rule
+with a real matcher would have Claude Code *execute* the file — including the 2.3 MiB one.
 
 ### Round 1 (2026-08-10, against the production daemon)
 
@@ -342,6 +367,278 @@ observed failing against the pre-fix source restored by `cp` — the fd-table as
 write probe and the `msg_len` length assertion independently — and the `_Static_assert` was
 observed failing the build. Full gate after the fixes: 8 unit suites under ASan (0 failures),
 24/24 integration scripts on release, release build with 0 warnings.
+
+## Security round 2 (2026-08-12): denial of service by a same-uid client
+
+The uid is this daemon's entire trust boundary, so "authenticate harder" is not an available
+defense — any process running as the user may connect and is fully authorized. What *is*
+available is refusing to let one client consume an unbounded share of memory or of the client
+slot table, which matters more here than in a plain multiplexer: the product exists so that a
+long-running agent survives, and a daemon killed by the OOM killer takes every session's PTY
+with it. Three fixes, each with the guard observed failing:
+
+1. **Geometry was clamped by the VT engine but not by the model** (`session.c`, 3 entry
+   points; `server.c`, 3 wire sites). libvt clamps its own grid to 1000×1000 *before*
+   `calloc`, so the engine allocation was never the problem — but `session`/`pane` kept the
+   raw `u16` the client sent, and the compositor pads every row out to `pane.cols` while
+   drawing only the cells the engine holds. At `cols=65535` that is ~64 KiB of spaces per row
+   and ~64 MB per frame, rebuilt on the 20 ms tick while any pane is dirty. Two properties
+   make it worse than a large allocation: it costs the attacker nothing but a `connect()`, and
+   it **survives the attacking client disconnecting**, because `session_composite_all` does
+   not check for an attached client (`ls` shows `0 clients, 2 panes` and the cost continues).
+   The clamp went in where geometry *enters* the model, so every rectangle derived from it
+   later — layout reflow, zoom, split — is bounded by construction; a clamp at those derived
+   sites would mask a layout bug instead of bounding an input. `VT_ROWS_MAX`/`VT_COLS_MAX`
+   moved into the public `vt.h` for the same reason: a limit a caller cannot see is a limit
+   the caller cannot honor, and it is the caller's unclamped copy that does the damage.
+   Beyond the audited list, a **third** entry point turned up while fixing it —
+   `session_import_pane` reads per-pane geometry straight out of the handoff state file
+   rather than deriving it from the (clamped) view, so a torn file reaches the compositor
+   without passing the wire clamp at all.
+2. **`PRE_HELLO_BUDGET` bounds bytes, not time** (`server.c`, `main.c`). A peer that connects
+   and sends *nothing* spends none of that budget and holds its slot forever; at
+   `MAX_CLIENTS 32`, `server_accept` then has no slot and closes every real client
+   immediately, so one process with 32 idle sockets locks the user out of their own sessions.
+   The fix is a per-client `connected_at` and a 5 s deadline, necessarily driven by the daemon
+   tick rather than the read path: a silent peer generates no readable event, so no amount of
+   care where bytes arrive can ever notice it. 5 s is ~3 orders of magnitude above a local
+   HELLO round trip, which is the margin that keeps it from firing on a real client.
+3. **`reflow_node` had no cycle guard** (`layout.c`). Node indices are raw `int8_t` that can
+   arrive from a handoff state file; `handoff.c` range-clamps them, which buys safe *indexing*
+   but says nothing about termination, so `child[0] == self` — or any edge back to an ancestor
+   — recursed until the stack died. A depth cap of `LAYOUT_NODES` cannot reject a legitimate
+   layout, since `LAYOUT_MAX_LEAVES` is 6 and the deepest real tree is 5. The misleading
+   comment at the `handoff.c` clamp was corrected to say which property it actually buys.
+
+Two **methodological results** worth more than the fixes:
+
+- **The intuitive attack frame was silently defeated by an unrelated defense.** The first
+  probe pipelined HELLO + NEW_SESSION + SPLIT_PANE, which coalesce into one read; that read
+  exceeds `PRE_HELLO_BUDGET` while `hello_done` is false, so the daemon disconnected the
+  probe as garbage and reported a *clean* 2 MiB daemon with no session at all. Same shape as
+  round 1's NUL-terminated `%.*s` frame: a probe that never reaches the vulnerable code looks
+  exactly like a daemon that is not vulnerable. The shipped test reads HELLO_OK before sending
+  anything else, and says why in a comment.
+- **RSS is the wrong primary assertion.** 163 MiB exceeds the portable 128 MiB ceiling by only
+  1.3×, so the check is one machine away from being a coin flip; the daemon's own `ls` output
+  differs by 65× (`65535x65535` vs `1000x1000`) and is exact. RSS is kept as an explicitly
+  weaker second net at the ceiling `test_soak.sh` already proves portable.
+- **A third denial surface, found by CI failing the test rather than the product.** The
+  40-connection flood aborted on macOS CI with `ECONNREFUSED` at connection 40 while passing
+  locally: `server_accept` takes **one** connection per poll cycle against a listen backlog of
+  16, so a burst can fill the accept *queue* — and macOS answers `ECONNREFUSED` on an AF_UNIX
+  socket that is still listening. CI hit it because the daemon was still compositing part 1's
+  sessions and so accepted more slowly than the flood connected. Two changes, because the
+  queue and the slot table are different resources: the flood now retries a refusal (verified
+  the hard way — `SIGSTOP` the daemon so the queue provably fills, and the pre-patch flood dies
+  with `ECONNREFUSED` where the patched one reaches 40 and exits 0 on `SIGCONT`), and part 2
+  kills part 1's sessions first so it measures the slot table rather than the compositor's tick
+  budget. The backlog itself is left alone: unlike a held slot it is self-healing, since a
+  refused client simply retries.
+
+Regression coverage: `tests/integration/test_dos_limits.sh` (TC-18 + TC-19) and
+`reflow_survives_cyclic_tree` in `tests/unit/test_layout.c` — four hostile graphs the public
+API cannot construct, where the pass condition is that the test *terminates at all*, plus a
+maximum-depth legal tree as the negative control. Every guard was mutation-checked against
+pre-fix source restored by `cp`: the layout cycle guard 4/4 (each case observed alone, two as
+an ASan stack-overflow and two as a UBSan out-of-range index), and **all nine** assertions of
+the integration test observed failing independently, including the ones a short-circuit would
+otherwise hide — the identity-clamp mutant, an over-eager clamp that squashes 200×50, a probe
+that skips the split, `MAX_CLIENTS 128` (so the flood no longer denies anything, which must
+fail the *positive control* rather than pass the test), and a reap whose log line changed but
+whose behavior did not. Full gate: 9 unit suites under ASan/UBSan (6,352 checks, 0 failures),
+25/25 integration scripts on release, release build with 0 warnings.
+
+## Security round 3 (2026-08-12): the GUI's read gate and its plugin ACL
+
+The webview is inside the trust boundary by design — this is a client for spawning shells, so
+gating the argv it sends would be theatre while `stdin_data` exists. What is *not* inside the
+boundary is the filesystem the panel reads on the user's behalf, and the hook rules it reads
+come from a file two other programs write. Four changes, plus one bug found and deliberately
+left for its own PR:
+
+1. **The read gate followed symlinks** (`hooks.rs`). `Path::is_file` goes through
+   `fs::metadata`, which answers about the symlink *target*, so the "regular file" half of the
+   gate was satisfied by a link. The exact-match-against-the-snapshot half already held — the
+   snapshot is only ever written from `~/.claude/settings.json` and there is no fs-write
+   command — so this is not arbitrary file read; the reachable case is that a hook command
+   normally lives somewhere far more writable than `~/.claude` (`/tmp/guard.sh`, a script
+   inside a checked-out repo), and replacing it in place with a link to `~/.ssh/id_rsa` has the
+   panel render the key on the next click, without the attacker needing read access to the
+   target at all. Fixed with `symlink_metadata` + `file_type().is_file()`, which also rules out
+   a FIFO — one click into a read that never returns, while holding the panel's lock. Because
+   `File::open` follows links and runs after the `lstat`, the opened fd's `(dev, ino)` is
+   compared to the `lstat`'s: the check is on the file that was actually opened, not on what
+   the path meant a moment earlier.
+2. **Both reads are now bounded** (`hooks.rs`). `read_to_string` on a hook script and the
+   log-tail delta were unbounded, in a panel that polls every 2 s. The script cap is 1 MiB with
+   the truncation *stated in the rendered text*, because a viewer whose job is auditing a hook
+   silently showing 1 MiB of 3 is the worst available outcome. The log gets two separate caps:
+   1 MiB per poll (the cursor advances only by what was consumed, so a backlog is verified
+   across the next few polls rather than inside one blocking call, and `N events` therefore
+   counts what has been *verified*), and 1 MiB for a single unterminated line — the per-poll cap
+   bounds work but not memory, since bytes with no newline in them are held for the next poll
+   and accumulate for as long as a writer withholds the newline.
+3. **The webview's plugin ACL was `notification:default`** (`capabilities/default.json`), all
+   16 of the plugin's permissions, against three calls in `notify.ts`. Now those three are
+   named one at a time. Stated honestly: **13 of the 16 name commands
+   `tauri-plugin-notification` 2.3.3 does not register at all** (`init()` registers exactly
+   `is_permission_granted`, `request_permission`, `notify`), so this is least privilege, not a
+   closed hole. It is worth keeping anyway because the ACL is what a future plugin version's
+   new commands would be granted by. The mapping is not greppable from the npm package —
+   `requestPermission()`/`sendNotification()` reach the backend through a `window.Notification`
+   replacement the plugin injects, not through `invoke()` — so `src/capabilities.test.ts`
+   asserts the granted set equals the called set in **both** directions rather than leaving the
+   correspondence to a reader.
+4. **A comment recording why OSC 8 hyperlinks are inert** (`Terminal.tsx`). There is no
+   `linkHandler` and no web-links addon, which is the decision; what needed writing down is that
+   xterm's fallback path is also dead only *by accident*. wry 0.55.1's WKWebView UI delegate
+   implements four methods and `runJavaScriptConfirmPanel` is not among them, so `confirm()`
+   completes false on macOS. Adding the addon, a `linkHandler`, or a webkit2gtk target turns
+   session output — which chooses both the visible text and the destination — into browser
+   navigation.
+
+Two results worth more than the fixes:
+
+- **A mutant whose output is byte-identical means the test watches the wrong quantity.**
+  Removing the script cap (`take(u64::MAX)`) survived the first harness run: the string still
+  got truncated further downstream, so every assertion about the *rendered text* passed — while
+  the process had still read and held the whole file, which is the entire cost being refused.
+  The fix was to the test, not the mutant: `read_capped` returns the byte count it consumed, and
+  the assertion is `read == cap + 1`. Generally, a guard that bounds a *resource* rather than a
+  *result* has to expose an observable, or it cannot be tested at all.
+- **An unschedulable guard belongs in the harness as a named expected survivor.** The
+  `(dev, ino)` comparison only fires if the path is swapped between the `lstat` and the `open`,
+  which no test can schedule deterministically; deleting it kills nothing. Rather than omit that
+  mutant and quietly report a clean sweep, it is run and listed as expected to survive, with
+  `same_file` tested directly on two real files instead.
+
+**One real bug found and not fixed here.** `window.confirm()` completing false on macOS is not
+only about hyperlinks: `Sidebar.tsx` gates session kill on exactly that call, so the GUI's kill
+button is **silently inert** in this build (fail-safe, and GUI-07 was never eyeballed — the
+round-1 note that GUI-05..09 remain unconfirmed is why it went unnoticed). It gets its own
+stacked PR with an in-app confirmation and the missing `Sidebar` test, rather than being folded
+into a security change.
+
+**Follow-up, in the next PR:** fixed. The prompt is now rendered by the app, in place of the
+row it is about, with focus on Cancel and Escape to dismiss — and two guards the platform
+dialog never had, because a modal dialog blocks the poll while an in-app one does not: the
+prompt is dropped if its session dies underneath it, and dropped if that name reappears on a
+different pid (the daemon addresses sessions by name, and `nextSessionName` reuses a freed
+one, so a prompt left standing across that gap would kill a session its reader never saw).
+Seven tests in `src/sidebar/Sidebar.test.tsx`, which did not exist; 6/6 mutants killed,
+including restoring `window.confirm` with a spy that *accepts* — a spy returning false would
+be satisfied by a component that does nothing at all, which is precisely the bug.
+
+Regression coverage: 5 new tests in `hooks.rs` (9 total in-crate) and
+`src/capabilities.test.ts` (4). Mutation-checked against pre-fix source restored by `cp`: the
+hook gate 9 killed + the 1 named expected survivor above, the capability ACL 5/5 — including
+the two directions of the drift assertion and a vacuity guard, since a test that reads its
+sources through `import.meta.glob` passes trivially if the glob matches nothing. Full gate
+after `npm run build`: vitest 132 tests in 21 files, `cargo test --workspace` 119 tests,
+clippy `-D warnings` clean, `tsc --noEmit` clean, frontend bundle unchanged at 500.85 kB.
+
+## Security round 4 (2026-08-12): what the uid boundary really means, and the install path
+
+Rounds 1–3 fixed defects *inside* the trust model. This round is about the model itself, and
+about the one way the project could hand somebody an unpatched daemon while every test stayed
+green. One half changes only words; the other half changes the build.
+
+### The threat model, stated instead of implied
+
+`SECURITY.md` said "single-user, local-only tool" and left the consequence to be inferred. The
+consequence is worth a sentence of its own: the daemon authenticates *who* connects — the
+peer's uid — and then authorizes *everything*. After `MSG_HELLO` any connected client may list
+every session, attach to every session, inject keystrokes into every session, kill any of them,
+and reload the daemon. There is no per-session token and no capability scoping, so **a command
+running inside session A can connect to the socket and take full control of session B** — not
+by exploiting a bug, but by using the protocol as designed.
+
+This is the same model as tmux and screen, and the two layers defending it are the right ones
+and verified correct in round 1 (socket 0600 inside a 0700 directory; peer-uid check
+fail-closed before the protocol is spoken). What they buy is that *other* users cannot reach
+your sessions; within your own uid they buy nothing, because a process running as you is
+indistinguishable from you. It is called out because this project's selling point is running
+*agents* inside sessions, which is exactly where "everything running as you is equally trusted"
+stops matching what people assume.
+
+Two limits on how far such a takeover escalates were re-checked by reading the tree rather than
+quoted from the previous round: session argv reaches **one** `execvp` call site
+(`src/daemon/pty.c:76`) and never a shell — zero occurrences of `system(` or `popen(` anywhere
+under `src/` — so argv content is literal argument bytes, and an argv-injection bug elsewhere
+could start a *wrong program* but could not become metacharacter injection. And there are zero
+`setuid`/`setgid`/`seteuid` calls: `sudo make install` installs a binary that still runs as
+you, so taking over the daemon gains an attacker exactly the privileges they already had. The
+GUI webview is likewise inside the boundary rather than a sandbox, which is why the defenses
+that matter there are the ones keeping *foreign code out of the webview* (no `script-src`
+relaxation, no reachable remote origin, no devtools in release, five production dependencies),
+not a gate on the argv it sends. No code changed for any of this; the point is that a reader of
+`SECURITY.md` should not have to derive it.
+
+### The install path could hand you a stale daemon, silently
+
+This one is a real defect, and it is not in any C file. `make install` defaults to
+`PREFIX=/usr/local`; `AGENTS.md` recommends `PREFIX=$HOME/.local` (sudo blocks on a password
+prompt with no tty, so agents in particular are told to use it); and both service units had
+`/usr/local/bin/agent-terminald` written into them, with a launchd `PATH` block that omitted
+`~/.local/bin`. Follow both documents and launchd or systemd starts whatever sits at
+`/usr/local/bin` — after an earlier install, an **older build**.
+
+Nothing reports that. The client autospawns the `agent-terminald` next to its own binary, but
+only when nothing is answering the socket, so the old daemon wins by answering first; and the
+protocol skips frames it does not recognize, so every message the old build predates becomes a
+silent no-op — new key bindings do nothing, new fields read as absent, no error anywhere. A
+stale daemon is an unpatched daemon, and it looks like a feature that does nothing.
+
+Measured on this machine before the change: `/usr/local/bin/agent-terminald` and
+`~/.local/bin/agent-terminald` were byte-identical (`5a61d0dc7306c310…`) — but only because the
+installed `~/Library/LaunchAgents/dev.agentterminal.daemon.plist` had been **hand-edited** to
+the `.local` path while the repo's shipped copy still said `/usr/local/bin`. The hazard had
+already been worked around by hand, once, by the only person who would have noticed.
+
+Two changes:
+
+1. **The units are templates rendered per-`PREFIX` at install time** (`contrib/*.in` →
+   `PREFIX/share/agent-terminal/`), with the install prefix substituted into launchd's
+   `ProgramArguments[0]`, systemd's `ExecStart`, and the launchd `PATH`. `contrib/` no longer
+   contains a copyable unit at all, and TC-20's first assertion is about the repo rather than
+   the output for that reason: a test that only checked the rendered copy would keep passing if
+   someone re-added a ready-made `.plist` beside the template, and that file *is* the bug. The
+   explanatory paragraph in each template is deleted at render time (`@TEMPLATE_NOTE_BEGIN@` /
+   `…END@`, stripped **before** substitution) so the installed file never claims to be
+   something you still have to edit — the first draft rendered "THIS IS A TEMPLATE" into the
+   usable copy, complete with a substituted path.
+2. **`make install` warns when a byte-different `agent-terminald` exists at another common
+   prefix** (`tools/check_install_paths.sh`, compared with `cmp`, naming both paths). It always
+   exits 0: a leftover binary elsewhere is something to tell the user about, not a reason to
+   fail their `sudo make install`. Under `DESTDIR` the check is skipped and says so, since the
+   prefixes it inspects belong to the build host and not to the staging root.
+
+An unsubstituted placeholder now fails loudly on both platforms rather than starting the wrong
+binary: launchd rejects a `ProgramArguments[0]` that is not an executable path, and systemd
+reads a leading `@` in `ExecStart` as its argv[0]-override prefix, leaving a *relative* path,
+which `ExecStart` does not accept — the unit is refused.
+
+Regression coverage: `tests/integration/test_install_units.sh` (TC-20 + TC-21), 11 assertions.
+13/13 mutants killed, 0 survivors, 0 errors — across the Makefile's render rule and prefix
+handling, both templates, and every branch of the check script (drop the warning, drop the
+`cmp` guard, drop the "both paths" line, reverse the identical-bytes skip). Two mutants first
+came back as harness **ERRORs** rather than survivors, correctly: the mutation regex had drifted
+against the `UNIT_PATH :=` line and edited nothing, and an edit that changes no bytes proves
+nothing about the guard. Restoring the four mutated files was then verified byte-for-byte in
+Python against a deliberate drift control, because the first verification loop was written in
+zsh, where an unquoted `set -- $pair` does not word-split — every "ok" it printed had compared
+an empty string to an empty string.
+
+One finding from this round is a build-system bug worth recording separately: the rendered unit
+initially depended only on its template, not on the *value* of `PREFIX`, so
+`make install PREFIX=/a` followed by `make install PREFIX=/b` reinstalled `/a`'s unit — the
+stale-path bug arriving through the build system instead of through the docs. The first fix, a
+content-compare stamp file, **also failed**, because GNU make 3.81 (what macOS ships) compares
+mtimes at 1-second granularity and the whole sequence runs inside one second. The fix that
+holds is the idiom already used for `$(VERSION_H)`: a `FORCE` prerequisite, render to `$@.tmp`,
+and `cmp -s` then either discard or move — always re-run, but leave the mtime alone when the
+bytes are unchanged. TC-20's second-prefix install is the assertion that pins it.
 
 ## Reproducing this UAT
 
