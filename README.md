@@ -52,27 +52,46 @@ make test BUILD=asan   # optional: run unit tests under ASan/UBSan
 sudo make install      # installs to /usr/local (override with PREFIX=)
 ```
 
-Installed artifacts: `agent-terminald`, `agent-terminal`, and the
-`agent-terminal(1)` man page.
+Installed artifacts: `agent-terminald`, `agent-terminal`, the
+`agent-terminal(1)` man page, and the two service units below rendered for
+whichever `PREFIX` you installed to, under
+`PREFIX/share/agent-terminal/`.
+
+If a **different** `agent-terminald` is already installed at another prefix,
+`make install` says so. Two copies do not conflict at install time; they
+conflict at connect time, and there is no error message when they do — see
+[Run the daemon as a service](#run-the-daemon-as-a-service-recommended).
 
 ### Run the daemon as a service (recommended)
 
 The daemon auto-starts on first use, but a service manager restarts it
-after crashes and reboots so `attach` always works:
+after crashes and reboots so `attach` always works. Copy the unit that
+`make install` generated — it names the prefix you installed to, and the
+copies in `contrib/` are templates that deliberately do not run:
 
 **macOS (launchd):**
 ```sh
-cp contrib/launchd/dev.agentterminal.daemon.plist ~/Library/LaunchAgents/
+cp "$PREFIX/share/agent-terminal/dev.agentterminal.daemon.plist" ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/dev.agentterminal.daemon.plist
 ```
 
 **Linux (systemd user unit):**
 ```sh
 mkdir -p ~/.config/systemd/user
-cp contrib/systemd/agent-terminald.service ~/.config/systemd/user/
+cp "$PREFIX/share/agent-terminal/agent-terminald.service" ~/.config/systemd/user/
 systemctl --user enable --now agent-terminald
 loginctl enable-linger $USER   # keep sessions alive after logout
 ```
+
+The unit is generated rather than shipped ready-to-copy because a fixed path
+in it is worse than an inconvenience. A service unit pointing at a prefix you
+no longer use starts the **older** binary that is still sitting there, and that
+daemon answers the socket first — so the client's autospawn, which only runs
+when nothing is answering, never gets to start yours. The protocol skips frames
+it does not recognize, so every message the old daemon predates becomes a silent
+no-op: new key bindings do nothing and nothing anywhere prints an error. A stale
+daemon is an unpatched daemon. `agent-terminal version` prints both builds when
+you want to know which one you are actually talking to.
 
 ## Usage
 
@@ -331,6 +350,18 @@ vulnerabilities. Highlights:
 
 - Unix socket in a 0700 dir, 0600 socket, peer-UID verified
   (`SO_PEERCRED` / `getpeereid`). No network listener of any kind.
+- **The UID is the whole boundary, so sessions are not isolated from each
+  other.** Any client that passes the UID check is authorized on *every*
+  session, which means a command running inside session A can connect to the
+  socket and read, type into, or kill session B — using the protocol as
+  designed, not by exploiting anything. Same model as tmux and screen, worth
+  saying out loud here because running agents in sessions is exactly the case
+  where "everything running as you is equally trusted" stops matching what
+  people assume. Workloads that must not reach each other need separate UIDs
+  or containers, not separate sessions.
+- Session commands reach `execvp` and **never a shell** — no `system()` or
+  `popen()` anywhere in the tree — so metacharacters in argv stay literal
+  argument bytes. The daemon is never setuid.
 - The VT parser — the untrusted-input surface — is an isolated,
   **syscall-free** library (`src/vt/`), fuzzed nightly (libFuzzer) and run
   under ASan+UBSan on every PR, with golden-replay conformance tests
@@ -442,17 +473,19 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 25 end-to-end scripts covering the failure modes this tool
+- **Integration**: 26 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving, pane splits / directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,
-  path-traversal probes, close races, honest error reporting, and the
+  path-traversal probes, close races, honest error reporting, the
   same-uid abuse cases from the security rounds (inherited scrollback fds,
-  oversized geometry, connections that never identify themselves). Run on
-  macOS and Linux in CI on every PR.
+  oversized geometry, connections that never identify themselves), and the
+  install path that could otherwise leave an older daemon answering the
+  socket. Run on macOS and Linux in CI on every PR.
 - **End-user UAT with a real Claude Code session** — the actual workload,
-  driven through a real pty with real keystrokes, two full rounds (27
-  cases): crash-reattach with the same process answering, panes with arrow
+  driven through a real pty with real keystrokes, 21 cases over two rounds
+  plus what four security rounds added: crash-reattach with the same
+  process answering, panes with arrow
   navigation and zoom around a live TUI, a daemon binary upgrade under the
   conversation, multi-client viewing, batch `claude -p` patterns. Full test
   logs — case IDs, data, procedure, verdicts, the macOS reload bug round 1

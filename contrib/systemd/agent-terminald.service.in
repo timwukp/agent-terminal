@@ -1,10 +1,32 @@
 # systemd user unit for agent-terminald.
+# @TEMPLATE_NOTE_BEGIN@
+# THIS IS A TEMPLATE, and everything down to the END marker is dropped from the
+# rendered copy — including this paragraph, so that the installed file never
+# claims to be something you still have to edit. `make install` substitutes the
+# placeholders and writes the usable copy to PREFIX/share/agent-terminal/. Copy
+# THAT file, not this one:
 #
-# Install:
+#   make install PREFIX="$HOME/.local"
 #   mkdir -p ~/.config/systemd/user
-#   cp contrib/systemd/agent-terminald.service ~/.config/systemd/user/
+#   cp "$HOME/.local/share/agent-terminal/agent-terminald.service" \
+#      ~/.config/systemd/user/
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now agent-terminald
+#
+# It is a template because the path had to be wrong for somebody. A shipped unit
+# naming /usr/local/bin is wrong for everyone who followed AGENTS.md and
+# installed to ~/.local, and the way it is wrong is the bad way: if an older
+# /usr/local/bin/agent-terminald is still there from a previous install, systemd
+# starts THAT one, it answers the socket first, and the client's sibling-first
+# autospawn never runs because a daemon is already answering. The protocol skips
+# frames it predates, so the new client goes quiet rather than erroring — a stale
+# daemon is an unpatched daemon, and it looks like a feature that does nothing.
+#
+# Unsubstituted, this file fails loudly instead. systemd reads a leading `@` in
+# ExecStart as its argv[0]-override prefix, so what remains of the placeholder is
+# a relative path, which ExecStart does not accept: the unit is refused rather
+# than started wrong.
+# @TEMPLATE_NOTE_END@
 #
 # For sessions that must survive logout, also run:
 #   loginctl enable-linger $USER
@@ -27,9 +49,10 @@ Type=simple
 # ~/bin, cargo/nvm shims). Session commands inherit the daemon's PATH, so a
 # command that lives there dies instantly with exec 127 and the session
 # appears to "do nothing" — the screen and `history` now name the reason.
-# Uncomment and extend as needed (%h = your home directory):
-#Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/agent-terminald -f
+# Uncomment and extend as needed; the first entry is your install prefix, filled
+# in at install time (%h = your home directory, if you need to add more):
+#Environment=PATH=@BINDIR@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@BINDIR@/agent-terminald -f
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1
