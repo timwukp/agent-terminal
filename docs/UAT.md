@@ -405,6 +405,18 @@ Two **methodological results** worth more than the fixes:
   1.3×, so the check is one machine away from being a coin flip; the daemon's own `ls` output
   differs by 65× (`65535x65535` vs `1000x1000`) and is exact. RSS is kept as an explicitly
   weaker second net at the ceiling `test_soak.sh` already proves portable.
+- **A third denial surface, found by CI failing the test rather than the product.** The
+  40-connection flood aborted on macOS CI with `ECONNREFUSED` at connection 40 while passing
+  locally: `server_accept` takes **one** connection per poll cycle against a listen backlog of
+  16, so a burst can fill the accept *queue* — and macOS answers `ECONNREFUSED` on an AF_UNIX
+  socket that is still listening. CI hit it because the daemon was still compositing part 1's
+  sessions and so accepted more slowly than the flood connected. Two changes, because the
+  queue and the slot table are different resources: the flood now retries a refusal (verified
+  the hard way — `SIGSTOP` the daemon so the queue provably fills, and the pre-patch flood dies
+  with `ECONNREFUSED` where the patched one reaches 40 and exits 0 on `SIGCONT`), and part 2
+  kills part 1's sessions first so it measures the slot table rather than the compositor's tick
+  budget. The backlog itself is left alone: unlike a held slot it is self-healing, since a
+  refused client simply retries.
 
 Regression coverage: `tests/integration/test_dos_limits.sh` (TC-18 + TC-19) and
 `reflow_survives_cyclic_tree` in `tests/unit/test_layout.c` — four hostile graphs the public

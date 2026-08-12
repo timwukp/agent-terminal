@@ -158,6 +158,15 @@ grep -q "^huge: 1000x1000, pid [0-9]*, 0 clients, 2 panes" "$TMP/ls.out" \
 PEAK_MB=$((PEAK_RSS / 1024))
 [ "$PEAK_MB" -le 128 ] || fail "daemon RSS peaked at ${PEAK_MB} MiB (>128) on two oversized sessions"
 
+# Part 1 is fully measured by here (ls.out captured, all four assertions made,
+# RSS sampled), and leaving its sessions alive makes part 2 depend on the
+# compositor's tick budget instead of on the client slot table it means to test:
+# a daemon still painting two sessions accepts more slowly than a burst connects.
+for s in huge normal; do
+    "$BIN/agent-terminal" kill -s "$s" > "$TMP/kill.out" 2>&1 \
+        || fail "could not kill session $s before part 2: $(cat "$TMP/kill.out")"
+done
+
 # ---- part 2: silent connections cannot hold the client slot table -----------
 #
 # MAX_CLIENTS is 32 (server.c). 40 connections, so the table is exhausted even
@@ -166,9 +175,28 @@ cat > "$TMP/silent.py" <<'PY'
 import os, socket, sys, time
 sock_path, n, ready, release = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 socks = []
+# A refused connect is NOT the denial this test is about: server_accept takes one
+# connection per poll cycle against a listen backlog of 16, so a burst can fill
+# the accept QUEUE, and macOS then answers ECONNREFUSED on an AF_UNIX socket that
+# is very much still listening. Distinguishing the two matters — the slot table is
+# what the HELLO deadline reclaims, and the queue drains by itself — so a refusal
+# is retried rather than counted. CI is what proved the burst can outrun accept:
+# the daemon was still compositing part 1's sessions, so it accepted more slowly
+# than the flood connected and the run aborted at connection 40 of 40 on a
+# transient condition. (That the backlog is a second, cruder denial surface is
+# true and out of scope here: it is self-healing, since a refused client retries.)
 for _ in range(n):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(sock_path)          # and not one byte is ever sent
+    for attempt in range(200):
+        try:
+            s.connect(sock_path)  # and not one byte is ever sent
+            break
+        except ConnectionRefusedError:
+            time.sleep(0.02)      # ~4 s of patience per connection, worst case
+    else:
+        print('gave up on connection %d of %d: accept queue stayed full'
+              % (len(socks) + 1, n), file=sys.stderr)
+        break
     socks.append(s)
 with open(ready, 'w') as f:
     f.write('%d\n' % len(socks))
