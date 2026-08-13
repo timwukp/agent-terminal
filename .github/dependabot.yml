@@ -8,6 +8,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The pins deliberately track a chosen major line (see the workflows'
+    # comments): a major bump changes an action's contract and is a human
+    # decision, not a hygiene update. Minor/patch PRs still arrive; on its
+    # first run Dependabot proposed four major jumps (checkout 4->7, cache
+    # 4->6, setup-node 4->7, upload-artifact 4->7) that a "keep the pins
+    # fresh" config was never meant to decide.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /app/tauri/src-tauri
     schedule:
