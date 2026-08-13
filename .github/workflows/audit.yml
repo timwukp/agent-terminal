@@ -1,0 +1,48 @@
+# Dependency audits for the GUI's two ecosystems (the C core has no
+# dependencies beyond libc — there is nothing to audit there).
+#
+# Thresholds are the strictest ones that pass today, measured before gating:
+#   cargo audit  — 0 vulnerabilities, 17 warnings (16 unmaintained + one
+#                  unsound: glib 0.18.5 via tauri). Default threshold fails on
+#                  vulnerabilities only; --deny warnings would be red on day
+#                  one, which teaches everyone to ignore the job. The warnings
+#                  still print in the log, visibly, on every run.
+#   npm audit    — 0 vulnerabilities at every level, so the default (fail on
+#                  any) is affordable and anything weaker would be a regression.
+name: audit
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "41 4 * * 1" # weekly, Monday, off the top of the hour
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - app/tauri/src-tauri/Cargo.lock
+      - app/tauri/package-lock.json
+      - .github/workflows/audit.yml
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app/tauri/src-tauri
+      - run: cargo install cargo-audit --locked --version 0.22.2
+      - run: cargo audit
+        working-directory: app/tauri/src-tauri
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # npm audit reads package-lock.json directly; no install needed.
+      - run: npm audit
+        working-directory: app/tauri
