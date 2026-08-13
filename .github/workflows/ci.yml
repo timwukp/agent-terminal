@@ -72,6 +72,18 @@ jobs:
       - name: Workflow hygiene (permissions + SHA pins)
         run: sh tools/check_workflow_pins.sh
 
+  redaction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # No cloud metadata or personal paths in the public tree. The guard
+      # scans git-tracked files (what GitHub serves), fails loudly, and exits
+      # non-zero if it somehow scanned nothing — silence must never read as
+      # clean. Its regexes are themselves tested by
+      # tests/integration/test_redaction_guard.sh.
+      - name: Cloud-metadata / personal-path scan
+        run: sh tools/check_redaction.sh
+
   clang-tidy:
     runs-on: ubuntu-latest
     steps:

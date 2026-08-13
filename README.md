@@ -487,7 +487,7 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 27 end-to-end scripts covering the failure modes this tool
+- **Integration**: 28 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving, pane splits / directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,
