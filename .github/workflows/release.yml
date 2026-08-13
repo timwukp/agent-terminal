@@ -104,7 +104,10 @@ jobs:
           tar -xzf "agent-terminal-$V.tar.gz" -C /tmp
           got="$(cd "/tmp/agent-terminal-$V" && sh tools/version.sh)"
           [ "$got" = "$V" ] || { echo "tarball identifies as '$got', want '$V'"; exit 1; }
-          make -C "/tmp/agent-terminal-$V" test BUILD=release
+          # `all test`, not `test`: the test target builds only the test
+          # binaries, and the next line needs the client itself. The first
+          # dry run failed exactly here.
+          make -C "/tmp/agent-terminal-$V" all test BUILD=release
           built="$("/tmp/agent-terminal-$V/build/release/agent-terminal" version | head -1)"
           echo "$built" | grep -qF "$V" || { echo "built client says '$built', want '$V'"; exit 1; }
       - name: Publish GitHub release
