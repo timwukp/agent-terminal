@@ -29,3 +29,19 @@ updates:
     directory: /app/tauri
     schedule:
       interval: weekly
+    # React majors are a coordinated migration (react, react-dom and both
+    # @types packages move together, and React 19 changes rendering
+    # behavior), so a bot bumping any one of them alone is broken by
+    # construction — its first attempt (react-dom 19 against react 18) could
+    # not even `npm ci`. Majors for the rest of the tree stay allowed: they
+    # arrive one dependency per PR, where CI can judge them and
+    # `@dependabot ignore` works when it can't.
+    ignore:
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
