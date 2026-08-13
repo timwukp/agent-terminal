@@ -185,4 +185,80 @@ grep -q 'DID NOT RUN' <<< "$out" ||
     fail "with cmp unavailable the check reported nothing — silence reads as clean: $out"
 pass "says so loudly when cmp is unavailable instead of reporting clean"
 
+# ---------------------------------------------------------------------------
+# 5. PREFIX forms that install the binaries correctly and render a unit that
+#    can never start. Both were live on a developer machine: `make install
+#    PREFIX=~/.local` produced ProgramArguments[0] = "~/.local/bin/agent-terminald",
+#    because zsh leaves a tilde after `=` alone (magicequalsubst is off by
+#    default) and /bin/sh expands one only at the START of a word — so the
+#    `install -d ~/.local/bin` recipe line landed in $HOME while sed copied the
+#    tilde into the unit. launchd and systemd expand nothing, so that unit is
+#    unstartable, which is this file's whole subject arriving by a third route.
+#
+#    The assertion that matters is not "the string is absolute" but that the
+#    three consumers AGREE: the path the unit execs must be the path a binary
+#    was actually installed to. Anything weaker passes while install and render
+#    disagree about the same PREFIX.
+#
+#    That last check (`-x "$R4$execpath"`) cannot be killed by a Makefile
+#    mutation, and is not meant to be: section 2 asserts the same property for a
+#    literal prefix and runs first, so every mutant that breaks the agreement
+#    dies up there. Its job here is to cross-check the `want` formula BELOW —
+#    if that formula is wrong, the equality assertion pins the wrong path and
+#    only this one notices. Its predicate was verified by moving the installed
+#    binary aside, which flips it to failing.
+# ---------------------------------------------------------------------------
+[ -n "${HOME:-}" ] || fail "this test needs HOME set to compute the expected expansion"
+
+for PFX3 in '~/.local' 'at-relative-prefix'; do
+    case "$PFX3" in
+        '~/'*) want="$HOME/${PFX3#\~/}" ;;
+        /*)    want="$PFX3" ;;
+        *)     want="$ROOT/$PFX3" ;;   # relative resolves against the Makefile's dir
+    esac
+    R4="$TMP/root-$(echo "$PFX3" | tr -c 'a-zA-Z0-9' '_')"
+    ( cd "$ROOT" && make -s install BUILD="$BUILD" DESTDIR="$R4" PREFIX="$PFX3" ) \
+        > "$TMP/install4.log" 2>&1 || { cat "$TMP/install4.log"; fail "install PREFIX=$PFX3 failed"; }
+
+    P4="$R4$want/share/agent-terminal/dev.agentterminal.daemon.plist"
+    U4="$R4$want/share/agent-terminal/agent-terminald.service"
+    [ -f "$P4" ] || fail "PREFIX=$PFX3: rendered plist not at $P4 — install used a different prefix than expected"
+
+    # An unexpanded tilde does not vanish, it moves: `$(DESTDIR)~/.local/bin` is
+    # a directory named after the DESTDIR with a tilde glued on. Assert the
+    # sibling is absent, or the check above could pass on a second copy.
+    [ ! -e "$R4~" ] || fail "PREFIX=$PFX3: install created the sibling directory $R4~ — the tilde reached a path"
+
+    execpath="$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["ProgramArguments"][0])' "$P4")"
+    case "$execpath" in
+        /*) ;;
+        *)  fail "PREFIX=$PFX3: launchd would exec a non-absolute path: $execpath" ;;
+    esac
+    [ "$execpath" = "$want/bin/agent-terminald" ] ||
+        fail "PREFIX=$PFX3: plist execs $execpath, expected $want/bin/agent-terminald"
+    grep -qx "ExecStart=$want/bin/agent-terminald -f" "$U4" ||
+        fail "PREFIX=$PFX3: systemd ExecStart is $(grep '^ExecStart' "$U4"), expected $want/bin"
+
+    # The agreement check: whatever the unit execs must be where a binary went.
+    [ -x "$R4$execpath" ] ||
+        fail "PREFIX=$PFX3: the unit execs $execpath but no binary was installed there (looked in $R4$execpath)"
+    pass "PREFIX=$PFX3 renders $execpath, and that is where the binary landed"
+done
+
+# A tilde that cannot be expanded must fail the build, not render half of one.
+# Without HOME the Makefile has nothing to substitute, and the alternatives —
+# leaving the tilde, or resolving it against the current directory — both
+# produce a unit file that lies about where the daemon is.
+out="$( cd "$ROOT" && env -u HOME make -s units BUILD="$BUILD" PREFIX='~/.local' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] || fail "PREFIX=~ with HOME unset must fail the build, got rc=0 and: $out"
+grep -q 'HOME is unset' <<< "$out" ||
+    fail "the failure does not explain that HOME is missing: $out"
+pass "an unexpandable tilde stops the build and says why"
+
+# Leave build/ rendered for the default prefix rather than the last loop value,
+# so a subsequent `make install` on this checkout does not silently ship a unit
+# naming a temp-dir prefix.
+( cd "$ROOT" && make -s units BUILD="$BUILD" ) >/dev/null 2>&1 ||
+    fail "could not re-render units for the default prefix"
+
 echo "PASS: install units are rendered per-PREFIX and stale copies are reported"

@@ -51,6 +51,12 @@ sudo make install      # 安裝到 /usr/local(可用 PREFIX= 覆寫)
 以及下面那兩個服務單元檔——它們會依你實際安裝的 `PREFIX` 產生,放在
 `PREFIX/share/agent-terminal/`。
 
+`PREFIX` 會先被正規化成絕對路徑,所以 `PREFIX=~/.local` 與相對路徑
+`PREFIX=out` 都可以。這不是美觀問題:launchd 與 systemd 不做任何展開、而且
+只接受絕對路徑,而 shell 對波浪號的規則參差不齊,足以讓二進位檔裝到正確位置、
+單元檔卻寫著一個服務管理器啟動不了的路徑。若 `HOME` 未設而波浪號無法展開,
+建置會直接停下,而不是產生一個說謊的單元檔。
+
 如果另一個 prefix 底下已經裝了**不同的** `agent-terminald`,`make install`
 會出聲告知。兩份副本在安裝時不會衝突,衝突發生在連線時,而且那時沒有任何
 錯誤訊息——見[以服務方式運行 daemon](#以服務方式運行-daemon建議)。
@@ -421,7 +427,7 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
   可能留下舊 daemon 應答 socket 的安裝路徑。每個 PR
   在 macOS 與 Linux 的 CI 上運行。
 - **真實 Claude Code session 的終端使用者驗收測試(UAT)** — 真實工作負載,
-  以真實 pty 與真實按鍵驅動,兩輪加上四次安全稽核輪次追加的案例,共 21 個
+  以真實 pty 與真實按鍵驅動,兩輪加上五次稽核輪次追加的案例,共 22 個
   案例:崩潰後 reattach 且同一個
   行程繼續回答、活的 TUI 周圍做窗格方向導航與縮放、對話底下升級 daemon
   二進位檔、多客戶端旁觀、批次 `claude -p` 模式。完整測試日誌 — 案例編號、
