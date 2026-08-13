@@ -70,6 +70,14 @@ make install PREFIX="$HOME/.local"    # no sudo; ensure ~/.local/bin is on PATH
 sudo make install                     # or system-wide, PREFIX defaults to /usr/local
 ```
 
+`PREFIX` is normalized to an absolute path before anything uses it, so
+`PREFIX=~/.local` and a relative `PREFIX=out` are equivalent to the spelling
+above. Do not work around this by pre-expanding it yourself; the reason it
+matters is that launchd's `ProgramArguments[0]` and systemd's `ExecStart` expand
+nothing, so an unexpanded tilde installs the binaries correctly and renders a
+unit that cannot start. `make` fails outright if `PREFIX` starts with `~` and
+`HOME` is unset.
+
 Installs `agent-terminald`, `agent-terminal`, `agent-terminal.1`, and the two
 service units rendered for this `PREFIX` into `PREFIX/share/agent-terminal/`.
 `make install` depends on `all`, so a separate build step is optional.

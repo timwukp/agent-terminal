@@ -43,6 +43,7 @@ permissions, and session directories run exactly as shipped.
 | TC-19 | **silent connections cannot lock the user out** | 40 `connect()`s that send zero bytes (`MAX_CLIENTS` is 32), held open; probe a real HELLO during the flood, then again after the deadline; separately, a client that HELLOs and then idles 7 s | during: the probe is refused (the denial is real); within ~6 s: a probe completes HELLO and the daemon logs the deadline drop; the idle HELLO'd client still gets its PONG | PASS⁴ |
 | TC-20 | **the shipped service unit names the prefix you installed to** | `make install PREFIX=/opt/at-install-test DESTDIR=…`, then parse the rendered plist with `plistlib` and grep the systemd `ExecStart`; then install again to a *second* prefix | both units exec `<PREFIX>/bin/agent-terminald`, neither contains a placeholder, the template-only note, or `/usr/local/bin`; `<PREFIX>/bin` is first on the launchd `PATH` with `/usr/bin` and `/bin` still present; the default prefix lists `/usr/local/bin` exactly once; the second install re-renders instead of reusing the first | PASS⁵ |
 | TC-21 | **an install that leaves a different daemon elsewhere says so** | drive `tools/check_install_paths.sh` with three synthetic prefixes — a differing binary, a byte-identical one, a symlink to the installed copy — and once with `cmp` hidden by an empty `PATH` | the differing copy warns and the warning names **both** paths; rc is 0 in every case, including the warning one; silence for identical bytes, for the symlink, and for an absent prefix; with `cmp` unavailable it prints `DID NOT RUN` rather than nothing | PASS⁵ |
+| TC-22 | **the `PREFIX` your shell hands `make` cannot render an unstartable unit** | `make install DESTDIR=… PREFIX=~/.local` (tilde quoted, so `make` receives it literally) and again with a relative `PREFIX`; read `ProgramArguments[0]` back with `plistlib` and grep `ExecStart`; then `env -u HOME make units PREFIX=~/.local` | both prefixes render an **absolute** path equal to the expanded prefix, and a binary is actually installed at the path the unit execs; no `<destdir>~` sibling directory is created; with `HOME` unset the build stops non-zero naming `HOME` rather than rendering a unit | PASS⁶ |
 
 ¹ TC-07 **failed on the build under test** and exposed BUG-1 (below). It passes since v22.
 ² History was empty for this session — analyzed and confirmed **by design**, two documented
@@ -60,6 +61,7 @@ round 2 below). Measured on the unfixed daemon: `ls` reported `65535x65535` and 
 precisely because it differs by 65× while RSS differs by only 1.3× against a portable ceiling.
 
 ⁵ TC-20/TC-21 are new in security round 4 below and cover the install path rather than the
+⁶ New in the install round below. Both prefix forms fail against the previous tree: the tilde one renders `~/.local/bin/agent-terminald`, which is what was measured on the developer machine, and the relative one renders a path that means nothing to a service manager. 4/4 Makefile mutants killed; the fifth assertion in that section is a cross-check on the test's own expectation and is documented in the test as unkillable, with its predicate verified by moving the installed binary aside.
 running daemon. Both fail against the previous tree: TC-20 because the units had
 `/usr/local/bin` written into them, TC-21 because no check existed. Measured on this machine
 before the change: `/usr/local/bin/agent-terminald` and `~/.local/bin/agent-terminald` were
@@ -639,6 +641,50 @@ mtimes at 1-second granularity and the whole sequence runs inside one second. Th
 holds is the idiom already used for `$(VERSION_H)`: a `FORCE` prerequisite, render to `$@.tmp`,
 and `cmp -s` then either discard or move — always re-run, but leave the mtime alone when the
 bytes are unchanged. TC-20's second-prefix install is the assertion that pins it.
+
+## Install round 5 (2026-08-12): the `PREFIX` your shell hands `make`
+
+Round 4 made the service units templates rendered per-`PREFIX`, and TC-20 asserted that the
+rendered unit names the prefix you installed to. It passed, and the units it produced on this
+machine were still unstartable.
+
+`make install PREFIX=~/.local` — the form written in this project's own session notes — rendered
+`ProgramArguments[0] = ~/.local/bin/agent-terminald`, in a file whose own notes say `$HOME does
+not expand in plists`. Two shell rules combine to make this invisible. zsh does not expand a
+tilde after `=` in a command argument (`magicequalsubst` is off by default), so `make` receives
+the tilde literally; and `/bin/sh`, which runs the recipe, expands one only at the **start** of a
+word. `install -d ~/.local/bin` therefore lands in `$HOME` while `sed` copies the tilde into the
+unit verbatim. The binaries were correct, the daemon was correct, and the file you are told to
+copy into `~/Library/LaunchAgents/` could not start.
+
+The same root cause has a second symptom that shows the tilde is not merely cosmetic:
+`make install DESTDIR=/tmp/at-tilde PREFIX=~/.local` created a directory named `at-tilde~`,
+because in `$(DESTDIR)$(PREFIX)/bin` the tilde is no longer at the start of the word. And a
+relative `PREFIX=out` has the same shape without any tilde at all: the files land where the
+caller expects, and the unit names a path a service manager started elsewhere cannot resolve.
+
+The fix normalizes `PREFIX` once, in the Makefile, and routes the binaries, the rendered units,
+the stale-daemon check and `uninstall` through the normalized value, so those four cannot disagree
+about where an install went. A tilde that cannot be expanded — `HOME` unset — stops the build,
+because both alternatives (leave the tilde, or resolve it against the current directory) produce a
+unit file that lies about where the daemon is.
+
+Why TC-20 did not catch it: it installs to `/opt/at-install-test`, an absolute path with no tilde
+in it. The test was checking that the *substitution* worked, which it did. What was never checked
+is the layer below — that the value being substituted is one launchd and systemd can use. TC-22
+now drives the two forms a person actually types, and its load-bearing assertion is not that the
+string looks absolute but that the path the unit execs is a path a binary was installed to.
+
+One mutation-testing note, because it changes what the numbers mean. Four Makefile mutants (drop
+the tilde expansion, drop the relative resolution, drop the `HOME` guard, revert one install line
+to the raw `PREFIX`) were all killed. A fifth, which installs the binaries to `sbin/` while the
+unit still names `bin/`, was killed too — but by TC-20's own `-x` check in the section above,
+which runs first, not by the new agreement assertion. That assertion cannot be killed by any
+Makefile mutation for exactly that reason, so it is not a bug-finder; it is a cross-check on the
+expectation the new test computes for itself. Its predicate was verified separately by moving the
+installed binary aside and watching it flip to failing. Recording that distinction matters more
+than the count: an assertion nothing can kill is usually decoration, and this one has a stated
+reason not to be.
 
 ## Reproducing this UAT
 

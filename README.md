@@ -57,6 +57,13 @@ Installed artifacts: `agent-terminald`, `agent-terminal`, the
 whichever `PREFIX` you installed to, under
 `PREFIX/share/agent-terminal/`.
 
+`PREFIX` is normalized to an absolute path first, so `PREFIX=~/.local` and a
+relative `PREFIX=out` both work. This is not cosmetic: launchd and systemd
+expand nothing and require an absolute path, and the shell's tilde rules are
+uneven enough that the binaries could land in the right place while the unit
+named a path no service manager could start. If the tilde cannot be expanded
+because `HOME` is unset, the build stops instead of rendering a unit that lies.
+
 If a **different** `agent-terminald` is already installed at another prefix,
 `make install` says so. Two copies do not conflict at install time; they
 conflict at connect time, and there is no error message when they do — see
@@ -483,8 +490,8 @@ Three layers, all green on `main`:
   install path that could otherwise leave an older daemon answering the
   socket. Run on macOS and Linux in CI on every PR.
 - **End-user UAT with a real Claude Code session** — the actual workload,
-  driven through a real pty with real keystrokes, 21 cases over two rounds
-  plus what four security rounds added: crash-reattach with the same
+  driven through a real pty with real keystrokes, 22 cases over two rounds
+  plus what five hardening rounds added: crash-reattach with the same
   process answering, panes with arrow
   navigation and zoom around a live TUI, a daemon binary upgrade under the
   conversation, multi-client viewing, batch `claude -p` patterns. Full test

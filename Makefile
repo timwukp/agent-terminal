@@ -170,7 +170,38 @@ tools: $(O)/vtdump
 
 # ---- install ----------------------------------------------------------------
 PREFIX ?= /usr/local
-BINDIR := $(PREFIX)/bin
+
+# PREFIX arrives from a human's shell, and two forms of it install the binaries
+# to exactly the right place while rendering a unit file that can never start:
+#
+#   PREFIX=~/.local  zsh does not expand a tilde after `=` (magicequalsubst is
+#                    off by default) and /bin/sh expands one only at the START
+#                    of a word — so `install -d ~/.local/bin` lands in $HOME,
+#                    while `$(DESTDIR)~/.local/bin` becomes a directory named
+#                    `<destdir>~` and sed copies the tilde into the unit
+#                    verbatim. Measured on macOS: ProgramArguments[0] came out
+#                    as `~/.local/bin/agent-terminald`.
+#   PREFIX=out       a relative path resolves against the recipe's cwd, so the
+#                    files land where the caller expects and the unit names a
+#                    path that means nothing to a service manager started
+#                    somewhere else.
+#
+# launchd's ProgramArguments[0] and systemd's ExecStart both demand an absolute
+# path and expand nothing — the plist template says so in its own notes — so a
+# unit holding either form is silently unstartable, which is the same
+# absent-or-stale-daemon failure these templates exist to remove. Normalize
+# once, here, and use the result for the binaries, the units, the stale-daemon
+# check and `uninstall` alike, so those four cannot disagree about where the
+# install went.
+ifeq ($(HOME),)
+ifneq ($(patsubst ~%,,$(PREFIX)),$(PREFIX))
+$(error PREFIX=$(PREFIX) starts with a tilde but HOME is unset, so it cannot be \
+expanded — pass an absolute PREFIX instead)
+endif
+endif
+PREFIX_ABS := $(patsubst ~,$(HOME),$(patsubst ~/%,$(HOME)/%,$(PREFIX)))
+PREFIX_ABS := $(if $(patsubst /%,,$(PREFIX_ABS)),$(CURDIR)/$(PREFIX_ABS),$(PREFIX_ABS))
+BINDIR := $(PREFIX_ABS)/bin
 
 # Service units are TEMPLATES, rendered here. Shipping them ready-to-copy meant
 # hardcoding one prefix, and the file then named the wrong path for everyone who
@@ -213,25 +244,25 @@ $(O)/contrib/%: contrib/%.in FORCE
 units: $(UNITS)
 
 install: all units
-	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/man/man1 \
-	           $(DESTDIR)$(PREFIX)/share/agent-terminal
-	install -m 0755 $(O)/agent-terminald $(DESTDIR)$(PREFIX)/bin/
-	install -m 0755 $(O)/agent-terminal $(DESTDIR)$(PREFIX)/bin/
-	install -m 0644 docs/agent-terminal.1 $(DESTDIR)$(PREFIX)/share/man/man1/
-	install -m 0644 $(UNITS) $(DESTDIR)$(PREFIX)/share/agent-terminal/
+	install -d $(DESTDIR)$(PREFIX_ABS)/bin $(DESTDIR)$(PREFIX_ABS)/share/man/man1 \
+	           $(DESTDIR)$(PREFIX_ABS)/share/agent-terminal
+	install -m 0755 $(O)/agent-terminald $(DESTDIR)$(PREFIX_ABS)/bin/
+	install -m 0755 $(O)/agent-terminal $(DESTDIR)$(PREFIX_ABS)/bin/
+	install -m 0644 docs/agent-terminal.1 $(DESTDIR)$(PREFIX_ABS)/share/man/man1/
+	install -m 0644 $(UNITS) $(DESTDIR)$(PREFIX_ABS)/share/agent-terminal/
 	@if [ -n "$(DESTDIR)" ]; then \
 	    echo "note: DESTDIR set, skipping the stale-daemon check — the prefixes it looks at belong to this build host, not to the target root"; \
 	else \
-	    sh tools/check_install_paths.sh "$(PREFIX)/bin"; \
+	    sh tools/check_install_paths.sh "$(BINDIR)"; \
 	fi
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/agent-terminald \
-	      $(DESTDIR)$(PREFIX)/bin/agent-terminal \
-	      $(DESTDIR)$(PREFIX)/share/man/man1/agent-terminal.1 \
-	      $(DESTDIR)$(PREFIX)/share/agent-terminal/dev.agentterminal.daemon.plist \
-	      $(DESTDIR)$(PREFIX)/share/agent-terminal/agent-terminald.service
-	-rmdir $(DESTDIR)$(PREFIX)/share/agent-terminal 2>/dev/null || true
+	rm -f $(DESTDIR)$(PREFIX_ABS)/bin/agent-terminald \
+	      $(DESTDIR)$(PREFIX_ABS)/bin/agent-terminal \
+	      $(DESTDIR)$(PREFIX_ABS)/share/man/man1/agent-terminal.1 \
+	      $(DESTDIR)$(PREFIX_ABS)/share/agent-terminal/dev.agentterminal.daemon.plist \
+	      $(DESTDIR)$(PREFIX_ABS)/share/agent-terminal/agent-terminald.service
+	-rmdir $(DESTDIR)$(PREFIX_ABS)/share/agent-terminal 2>/dev/null || true
 
 fuzz-regress: $(FUZZ_REGRESS_BIN)
 	@for t in $(FUZZ_REGRESS_BIN); do echo "== $$t"; $$t fuzz/corpus/vt || exit 1; done
