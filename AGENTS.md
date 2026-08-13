@@ -597,13 +597,34 @@ x86_64, and some analyzer results genuinely differ between the two. Add
 
 ## 6. CI
 
-`.github/workflows/ci.yml` — 7 required jobs: `build-test` over
+`.github/workflows/ci.yml` — 8 required jobs: `build-test` over
 {macos, ubuntu} × {release, asan} (4), plus `fuzz-smoke` (60 s/target),
-`clang-tidy`, and `docs` (diagram geometry + doc-link resolution).
-`fuzz.yml` runs 30 min/target nightly with corpus minimization.
+`clang-tidy`, `docs` (diagram geometry + doc-link resolution + workflow
+hygiene), and `redaction` (no cloud metadata or personal paths in tracked
+files). `fuzz.yml` runs 30 min/target nightly with corpus minimization.
 
 Integration tests run only in the `release` matrix legs, with
 `BUILD=${{ matrix.build }}` exported.
+
+Every workflow carries a top-level read-only `permissions:` block and pins
+every action to a full commit SHA (`tools/check_workflow_pins.sh` enforces
+both; Dependabot moves the pins). The one write scope in the repo is
+job-level, on the release workflow's publish job, because creating a GitHub
+Release requires it.
+
+### Cutting a release
+
+Releases are tag-triggered (`.github/workflows/release.yml`) and ship a
+source tarball + SHA-256 checksums, **no binaries** — the GUI `.app` is
+ad-hoc signed and Gatekeeper rejects it, so a binary release waits for
+signing + notarization. The pipeline: full test matrix **on the tag**, the
+repo guards, then a tarball that carries `.tarball-version` (how a build
+without `.git` identifies itself — see `tools/version.sh`), which is
+extracted, built and unit-tested from the extracted copy, and required to
+self-report the tag before anything is published. Release notes are a
+reviewed file, `docs/release-notes/<tag>.md`; the release job fails if it
+does not exist. A `workflow_dispatch` run is a dry run: it builds and
+verifies the tarball and skips publishing.
 
 ## 7. Repository etiquette
 

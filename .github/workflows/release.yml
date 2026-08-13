@@ -1,0 +1,126 @@
+# Tag-triggered source release: tarball + SHA-256 checksums, NO binaries.
+#
+# No binaries is a decision, not an omission: the GUI `.app` is ad-hoc signed
+# and spctl REJECTS it outright ("code has no resources but signature
+# indicates they must be present") — a downloader gets a refusal, not a
+# right-click-open warning. Shipping that would quietly break the README's
+# promise that the bundle is not distributable. Binaries wait for signed,
+# notarized builds (M3).
+#
+# The release only exists if the full test matrix passes ON THE TAG — a tag
+# is a claim about a specific tree, so the tests run against that tree, not
+# against whatever main has moved to.
+#
+# workflow_dispatch is a dry run: it builds and verifies the tarball and
+# stops short of publishing, so the pipeline itself is testable before any
+# tag exists.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+# Read-only by default; only the publish job below holds a write scope, and
+# only because creating a GitHub Release requires it. Test jobs never do.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        build: [release, asan]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build
+        run: make BUILD=${{ matrix.build }} all
+      - name: Unit tests
+        run: make BUILD=${{ matrix.build }} test
+      - name: Integration tests
+        if: matrix.build == 'release'
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          rc=0
+          for t in tests/integration/test_*.sh; do
+            echo "== $t"
+            bash "$t" || rc=1
+          done
+          exit $rc
+
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Workflow hygiene
+        run: sh tools/check_workflow_pins.sh
+      - name: Redaction scan
+        run: sh tools/check_redaction.sh
+      - name: Docs cross-references
+        run: bash tools/check_links.sh
+
+  release:
+    needs: [test, guards]
+    runs-on: ubuntu-latest
+    # The one job that writes, scoped here rather than at the top so the test
+    # jobs (which run third-party toolchains) never hold it.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Determine version
+        id: ver
+        # A dispatch run has no tag; give the dry-run tarball an honest name.
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v0.0.0-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build source tarball
+        # .tarball-version is how a build without .git identifies itself
+        # (tools/version.sh, tested by test_version_identity.sh). git archive
+        # only ships tracked files, so the file is attached explicitly.
+        run: |
+          set -u
+          V='${{ steps.ver.outputs.version }}'
+          printf '%s\n' "$V" > .tarball-version
+          git archive --format=tar.gz --prefix="agent-terminal-$V/" \
+            --add-file=.tarball-version -o "agent-terminal-$V.tar.gz" HEAD
+          sha256sum "agent-terminal-$V.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Verify the tarball is a working, self-identifying source tree
+        # The whole point of .tarball-version: a tarball build must know its
+        # own name. Extract, ask, then build and run the unit tests from the
+        # extracted copy — the tarball is the artifact users get, so the
+        # tarball is what gets verified, not the checkout it came from.
+        run: |
+          set -u
+          V='${{ steps.ver.outputs.version }}'
+          tar -xzf "agent-terminal-$V.tar.gz" -C /tmp
+          got="$(cd "/tmp/agent-terminal-$V" && sh tools/version.sh)"
+          [ "$got" = "$V" ] || { echo "tarball identifies as '$got', want '$V'"; exit 1; }
+          make -C "/tmp/agent-terminal-$V" test BUILD=release
+          built="$("/tmp/agent-terminal-$V/build/release/agent-terminal" version | head -1)"
+          echo "$built" | grep -qF "$V" || { echo "built client says '$built', want '$V'"; exit 1; }
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        # Notes are a reviewed artifact in the tree, not workflow output: the
+        # release cannot be cut until docs/release-notes/<tag>.md exists and
+        # says what this release honestly is.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          V='${{ steps.ver.outputs.version }}'
+          NOTES="docs/release-notes/$V.md"
+          [ -f "$NOTES" ] || { echo "missing $NOTES — write the release notes first"; exit 1; }
+          gh release create "$V" \
+            --title "agent-terminal $V" \
+            --notes-file "$NOTES" \
+            --verify-tag \
+            "agent-terminal-$V.tar.gz" SHA256SUMS
