@@ -47,13 +47,15 @@ ifeq ($(UNAME_S),Linux)
   LDFLAGS += -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 endif
 
-# Version stamp: the short commit hash, "-dirty" when the tree differs from
-# HEAD, or "unknown" outside a git checkout (release tarballs). Generated into
-# a header and compared by CONTENT before replacing, so an unchanged version
-# does not touch the mtime and force rebuilds of everything that includes it.
-# Outside a git checkout both subcommands fail; the -dirty suffix must not
-# fire there (a tarball is not "dirty", it is just not a checkout).
-AT_VERSION := $(shell if git rev-parse --short=12 HEAD >/dev/null 2>&1; then   git rev-parse --short=12 HEAD;   git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty; else echo unknown; fi | tr -d '\n')
+# Version stamp — computed by tools/version.sh: the short commit hash; with
+# "-dirty.<content8>" appended when the tree differs from HEAD (the suffix
+# hashes the actual tree contents, because a bare "-dirty" gave two different
+# builds the same name and broke the documented skew check); or, outside a git
+# checkout, the release version from .tarball-version (written into release
+# tarballs by the release workflow), else "unknown". Generated into a header
+# and compared by CONTENT before replacing, so an unchanged version does not
+# touch the mtime and force rebuilds of everything that includes it.
+AT_VERSION := $(shell sh tools/version.sh)
 VERSION_H := $(O)/include/at_version.h
 
 $(VERSION_H): FORCE

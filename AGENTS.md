@@ -188,6 +188,15 @@ generation, capability bits), so it needs no new protocol and answers for
 any daemon back to v1. `version` never autospawns — observing must not
 mutate.
 
+The build string names the TREE, not just the commit (`tools/version.sh`,
+baked in at build time): a clean checkout prints `<head12>`; an edited one
+prints `<head12>-dirty.<content8>`, where the suffix hashes the diff plus
+every untracked-but-not-ignored file, so two different edited trees never
+share a name and skew stays detectable between unreleased builds; a release
+tarball prints its `.tarball-version`. A stray `.tarball-version` inside a
+checkout is ignored (and is itself untracked dirt). Enforced by
+`tests/integration/test_version_identity.sh`.
+
 ### The client autospawns the daemon
 
 `new` and `attach` start `agent-terminald` themselves if the socket is
