@@ -20,7 +20,7 @@ jobs:
         build: [release, asan]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: make BUILD=${{ matrix.build }} all
       - name: Unit tests
@@ -43,7 +43,7 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build fuzz targets
         run: make BUILD=fuzz fuzz CC=clang
       - name: Generate corpus
@@ -60,7 +60,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Diagram geometry (co-visible overlaps, bounds)
         run: python3 tools/check_svg.py docs/architecture.svg
       - name: Docs cross-references resolve
@@ -75,7 +75,7 @@ jobs:
   clang-tidy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install clang-tidy
         run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
       - name: Analyze all four source dirs
