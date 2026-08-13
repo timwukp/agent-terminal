@@ -425,6 +425,13 @@ agent-terminal version
 across one). `daemon: not running` is not an error — the next `new` or
 `attach` autospawns it.
 
+A build from an edited checkout prints `<hash>-dirty.<8 hex>`, where the
+suffix hashes the tree's actual contents (including untracked files) — two
+different edited trees never share a version string, so "am I running the
+binary I just built?" stays answerable during development, not only between
+releases. A release-tarball build (no `.git`) prints the release version
+recorded in its `.tarball-version` file instead.
+
 **`new -s x -- some-cmd` "does nothing" — session missing from `ls`?** The
 command exited instantly, usually because it is **not on the daemon's
 PATH**: a service-managed daemon gets a minimal PATH (launchd:
@@ -480,7 +487,7 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 26 end-to-end scripts covering the failure modes this tool
+- **Integration**: 27 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving, pane splits / directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,

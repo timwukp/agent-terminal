@@ -369,6 +369,12 @@ agent-terminal version
 `generation` 計數原地 reload 的次數(pid 刻意不變)。`daemon: not running`
 不是錯誤 — 下一次 `new` 或 `attach` 會自動啟動它。
 
+從改過的 checkout 建出來的版本會印 `<hash>-dirty.<8 位十六進位>`,後綴是
+對樹的實際內容(含未追蹤檔案)取的雜湊 — 兩棵不同的改動樹絕不會共用同一個
+版本字串,所以「我跑的是不是剛剛建的那份?」在開發期間也答得出來,不必等
+到發佈。從 release tarball(沒有 `.git`)建出來的則印 `.tarball-version`
+檔案裡記錄的發行版本。
+
 **`new -s x -- 某指令` 「毫無反應」— session 沒出現在 `ls`?** 指令瞬間退出
 了,最常見的原因是它**不在 daemon 的 PATH 上**:由服務管理器啟動的 daemon
 只拿到極簡 PATH(launchd:`/usr/bin:/bin:...`),而 session 的指令繼承它。
@@ -419,7 +425,7 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
   違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
   環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
   下運行。
-- **整合測試**:26 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
+- **整合測試**:27 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
   `kill -9` 後 reattach、daemon reload 且子行程存活、經協定驅動的窗格分割
   / 方向導航 / 縮放、100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
   探測、關閉競態、誠實的錯誤回報、安全稽核輪次找出的同 uid 濫用案例
