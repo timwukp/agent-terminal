@@ -4,6 +4,13 @@ on:
     branches: [main]
   pull_request:
 
+# Without this block every job runs with the repository-default token, which
+# for this repo is read/write on contents. No job here writes anything, so
+# say so explicitly — a token is only as narrow as the workflow that declares
+# it, and a compromised third-party action inherits whatever it is handed.
+permissions:
+  contents: read
+
 jobs:
   build-test:
     strategy:
@@ -13,7 +20,7 @@ jobs:
         build: [release, asan]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build
         run: make BUILD=${{ matrix.build }} all
       - name: Unit tests
@@ -36,7 +43,7 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build fuzz targets
         run: make BUILD=fuzz fuzz CC=clang
       - name: Generate corpus
@@ -53,16 +60,22 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Diagram geometry (co-visible overlaps, bounds)
         run: python3 tools/check_svg.py docs/architecture.svg
       - name: Docs cross-references resolve
         run: bash tools/check_links.sh
+      # Guards the guards: every workflow must carry a top-level read-only
+      # permissions block and pin every action to a full commit SHA. Runs in
+      # ci.yml (unfiltered) rather than a path-filtered workflow, so adding a
+      # NEW workflow file cannot dodge it.
+      - name: Workflow hygiene (permissions + SHA pins)
+        run: sh tools/check_workflow_pins.sh
 
   clang-tidy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install clang-tidy
         run: sudo apt-get update -q && sudo apt-get install -y -q clang-tidy
       - name: Analyze all four source dirs

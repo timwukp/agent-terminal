@@ -1,0 +1,22 @@
+# Three ecosystems, three manifests. The github-actions entry is what keeps
+# the SHA pins in the workflows honest: every `uses:` is pinned to a full
+# commit SHA (tools/check_workflow_pins.sh enforces it), so without Dependabot
+# a pin would silently age forever — the PRs it opens are how a pin moves.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /app/tauri/src-tauri
+    schedule:
+      interval: weekly
+    # Lockfile-only churn is noise for a 488-crate tree; group patch bumps.
+    groups:
+      cargo-patch:
+        update-types: [patch]
+  - package-ecosystem: npm
+    directory: /app/tauri
+    schedule:
+      interval: weekly
