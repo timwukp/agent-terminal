@@ -34,13 +34,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Kiro CLI
-        run: curl -fsSL https://cli.kiro.dev/install | bash
+        run: |
+          curl -fsSL https://cli.kiro.dev/install | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Analyze dependency risk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          kiro scan dependencies \
+          kiro-cli scan dependencies \
             --manifest app/tauri/package.json \
             --manifest app/tauri/src-tauri/Cargo.toml \
             --fail-on-high-risk
