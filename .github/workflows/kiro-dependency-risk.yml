@@ -1,0 +1,60 @@
+# AI-driven dependency risk analysis via Kiro CLI. This complements the
+# deterministic audit.yml workflow (cargo audit + npm audit) with heuristic
+# risk scoring: maintainer activity, known-malicious patterns, typosquat
+# detection, and license compatibility checks that static advisories miss.
+#
+# Triggers only on PRs that touch dependency manifests or lockfiles, so it
+# never fires on pure code changes. The path list references every actual
+# dependency file in the repo - the C core has no package manager dependencies
+# (only libc), so only Tauri's Cargo and npm ecosystems appear here.
+name: kiro-dependency-risk
+
+on:
+  pull_request:
+    paths:
+      - app/tauri/package.json
+      - app/tauri/package-lock.json
+      - app/tauri/src-tauri/Cargo.toml
+      - app/tauri/src-tauri/Cargo.lock
+
+# Top-level read-only: the CLI reads manifests and lockfiles, never writes.
+# PR-comment access is scoped to the single job that posts findings.
+permissions:
+  contents: read
+
+jobs:
+  dependency-risk:
+    runs-on: ubuntu-latest
+    # Write on pull-requests lets the CLI (or the fallback step) post risk
+    # findings as PR comments without granting that scope globally.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Kiro CLI
+        run: curl -fsSL https://cli.kiro.dev/install | bash
+
+      - name: Analyze dependency risk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          kiro scan dependencies \
+            --manifest app/tauri/package.json \
+            --manifest app/tauri/src-tauri/Cargo.toml \
+            --fail-on-high-risk
+
+      - name: Annotate PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const message = '**Kiro Dependency Risk** flagged one or more dependencies as high-risk. ' +
+              'Check the job log for details on maintainer activity, license issues, or known-malicious patterns.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message
+            });
