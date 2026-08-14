@@ -1,12 +1,26 @@
-# AI-driven dependency risk analysis via Kiro CLI. This complements the
-# deterministic audit.yml workflow (cargo audit + npm audit) with heuristic
-# risk scoring: maintainer activity, known-malicious patterns, typosquat
-# detection, and license compatibility checks that static advisories miss.
+# AI-assisted dependency risk review via Kiro CLI headless mode.
 #
-# Triggers only on PRs that touch dependency manifests or lockfiles, so it
-# never fires on pure code changes. The path list references every actual
-# dependency file in the repo - the C core has no package manager dependencies
-# (only libc), so only Tauri's Cargo and npm ecosystems appear here.
+# Complements audit.yml rather than duplicating it, and the split is the point:
+#
+#   - audit.yml asks "does a published advisory name this version?" — cargo
+#     audit and npm audit against the RustSec and npm databases. Deterministic,
+#     and it BLOCKS.
+#   - this job asks the questions an advisory database cannot answer yet. A
+#     package published three days ago by a new account, a name one character
+#     off a popular crate, a license that changed under a minor bump, a
+#     maintainer transfer. Advisories are written after someone notices; a
+#     dependabot PR arrives before that. Judgement, and so ADVISORY.
+#
+# Advisory means it always exits 0. Gating merges on non-reproducible output
+# would make a green build a matter of luck, and the deterministic verdict
+# already exists next door in audit.yml.
+#
+# Scoped to PRs touching a manifest or lockfile — most of these PRs are
+# Dependabot's, which is exactly the traffic worth a second look. The C core
+# depends on nothing but libc, so only the Tauri app's two ecosystems appear.
+#
+# Requires the KIRO_API_KEY repository secret; skips cleanly without it (see
+# kiro-secret-scanning.yml for the same reasoning).
 name: kiro-dependency-risk
 
 on:
@@ -17,46 +31,115 @@ on:
       - app/tauri/src-tauri/Cargo.toml
       - app/tauri/src-tauri/Cargo.lock
 
-# Top-level read-only: the CLI reads manifests and lockfiles, never writes.
-# PR-comment access is scoped to the single job that posts findings.
+# Read-only at the top; the comment scope sits on the job that posts.
 permissions:
   contents: read
 
 jobs:
   dependency-risk:
     runs-on: ubuntu-latest
-    # Write on pull-requests lets the CLI (or the fallback step) post risk
-    # findings as PR comments without granting that scope globally.
     permissions:
       contents: read
+      # Only to post the risk matrix as a comment.
       pull-requests: write
     steps:
+      # fetch-depth: 0 — the manifest diff needs the base branch.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Check for API key
+        id: key
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          if [ -n "$KIRO_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "note: KIRO_API_KEY is not set — skipping the advisory review." \
+                 "cargo audit and npm audit in audit.yml still ran."
+          fi
 
       - name: Install Kiro CLI
+        if: steps.key.outputs.present == 'true'
         run: |
           curl -fsSL https://cli.kiro.dev/install | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/kiro-cli" --version
 
-      - name: Analyze dependency risk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Collect manifest diff
+        if: steps.key.outputs.present == 'true'
+        id: diff
         run: |
-          kiro-cli scan dependencies \
-            --manifest app/tauri/package.json \
-            --manifest app/tauri/src-tauri/Cargo.toml \
-            --fail-on-high-risk
+          # Manifests only, not lockfiles: a lockfile diff for a 488-crate tree
+          # is thousands of transitive hash lines, and the dependency DECISION
+          # is what the manifest records.
+          git diff "origin/${{ github.base_ref }}...HEAD" -- \
+            app/tauri/package.json \
+            app/tauri/src-tauri/Cargo.toml \
+            > /tmp/dep-diff.txt || true
+          if [ -s /tmp/dep-diff.txt ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            # Reachable: a lockfile-only PR matches the path filter above but
+            # leaves both manifests untouched.
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "note: no manifest changes — lockfile-only PR, nothing to review."
+          fi
 
-      - name: Annotate PR on failure
-        if: failure() && github.event_name == 'pull_request'
+      - name: Review dependency risk
+        if: steps.key.outputs.present == 'true' && steps.diff.outputs.present == 'true'
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          # Read-only tools; `|| true` for the advisory posture. See the header.
+          kiro-cli chat --no-interactive --trust-tools=fs_read \
+            "Assess the risk of these dependency changes:
+
+          $(head -c 12000 /tmp/dep-diff.txt)
+
+          For each added or updated package, give: package, old -> new version,
+          risk level (low/medium/high), a one-line justification, and a
+          recommendation. Weigh known CVEs for the new version, license
+          compatibility, supply-chain signals (download volume, maintenance
+          activity, recent maintainer changes, names close to a more popular
+          package), whether the range is pinned or floating, and any new
+          transitive dependencies a major bump drags in.
+
+          Context: this is a local-only developer tool — a terminal
+          multiplexer, MIT licensed, no network listener and no telemetry. A
+          front-end dependency ships inside a desktop bundle. cargo audit and
+          npm audit already gate published advisories on every PR, so lead with
+          what those two would miss. Open with a one-line overall verdict." \
+            > /tmp/risk.md 2>&1 || true
+
+          echo "=== risk review ==="
+          cat /tmp/risk.md
+
+      - name: Post risk review
+        if: steps.key.outputs.present == 'true' && steps.diff.outputs.present == 'true'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
-            const message = '**Kiro Dependency Risk** flagged one or more dependencies as high-risk. ' +
-              'Check the job log for details on maintainer activity, license issues, or known-malicious patterns.';
+            const fs = require('fs');
+            let review = '_The review produced no output._';
+            try {
+              const raw = fs.readFileSync('/tmp/risk.md', 'utf8').trim();
+              if (raw) {
+                // Comment bodies cap at 65536 characters.
+                review = raw.length > 60000
+                  ? raw.slice(0, 60000) + '\n\n_[truncated]_'
+                  : raw;
+              }
+            } catch (e) {
+              review = `_Could not read the review output: ${e.message}_`;
+            }
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: message
+              body: '## Kiro dependency risk review (advisory)\n\n' + review +
+                '\n\n---\n_Advisory only — this check does not block merges. ' +
+                'The blocking gates are `cargo audit` and `npm audit` in `audit.yml`._'
             });
