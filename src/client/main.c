@@ -266,9 +266,17 @@ int main(int argc, char **argv) {
      * with a '/' or a leading '.' escaped that tree or aliased another
      * session: `history -s .` used to print a different session's output.
      * Rejected here as well as in the daemon because `history` never talks to
-     * the daemon — it opens the log file itself. */
+     * the daemon — it opens the log file itself.
+     *
+     * The rejected name is NOT echoed. It used to be, and that message was
+     * itself a target: a name carrying U+202E reversed the rest of the line it
+     * was quoted in, so the diagnostic explaining the rule was rendered by the
+     * very character the rule now refuses. The rule is stated instead — the
+     * person running this typed the name a moment ago. */
     if (name && !at_valid_session_name(name))
-        die("invalid session name '%s': no '/', no leading '.'", name);
+        die("invalid session name: needs to be one path component (no '/', no "
+            "leading '.'), valid UTF-8, and free of invisible or "
+            "direction-changing characters");
 
     if (strcmp(verb, "version") == 0 || strcmp(verb, "--version") == 0) {
         /* Client version from the build; daemon identity from a live HELLO.

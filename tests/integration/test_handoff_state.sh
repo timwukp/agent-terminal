@@ -104,6 +104,19 @@ data = {
                           + bytes([0, 0, 1, 200]) + layout_single_leaf()),
   # A name longer than SESSION_NAME_MAX (63).
   "oversize_name":       hdr(count=1) + rec(name=b"x" * 200),
+  # Structurally perfect records whose NAME is the payload. handle_new refuses
+  # these at the wire edge, and the state file is the one route that reaches
+  # session_import_begin without passing it — a file written by a build with
+  # the older, looser rule would otherwise reintroduce the name. Written as
+  # raw bytes rather than a literal: a test file carrying RIGHT-TO-LEFT
+  # OVERRIDE would render its own source reversed, which is the attack.
+  "bidi_name":           hdr(count=1) + rec(name=b"proj\xe2\x80\xaegol.hs"),
+  "invalid_utf8_name":   hdr(count=1) + rec(name=b"pro\xffj"),
+  # A rejected name AND a later truncation, which is the only path that reaches
+  # a second message about the same record. Without it, the substitution that
+  # keeps the name out of that message is unreachable and untested.
+  "bidi_name_truncated": hdr(count=1) + rec(name=b"proj\xe2\x80\xaegol.hs",
+                                            blob=b"12345678", blob_len=4096),
   # stdio as a PTY master, and as the listener: both must be refused outright.
   "stdio_as_master":     hdr(count=1) + rec(fd=2),
   "stdio_as_listener":   hdr(count=1, listen=1) + rec(),
@@ -134,7 +147,17 @@ reason_for() { # variant -> grep -E pattern
         absurd_blob_len)              echo "claims a 4294967295-byte screen" ;;
         count_overrun)                echo "truncated (record|at record)" ;;
         truncated_blob)               echo "truncated screen for" ;;
+        # The SECOND message about the record, so it also proves the first one
+        # did not stop the parse. The byte check below is what proves this
+        # message names the placeholder rather than the payload.
+        bidi_name_truncated)          echo "truncated screen for" ;;
         zero_name_len|oversize_name)  echo "truncated at record 0 of 1" ;;
+        # The record is structurally perfect, so nothing else can reject it:
+        # this pattern fails unless the name itself was refused. It must also
+        # never appear alongside the name — the point of refusing it is that
+        # printing it reorders the line, so a log that quotes it has not been
+        # fixed. Both are asserted below.
+        bidi_name|invalid_utf8_name) echo "has an invalid session name" ;;
         stdio_as_master|negative_fds) echo "refusing fd -?[0-9]+ as a PTY master" ;;
         stdio_as_listener|bogus_high_listener)
                                       echo "is not the listener for" ;;
@@ -146,7 +169,8 @@ reason_for() { # variant -> grep -E pattern
 
 VARIANTS="valid_but_stale_fds empty short_header bad_magic bad_version v1_file
           count_overrun absurd_count absurd_blob_len truncated_blob zero_name_len
-          oversize_name zero_panes absurd_panes stdio_as_master stdio_as_listener
+          oversize_name bidi_name invalid_utf8_name bidi_name_truncated
+          zero_panes absurd_panes stdio_as_master stdio_as_listener
           wrong_lock_fd negative_fds pid_zero bogus_high_listener"
 
 for V in $VARIANTS; do
@@ -178,6 +202,21 @@ for V in $VARIANTS; do
     grep -qE "$WANT" "$LOG" \
         || { echo "--- $V log ---"; cat "$LOG"
              fail "[$V] state file was not rejected for the expected reason (wanted /$WANT/)"; }
+
+    # A rejected name must not be echoed ANYWHERE in the log. The reason the
+    # rule exists is that rendering the name reorders the text printed around
+    # it, so a diagnostic that quotes it is the same attack worded as a fix —
+    # and the log is read by a person, in a terminal, exactly like the sidebar.
+    # Checked on the bytes, because a reversed line still contains them.
+    case "$V" in
+        bidi_name|invalid_utf8_name|bidi_name_truncated)
+            python3 - "$LOG" <<'PY' || fail "[$V] the rejected name was echoed into the log"
+import sys
+buf = open(sys.argv[1], "rb").read()
+sys.exit(1 if (b"\xe2\x80\xae" in buf or b"\xff" in buf) else 0)
+PY
+            ;;
+    esac
 
     # A crash under ASan prints a sanitizer report; a plain crash leaves a signal.
     grep -qiE 'AddressSanitizer|runtime error|Sanitizer' "$LOG" \

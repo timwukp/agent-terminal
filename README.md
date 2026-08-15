@@ -127,8 +127,23 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal version` | Client build (git hash) plus the running daemon's pid, restart generation, and whether it supports panes. Works with no daemon (`daemon: not running`). |
 
 A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
-must be a single path component: no `/`, no leading `.`, max 63 bytes. Interior
-dots (`build_2026.08`) and non-ASCII (`日本語`) are fine. Invalid names exit 1.
+must be a single path component: no `/`, no leading `.`, max 63 bytes. It is
+also the label you read *before* killing something, so it has to be valid
+UTF-8 and free of characters that either cannot be seen or reorder the text
+around them. That is not theoretical: measured in a browser engine, a session
+named `proj<U+202E>gol.hs` rendered the GUI's kill prompt `Kill
+proj<U+202E>gol.hs? Its child process ends.` as
+`Kill proj.sdne ssecorp dlihc stI ?sh.log`, and `deploy` next to
+`deploy<U+200B>` measured the same width to the pixel — two rows you cannot
+tell apart, one of which sends your keystrokes somewhere else.
+
+Interior dots (`build_2026.08`) and any real script (`日本語`, `專案-A`,
+Hebrew, Arabic, Cyrillic, a plain emoji) are fine. A zero-width joiner or a
+variation selector is not, so an emoji built from a sequence cannot be a
+session name — a deliberate trade, since telling two names apart matters more
+here than spelling one with an emoji. Invalid names exit 1. Look-alikes built
+from ordinary letters (Cyrillic `е` for Latin `e`) are *not* caught; see
+[SECURITY.md](SECURITY.md).
 
 ### Panes
 
@@ -497,7 +512,7 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,368 checks across 9 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 6,416 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.

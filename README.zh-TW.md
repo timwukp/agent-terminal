@@ -116,8 +116,20 @@ agent-terminal attach -s work           # 一切都還在
 | `agent-terminal version` | 客戶端建置版本(git hash),加上運行中 daemon 的 pid、重啟世代數,以及是否支援窗格。daemon 不在也能用(顯示 `daemon: not running`)。 |
 
 Session 名稱會成為 `~/.agent-terminal/sessions/` 下的目錄,所以必須是單一
-路徑組件:不可含 `/`、不可以 `.` 開頭、最長 63 bytes。中間的點
-(`build_2026.08`)與非 ASCII(`日本語`)都沒問題。無效名稱以 exit 1 拒絕。
+路徑組件:不可含 `/`、不可以 `.` 開頭、最長 63 bytes。它同時也是你在**終止
+session 之前**會讀的標籤,因此必須是合法 UTF-8,且不可含看不見、或會改變周
+圍文字順序的字元。這不是理論問題:在瀏覽器引擎中實測,名為
+`proj<U+202E>gol.hs` 的 session 讓 GUI 的終止確認 `Kill proj<U+202E>gol.hs?
+Its child process ends.` 實際算繪成
+`Kill proj.sdne ssecorp dlihc stI ?sh.log`;而 `deploy` 與 `deploy<U+200B>`
+量到的寬度精確相同 —— 兩列你分不出來,其中一列會把你的按鍵送到別的地方。
+
+中間的點(`build_2026.08`)與任何真實文字(`日本語`、`專案-A`、希伯來文、
+阿拉伯文、西里爾文、單一 emoji)都沒問題。zero-width joiner 與 variation
+selector 不行,所以由序列組成的 emoji 不能當 session 名稱 —— 這是刻意的取
+捨:在這裡「兩個名稱能被分辨」比「名稱能用 emoji 拼出來」更重要。無效名稱
+以 exit 1 拒絕。由普通字母構成的相似字(用西里爾文 `е` 冒充拉丁文 `e`)**不
+會**被攔下,詳見 [SECURITY.md](SECURITY.md)。
 
 ### 窗格(Panes)
 
@@ -431,7 +443,7 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
 
 三個層次,`main` 上全綠:
 
-- **單元測試**:9 個套件共 6,368 個檢查(VT 解析器逐位元組、協定往返與
+- **單元測試**:9 個套件共 6,416 個檢查(VT 解析器逐位元組、協定往返與
   違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
   環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
   下運行。

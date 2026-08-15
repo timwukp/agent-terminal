@@ -688,6 +688,84 @@ installed binary aside and watching it flip to failing. Recording that distincti
 than the count: an assertion nothing can kill is usually decoration, and this one has a stated
 reason not to be.
 
+## Security round 6 (2026-08-15): the session name as a display surface
+
+The M2 plan carried this as a decision, not a defect: session names are arbitrary UTF-8 from
+the daemon, so *display* spoofing is possible in the sidebar and in OS notifications — filter
+the codepoints, or document it. There is no injection to fix (React escapes everything, and
+`notify.ts` passes text to a platform API that renders no markup), so the question was only
+whether the rendered name can lie. It can, and it was reproduced rather than argued about.
+
+A session named `proj<U+202E>gol.hs` was created on the live daemon and the GUI's kill
+confirmation — `Kill <name>? Its child process ends.` — rendered as
+**`Kill proj.sdne ssecorp dlihc stI ?sh.log`** in a real browser engine. The dialog explaining
+which session is about to die names a different session and reverses the sentence around it.
+Measurement, not eyeballing: per-character `Range.getBoundingClientRect()` x positions, where
+monotonicity breaking *is* the reordering. The second shape is invisibility, measured the same
+way — `deploy` and `deploy<U+200B>` produce elements of **identical width to the pixel**, so
+two sidebar rows cannot be told apart and one of them sends your keystrokes elsewhere.
+
+**A design prediction was refuted here, and the refutation removed code.** The intended fix
+included `unicode-bidi: isolate` on the name, on the theory that legitimate strong-RTL letters
+(Hebrew, Arabic) would leak into the surrounding neutral text and need fencing. Measured in
+four shapes — name inside a sentence, name followed by status badges, name first then neutrals,
+name last then one neutral — isolation changed **no** x position. UAX #9 rule N2 resolves
+neutral characters to the paragraph direction, so there was nothing to leak. The CSS layer was
+dropped instead of shipped: it would have been ceremony that looks like a defense.
+
+So the rule lives at the wire edge, in `at_valid_session_name`, matching the file's existing
+reject-never-rewrite policy (a rewritten name makes `ls` disagree with the directory it names).
+Refused: the **twelve** UAX #9 explicit formatting characters — a closed set, exactly the
+characters that reorder neighbours — plus C1 (a terminal may consume some as control bytes),
+plus a hand-written list of zero-width and invisible codepoints, plus malformed UTF-8. The
+scope claim is deliberately uneven and stated that way in `SECURITY.md`: **total for
+reordering, partial for invisibility**, and nothing at all for confusable letters (`dеploy`
+with a Cyrillic `е` is a well-formed name this layer cannot judge).
+
+Two things the reproduction found that the plan item did not name:
+
+1. **Malformed UTF-8 was worse than a display bug.** `at-proto` decodes names with
+   `String::from_utf8_lossy` (`msg.rs:356`, `:384`), so such a name shows as U+FFFD *and* the
+   bytes the GUI sends back on kill or attach no longer match the session's — the row is
+   unkillable from the sidebar. Rejecting the name at creation is what makes that unreachable;
+   validating only for display would have left it.
+2. **The diagnostic was itself a target.** The CLI used to echo the rejected name, so a name
+   carrying U+202E reversed the very message explaining the rule. It now states the rule and
+   does not quote the name. The same applies inside the handoff importer, where six messages
+   and one pane label quote a name — the check moved to immediately after the name is read,
+   before the first message that could print it, and all seven name a placeholder instead.
+
+The state file is the one path that reaches `session_import_begin` without passing the wire
+edge, so a file written by an older, looser build would reintroduce the name on the next
+reload. `test_handoff_state.sh` now drives **23** malformed state files, three of them
+name-shaped: a bidi name, an invalid-UTF-8 name, and a bidi name *plus* a later truncation —
+the third exists because it is the only path that reaches a second message about the same
+record, i.e. the only one that can prove the placeholder substitution works. Those assertions
+are byte-level (`b"\xe2\x80\xae" in log`), because a reversed line still contains the bytes.
+
+Numbers: `test_path.c` is **95 checks, 0 failures** under ASan; **8/8** mutants of the
+validator killed and **2/2** of the handoff guard, with a no-mutant control confirming the
+harness discriminates. The stated cost of the rule, in the README: emoji built from ZWJ
+sequences or variation selectors cannot be session names. That trade is explicit — being able
+to tell two names apart is worth more here than being able to spell one with an emoji.
+
+A harness trap found while gating this change, recorded because the next person will hit it.
+Running the whole integration suite under `BUILD=asan` fails `test_soak.sh` with **peak RSS
+194 MiB against a 128 MiB bound** — reproducibly, on an unmodified tree. The same test under
+`BUILD=release` peaks at **3 MiB**. The bound was calibrated for release, which is the only
+variant CI runs the integration suite under (`ci.yml`: `if: matrix.build == 'release'`), and
+ASan's redzones and quarantine account for the rest. So the 194 MiB is a property of the
+sanitizer, not a leak — but read cold it looks exactly like a regression, and the failure is
+in a test whose whole job is to notice unbounded memory. The gate for this change was
+therefore both: unit suites under ASan, integration under release, matching CI.
+
+One process note. My own source comments arguing against Trojan Source (CVE-2021-42574)
+initially contained **five raw invisible codepoints** (2× U+202E plus U+200B, U+200D, U+FEFF),
+which is that vulnerability, in the file fixing it. Found by a `unicodedata` census rather than
+by reading, and every example is now written as `<RLO>` / `<ZWSP>` / `<BOM>` notation, with all
+four touched C files re-censused to zero Cf/Mn/Cc characters. A file about invisible characters
+is the last place to trust your eyes.
+
 ## Reproducing this UAT
 
 The interactive cases are pty scripts; the shape for all of them:
