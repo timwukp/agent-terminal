@@ -13,6 +13,7 @@ import { TauriHooksApi } from "./panels/hooksApi";
 import { decideNotify, deliverNotification } from "./notify";
 import { makeOneShotSet } from "./terminal/viewControls";
 import { theme } from "./theme";
+import ThemeSwitch from "./ThemeSwitch";
 
 export default function App() {
   const transport = useMemo(() => new TauriTransport(), []);
@@ -107,22 +108,37 @@ export default function App() {
         height: "100vh",
         margin: 0,
         fontFamily: "system-ui",
-        // One dark surface system end to end (theme.ts) — the light
-        // chrome around a dark terminal read as two different apps.
+        // One surface system end to end (theme.ts), whichever theme is
+        // on: light chrome around a dark terminal read as two different
+        // apps, and so would the reverse.
         background: theme.bg,
         color: theme.text,
       }}
     >
-      <aside style={{ width: 220, borderRight: `1px solid ${theme.border}`, padding: 8 }}>
-        <Sidebar
-          api={api}
-          active={active}
-          onSelect={select}
-          onCreated={(name) => autoFitNewborn.add(name)}
-          muted={muted}
-          done={done}
-          onToggleMute={toggleMute}
-        />
+      <aside
+        style={{
+          width: 220,
+          borderRight: `1px solid ${theme.border}`,
+          padding: 8,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <Sidebar
+            api={api}
+            active={active}
+            onSelect={select}
+            onCreated={(name) => autoFitNewborn.add(name)}
+            muted={muted}
+            done={done}
+            onToggleMute={toggleMute}
+          />
+        </div>
+        {/* App-level, so it sits outside the session list rather than
+            under the template buttons that create sessions. */}
+        <ThemeSwitch />
       </aside>
       <main style={{ flex: 1, position: "relative", background: theme.bgMain }}>
         {active === null ? (
@@ -152,7 +168,7 @@ export default function App() {
                   margin: 0,
                   padding: "6px 10px",
                   background: theme.dangerStrong,
-                  color: "#fff",
+                  color: theme.onAccent,
                   fontSize: 12,
                 }}
               >
@@ -208,7 +224,7 @@ export default function App() {
                     border: `1px solid ${theme.border}`,
                     borderRadius: 4,
                     background: claudeTab === tab ? theme.accent : "transparent",
-                    color: claudeTab === tab ? "#fff" : theme.textMuted,
+                    color: claudeTab === tab ? theme.onAccent : theme.textMuted,
                   }}
                 >
                   {tab === "usage" ? "Usage" : "Hooks"}

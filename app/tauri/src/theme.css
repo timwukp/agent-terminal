@@ -4,21 +4,73 @@
  * terminal's ITheme from the SAME values via resolveTokens(), so chrome
  * and terminal cells can never disagree.
  *
- * Only "dark" ships today. A new theme = one more block here plus a
- * palette-validator pass for the chart accent (see theme.ts); no TS
- * changes required. */
+ * Light is NOT an inverted dark. Only --accent and --on-accent are
+ * shared; --good, --danger, --danger-strong, --focus-ring and both
+ * --raised* steps are re-picked so every ink role clears 4.5:1 against
+ * the surface it actually sits on. Those ratios are asserted, not
+ * eyeballed: theme.test.ts computes them from these values via
+ * contrast.ts, so a token edit that darkens the wrong way reds the
+ * suite.
+ *
+ * A third theme = one more block here, one more ThemeName, and the same
+ * assertions pass over it. */
 
 :root[data-theme="dark"] {
   --bg: #14171c;
   --bg-main: #1e2228;
   --surface: #1f242c;
   --border: #2d333d;
+  --raised: #2d3239;
+  --raised-border: #3f464f;
   --text: #dfe4ea;
   --text-muted: #8b949e;
   --accent: #2b6cb0;
+  --on-accent: #ffffff;
+  --focus-ring: #4a9eff;
   --good: #3fb950;
-  --danger: #e5534b;
+  --danger: #ec6a62;
   --danger-strong: #7f1d1d;
+}
+
+:root[data-theme="light"] {
+  --bg: #eef1f5;
+  --bg-main: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d0d7de;
+  --raised: #f0f3f6;
+  --raised-border: #afb8c1;
+  --text: #1f2328;
+  --text-muted: #59636e;
+  --accent: #2b6cb0;
+  --on-accent: #ffffff;
+  --focus-ring: #0969da;
+  --good: #0f7a2f;
+  --danger: #cf222e;
+  --danger-strong: #a40e26;
+}
+
+/* Pre-paint surface. applyTheme() sets [data-theme] from a module, which
+ * cannot run before the first paint, so without this the window opens on
+ * the UA's white — a visible strobe on every dark-theme launch. The
+ * no-flash trick of an inline <script> reading the stored preference is
+ * deliberately NOT used: it would need script-src 'unsafe-inline' in the
+ * CSP, and keeping foreign script out of this webview is worth more than
+ * one frame. So the guess follows the OS; a user whose stored preference
+ * disagrees with the OS sees one frame of the other surface.
+ * [data-theme] outranks both rules on specificity, so it wins whenever
+ * it is present regardless of order. */
+html {
+  background: #14171c;
+}
+
+@media (prefers-color-scheme: light) {
+  html {
+    background: #eef1f5;
+  }
+}
+
+:root[data-theme] {
+  background: var(--bg);
 }
 
 body {

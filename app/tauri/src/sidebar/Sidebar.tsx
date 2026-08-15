@@ -146,8 +146,12 @@ export default function Sidebar({
                     padding: "2px 8px",
                     marginRight: 4,
                     cursor: "pointer",
-                    background: theme.danger,
-                    color: "#fff",
+                    // The strong step, not `danger`: `danger` is picked to
+                    // be READ as text on a panel, which leaves it too pale
+                    // to sit UNDER white — 3.09:1 in dark, where the strong
+                    // step is 10.02:1.
+                    background: theme.dangerStrong,
+                    color: theme.onAccent,
                     border: "none",
                     borderRadius: 3,
                   }}
@@ -185,7 +189,7 @@ export default function Sidebar({
                   border: "none",
                   borderRadius: 4,
                   background: s.name === active ? theme.accent : "transparent",
-                  color: s.name === active ? "#fff" : "inherit",
+                  color: s.name === active ? theme.onAccent : "inherit",
                   cursor: "pointer",
                   fontSize: 13,
                 }}

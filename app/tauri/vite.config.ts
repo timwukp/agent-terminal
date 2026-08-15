@@ -12,5 +12,14 @@ export default defineConfig({
   // behaviour is the reason a DOM environment exists here at all: "typed
   // and nothing happened" is a focus bug, and it is invisible to
   // logic-only tests.
-  test: { environment: "node" },
+  test: {
+    environment: "node",
+    // Node 25 shadows jsdom's localStorage with a broken one (testSetup.ts).
+    setupFiles: ["./src/testSetup.ts"],
+    // Vitest stubs CSS imports to "" by default, which silently turned the
+    // theme.css-vs-theme.ts cross-check into a test that asserted nothing
+    // (an empty stylesheet parses to zero tokens). Processing CSS costs a
+    // few ms and makes `?raw` return the real file.
+    css: true,
+  },
 });
