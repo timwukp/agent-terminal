@@ -486,7 +486,7 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,352 checks across 9 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 6,368 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
