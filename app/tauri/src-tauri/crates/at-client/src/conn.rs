@@ -80,6 +80,8 @@ pub enum Event {
     SessionExited(i32),
     /// MSG_PANE_EXITED.
     PaneExited { pane_id: u8, exit_status: i32 },
+    /// MSG_PANE_BELL: a bell, attributed to a pane, in a split session.
+    PaneBell { pane_id: u8 },
     /// MSG_SCROLLBACK_DATA.
     Scrollback { first_seq: u64, lines: Vec<Vec<u8>> },
     /// MSG_PONG.
@@ -265,6 +267,9 @@ fn frame_to_event(msg_type: u8, payload: Vec<u8>) -> Option<Event> {
                     exit_status,
                 })
         }
+        t if t == T::PaneBell as u8 => proto::parse_pane_bell(&payload)
+            .ok()
+            .map(|pane_id| Event::PaneBell { pane_id }),
         t if t == T::ScrollbackData as u8 => {
             proto::parse_scrollback_data(&payload)
                 .ok()

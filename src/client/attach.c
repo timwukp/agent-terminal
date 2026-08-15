@@ -619,6 +619,14 @@ int attach_run(const char *name, char *const argv[], int argc) {
                         case MSG_PANE_EXITED:
                             /* Informational; the daemon already recomposited. */
                             break;
+                        case MSG_PANE_BELL:
+                            /* A pane in this split session rang. The composite
+                             * path strips the raw \a this message stands for,
+                             * so ring the hosting terminal ourselves — same
+                             * suppression as MSG_OUTPUT while paging. */
+                            if (!pg)
+                                while (write(1, "\a", 1) < 0 && errno == EINTR) {}
+                            break;
                         case MSG_SESSION_EXITED:
                             exited = 1;
                             exit_code = len >= 4 ? (int)get_u32(scratch) : 0;

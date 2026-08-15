@@ -36,6 +36,7 @@ pub enum MsgType {
     Layout = 0x35,
     PaneExited = 0x36,
     SessionList2 = 0x37,
+    PaneBell = 0x38,
     Ping = 0x40,
     Pong = 0x41,
 }
@@ -484,6 +485,15 @@ pub fn parse_session_exited(p: &[u8]) -> Result<i32, ParseError> {
 pub fn parse_pane_exited(p: &[u8]) -> Result<(u8, i32), ParseError> {
     need(p, 5, "PANE_EXITED shorter than id+status")?;
     Ok((p[0], u32_at(p, 1) as i32))
+}
+
+/// MSG_PANE_BELL: u8 pane_id (proto.h 0x38). A BEL inside a split session:
+/// composite frames are rebuilt from grid state, so the raw \a never
+/// survives them; single-pane sessions keep the raw passthrough and this
+/// message is deliberately not sent (it would ring twice).
+pub fn parse_pane_bell(p: &[u8]) -> Result<u8, ParseError> {
+    need(p, 1, "PANE_BELL shorter than its pane id")?;
+    Ok(p[0])
 }
 
 /// MSG_PONG: u64 nonce (the daemon echoes the PING payload verbatim).

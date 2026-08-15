@@ -300,8 +300,11 @@ close-pane; and an outline on the active pane so a split session shows where inp
 goes.
 
 The GUI also tells you when a session **finishes a long task while you are
-elsewhere**: two triggers, OR-ed — the terminal bell (xterm's parser, so OSC
-title writes don't ring it), and an output-idle machine in the Rust core
+elsewhere**: two triggers, OR-ed — the terminal bell (xterm's parser for a
+single pane, so OSC title writes don't ring it; split sessions ride the
+daemon's `MSG_PANE_BELL`, because composited frames strip the raw `\a` — two
+disjoint paths, so a bell never rings twice), and an output-idle machine in
+the Rust core
 (sustained output ≥10 s, then ≥5 s of silence; a one-line `ls` never
 notifies). A focused window never notifies — you are already watching. Each
 session row has a 🔔/🔕 toggle; muting silences the pop-up but the row still
@@ -487,7 +490,7 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 28 end-to-end scripts covering the failure modes this tool
+- **Integration**: 29 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving, pane splits / directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,

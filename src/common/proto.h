@@ -83,6 +83,12 @@ enum proto_type {
                                 * u8 id, u16 x, u16 y, u16 cols, u16 rows.
                                 * Sent only to clients that set CLIENT_CAP_PANES. */
     MSG_PANE_EXITED    = 0x36, /* D→C: u8 pane_id, i32 exit_status (≥2 panes only) */
+    /* Composite frames are rebuilt from grid state, so a BEL inside a split
+     * session never survives to MSG_OUTPUT — with one pane the raw \a rides
+     * the live tee and the hosting terminal rings natively, which is also why
+     * this is NOT sent then (it would ring twice). ≥2 panes only, and only to
+     * clients that set CLIENT_CAP_PANES. */
+    MSG_PANE_BELL      = 0x38, /* D→C: u8 pane_id */
     MSG_PING           = 0x40, /* both: u64 nonce */
     MSG_PONG           = 0x41, /* both: u64 nonce */
 };

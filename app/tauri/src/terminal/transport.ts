@@ -22,6 +22,10 @@ export type CtrlEvent =
   | { kind: "err"; code: number; msg: string }
   | { kind: "session_exited"; exit_status: number }
   | { kind: "pane_exited"; pane_id: number; exit_status: number }
+  // MSG_PANE_BELL relayed by the Rust core: a bell attributed to a pane of
+  // a SPLIT session. Single-pane bells never arrive this way — the raw \x07
+  // rides the output stream and xterm's own parser rings (Terminal.tsx).
+  | { kind: "pane_bell"; pane_id: number }
   // The Rust idle machine: sustained output followed by silence long
   // enough to call the turn finished (src-tauri/src/idle.rs).
   | { kind: "turn_done" }

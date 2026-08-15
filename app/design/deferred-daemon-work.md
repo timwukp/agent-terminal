@@ -25,18 +25,15 @@ client-side.
 
 This is the largest item: layout, reflow, handoff, and tests all move.
 
-## 2. Bell signal — `MSG_PANE_BELL`
+## 2. Bell signal — `MSG_PANE_BELL` — **DONE**
 
-BEL survives the wire only in single-pane raw-tee mode; composited frames
-are rebuilt from grid state and drop it. Notification support in any
-client (GUI or future CLI feature) wants a semantic signal:
-
-- New D→C message: `u8 pane_id`, emitted when the VT layer consumes a BEL
-  in a session with ≥2 panes (single-pane keeps raw passthrough — no
-  double signal).
-- Sent only to CLIENT_CAP_PANES clients (others skip unknown types
-  anyway, but no point sending).
-- Small, high value.
+Landed as proto.h 0x38, exactly the shape sketched here: `u8 pane_id`,
+emitted from the daemon's bell callback when the session is composited
+(single-pane keeps raw passthrough — no double signal), sent only to
+CLIENT_CAP_PANES clients. Wire behaviour is pinned by
+`tests/integration/test_pane_bell.sh` (attribution, capability gate,
+single-pane silence, and the OSC-terminator non-ring); the GUI treats it
+exactly like a local bell (Terminal.tsx `pane_bell` ctrl event).
 
 ## 3. Session event push (optional, later)
 
