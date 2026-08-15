@@ -154,6 +154,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-30 | hook log tolerates a hostile writer | with a valid 2-line chain (GUI-26) present, append 3 MiB with no newline in it (`python3 -c 'open(P,"a").write("x"*3_000_000)'`), watch the card for ~10 s; then append a single `\n` followed by a fresh valid line | the card keeps updating throughout (no freeze, no ballooning memory): the unterminated line is counted as malformed rather than buffered, the badge reports the chain broken, and the following newline resynchronizes so the new event is listed |
 | GUI-31 | a bell in a background SPLIT session notifies | split a session (`Ctrl-\ %` in a CLI attach or the toolbar), focus a DIFFERENT session in the GUI (window still frontmost is fine — use a second session, not an unfocused window, to isolate the trigger), then in one pane of the split run `sleep 1; printf '\a'` | the split session's row gets the ✓ badge (and an OS notification if the window is in the background and the row is not muted) — before MSG_PANE_BELL this was silent, because composite frames strip the raw `\a` and only the idle machine could fire |
 | GUI-32 | theme switch, and light is readable where dark was | with a session attached, pick **light** in the sidebar's Theme control: read the chrome, the session output (run `ls --color=always` and `printf '\e[97mbright white\e[0m\n'`), an active-pane border on a split, and the kill confirmation; then pick **system** and flip macOS System Settings ▸ Appearance while the window stays open; quit and relaunch after choosing **dark** | the whole window switches at once — chrome and terminal, no dark island; every glyph stays readable, including bright white, which xterm's own default palette renders at 1.46:1 on white; the pane border and the ✓ badge remain visible; on **system** the window follows the OS immediately without a relaunch; an explicit **dark** survives the relaunch (the preference is stored, and only `system` follows the OS) |
+| GUI-33 | a spoofed session name cannot lie in the chrome | with a **pre-#81 daemon** running (the released v0.1.0 accepts these names; after #81 the name cannot be created, so use an older daemon or an existing session directory), create `proj<U+202E>gol.hs` and `de<U+200B>ploy` — e.g. `agent-terminal new -s "$(printf 'proj\342\200\256gol.hs')" -- sleep 600` — then in the GUI read the sidebar rows, right-click one, and let a turn finish with the window in the background | the row reads `projgol.hs`, the second reads `de<U+FFFD>ploy` and is visibly wider than a real `deploy` row; the kill prompt reads `Kill projgol.hs (pid N)? Its child process ends.` left to right and the Kill button ends that session; the OS notification's title reads `projgol.hs — finished` and the window title (⌘-Tab) still ends in `— agent-terminal`; the notification BODY is whatever the program printed, unchanged — including any reordering it chose |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -765,6 +766,94 @@ which is that vulnerability, in the file fixing it. Found by a `unicodedata` cen
 by reading, and every example is now written as `<RLO>` / `<ZWSP>` / `<BOM>` notation, with all
 four touched C files re-censused to zero Cf/Mn/Cc characters. A file about invisible characters
 is the last place to trust your eyes.
+
+## Security round 7 (2026-08-15): the notification body, and where trusted text sits
+
+The other half of the same M2 decision — *notification bodies are arbitrary UTF-8, so filter
+the codepoints or document it.* The answer is **document it**, and the reason it is not "filter
+it" was measured rather than assumed. Round 6 filtered session names; this round establishes
+that the body is a different kind of string and needs the opposite treatment.
+
+**First, what a body can actually contain.** The body is `lastNonEmptyLine`, one row read out
+of the GUI's own xterm buffer, so its alphabet is whatever the terminal parser puts in a cell —
+not whatever bytes a program writes. That is measurable, so `screenLine.test.ts` measures it
+against the real parser (27 assertions, xterm 6.0, never `open()`ed — the parser and buffer need
+no DOM):
+
+| written into the session | reaches the notification body |
+| --- | --- |
+| the twelve UAX #9 explicit formatting characters | **all twelve**, unchanged |
+| ZWSP, ZWNJ, ZWJ, WJ, SHY, CGJ, variation selectors | yes |
+| U+FEFF (BOM) | no — xterm drops it |
+| U+2028 / U+2029 | yes, the only survivors that can read as a line break |
+| C0, C1, ESC, BEL, DEL | **none of them.** The parser consumes every one |
+| more text than the session is wide | no — the body is one row of the grid |
+
+Two of those rows changed the design. Because **no control character can arrive**, a control
+filter on the body would have been code for an unreachable input — the test asserts the exact
+output for each (`"a<CSI>b"` → `"aa"`, because CSI `b` is REP and repeats the previous
+character) rather than "does not contain", since an empty body would satisfy "does not contain"
+for all nine. And because the body **cannot exceed the session's width**, which the daemon
+clamps at the wire edge, no length cap was needed either.
+
+**The body is not filtered, deliberately.** Reordering it produces a misleading sentence — but
+that program can already write a misleading sentence in plain ASCII, it owns every character of
+its own output, there is no trusted text beside it, and no action hangs off it. Filtering would
+have a real cost on the other side: bidi marks are how correctly-written software renders mixed
+right-to-left text, and ZWJ and variation selectors are how it prints emoji, which is ordinary
+output for the CLIs this GUI exists to watch. So `SECURITY.md` now says what a body is — the
+last screen line of one program, to be read as that program's claim — and the measurement above
+is the evidence, which is also why it is a test: if a future xterm starts passing C1 through,
+the decision reopens and that file goes red.
+
+**What did need fixing is a composition, and it appears twice.** The body has no trusted
+neighbour; a session name does. `${session} — finished` and `${active} — agent-terminal` both
+put our own words *downstream* of a daemon-supplied string, and one U+202E reverses the whole
+line. Measured in Chromium via per-character `Range.getBoundingClientRect()` x positions, the
+notification title for `proj<U+202E>gol.hs` renders as **`projdehsinif — sh.log`** — x positions
+stop increasing, the name reads as `sh.log`, and the app's own word `finished` is reversed and
+dragged into the middle of it. After filtering, the same title renders `projgol.hs — finished`
+with x positions monotonic and every glyph of the name still present.
+
+So the GUI now filters a name on its way to a screen: the sidebar row, the kill confirmation,
+the mute button's label, the notification title, the window title. This is not round 6 repeated
+client-side — **the GUI and the daemon ship and update separately**, and the released v0.1.0
+daemon validates a name with `*p == '/' || (unsigned char)*p < 0x20`, which accepts every
+codepoint round 6 refuses, DEL included. A GUI rendering a name it did not itself validate is
+trusting a version it cannot see, and v0.1.0 is the version it is most likely to meet.
+
+**Invisible characters are marked, not stripped, and the numbers say why.** Deleting U+200B
+from `de<U+200B>ploy` yields exactly `deploy` — the decoy would then render as the name it
+impersonates, which is what its author wanted. Measured: `de<U+200B>ploy — agent-terminal` is
+**141.63 px** wide, identical to the genuine `deploy — agent-terminal` at **141.63 px**, down to
+the last character's x (146.73). Replacing the zero-width character with U+FFFD makes it
+**154.63 px**, the mark itself occupying 13.01 px. Reordering characters are *deleted* instead,
+because they have no glyph of their own — removing one leaves every visible glyph exactly as it
+was, which the monotonic title above shows.
+
+The split is the point: **delete what only reorders, mark what hides.** And the string that
+addresses a session is never the string that was rendered — attach, kill and mute carry the
+name's real bytes, asserted directly (kill a filtered row, expect `killSession` to receive the
+name including its U+202E). Round 6 found the version of that bug that made a session
+unkillable from its own sidebar row; this is the same mistake's other direction.
+
+**The pid is now in the kill confirmation**, not only in the row's tooltip. It is the answer to
+the spoof no character rule can catch — `deploy` and `dеploy` with a Cyrillic `е` are both
+well-formed and render identically — and a tooltip is no mitigation at the destructive moment,
+because hovering is not what someone about to click does. The prompt already carried the pid
+internally, to drop itself when a freed name came back on a different process.
+
+Numbers: the app suite is **223 checks across 26 files** (180 before this change), **10/10**
+mutants killed with a no-mutant control surviving — including the two that swap the raw and
+displayed name in either direction, the one that drops the pid, and one per title composition.
+`npx tsc --noEmit` clean.
+
+Honest limits. The transform is measured in Chromium and jsdom, not in macOS's own notification
+renderer: this machine cannot post a notification at all (the unbundled binary falls back to the
+✓ badge, and the `.app` is ad-hoc signed — `spctl` rejects it), so **GUI-33** below is a human
+row. And the local formatter check paid off again: `npx prettier` (3.9.6, fetched ad hoc — the
+repo pins no formatter) reports style violations in files this change never touched, so it was
+not run on the ones it did; style here is hand-matched, as in round 6's clang-format incident.
 
 ## Reproducing this UAT
 

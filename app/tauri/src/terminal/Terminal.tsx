@@ -23,6 +23,7 @@ import {
 import { currentTheme, onThemeChange, resolveTokens, theme } from "../theme";
 import { xtermTheme } from "./xtermTheme";
 import { readCellMetrics } from "./overlay";
+import { lastNonEmptyLine } from "./screenLine";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
 import PaneToolbar from "./PaneToolbar";
@@ -58,16 +59,6 @@ export interface TerminalProps {
    * not imposing on anyone). CLI-created sessions always answer false —
    * the no-imposed-geometry rule stands. */
   autoFit?: () => boolean;
-}
-
-/** Bottom-most non-empty row of the visible screen. */
-function lastNonEmptyLine(term: XTerm): string {
-  const buf = term.buffer.active;
-  for (let y = buf.length - 1; y >= 0; y--) {
-    const text = buf.getLine(y)?.translateToString(true).trim();
-    if (text) return text;
-  }
-  return "";
 }
 
 export default function TerminalView({

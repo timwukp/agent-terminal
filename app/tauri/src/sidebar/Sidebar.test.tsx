@@ -168,3 +168,81 @@ describe("Sidebar kill confirmation", () => {
     expect(screen.getByRole("group", { name: /confirm killing session logs/i })).toBeTruthy();
   });
 });
+
+// A row is read by a person and clicked by a person, and those are two
+// different strings: the rendered one is filtered (../displayName.ts), the
+// one sent to the daemon is the exact name it stored. Codepoints appear as
+// escapes — a test file carrying a raw RIGHT-TO-LEFT OVERRIDE would render
+// its own source reversed.
+const RLO = "\u202E"; // reorders its neighbours; deleted for display
+const ZWSP = "\u200B"; // invisible; shown as U+FFFD so the row stays distinct
+const MARK = "\uFFFD";
+
+describe("Sidebar name display", () => {
+  it("renders a reordering name without the override but kills the real one", async () => {
+    // Measured in PR #81: this name turns the prompt into
+    // "Kill proj.sdne ssecorp dlihc stI ?sh.log" — a dialog that names
+    // something other than what it ends.
+    const raw = "proj" + RLO + "gol.hs";
+    const { api } = mockApi([row(raw, 4242)]);
+    await mount(api);
+
+    const label = screen.getByText("projgol.hs");
+    expect(label.textContent).not.toContain(RLO);
+
+    rightClick(label);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Kill" }));
+    });
+    // The whole point of filtering for DISPLAY only: the daemon addresses
+    // sessions by their exact bytes, and a filtered name would miss.
+    expect(api.killSession).toHaveBeenCalledWith(raw);
+  });
+
+  it("keeps an invisible-character decoy distinguishable from its target", async () => {
+    // Both rows render "deploy" if the invisible character is stripped, and
+    // then clicking either one is a coin toss over whose PTY gets the keys.
+    const decoy = "de" + ZWSP + "ploy";
+    const picked: string[] = [];
+    const { api } = mockApi([row("deploy", 4242), row(decoy, 4243)]);
+    render(<Sidebar api={api} active={null} onSelect={(n) => picked.push(n)} />);
+    await act(async () => {});
+
+    expect(screen.getByText("deploy")).toBeTruthy();
+    expect(screen.getByText("de" + MARK + "ploy")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("de" + MARK + "ploy"));
+    expect(picked).toEqual([decoy]);
+  });
+
+  it("names the pid in the kill confirmation", async () => {
+    // The mitigation for the spoof no character rule can catch: `deploy`
+    // and `dеploy` with a Cyrillic е render identically, and only a number
+    // tells the reader which one is about to end.
+    const { api } = mockApi([row("deploy", 4242), row("d\u0435ploy", 4243)]);
+    await mount(api);
+
+    rightClick(screen.getByText("d\u0435ploy"));
+    const group = screen.getByRole("group", { name: /confirm killing/i });
+    expect(group.textContent).toContain("pid 4243");
+  });
+
+  it("filters the mute button's label while muting the real name", async () => {
+    const raw = "proj" + RLO + "gol.hs";
+    const toggled: string[] = [];
+    const { api } = mockApi([row(raw, 4242)]);
+    render(
+      <Sidebar
+        api={api}
+        active={null}
+        onSelect={() => {}}
+        onToggleMute={(n) => toggled.push(n)}
+      />,
+    );
+    await act(async () => {});
+
+    const btn = screen.getByRole("button", { name: "mute notifications for projgol.hs" });
+    fireEvent.click(btn);
+    expect(toggled).toEqual([raw]);
+  });
+});

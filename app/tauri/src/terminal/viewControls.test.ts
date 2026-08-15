@@ -113,4 +113,11 @@ describe("windowTitle", () => {
   it("falls back to the app name", () => {
     expect(windowTitle(null)).toBe("agent-terminal");
   });
+  it("filters the name, because our app name sits downstream of it", () => {
+    // Same shape as the notification title: one U+202E in a session name
+    // reverses the " — agent-terminal" after it, so the window in
+    // ⌘-Tab no longer identifies the app it belongs to.
+    expect(windowTitle("proj\u202Egol.hs")).toBe("projgol.hs — agent-terminal");
+    expect(windowTitle("de\u200Bploy")).toBe("de\uFFFDploy — agent-terminal");
+  });
 });

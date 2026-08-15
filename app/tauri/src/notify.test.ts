@@ -41,6 +41,33 @@ describe("deliverNotification", () => {
     });
   });
 
+  it("filters the session name in the title, and leaves the body alone", async () => {
+    // Two decisions in one assertion, both argued in SECURITY.md. The TITLE
+    // is filtered because our own " — finished" sits downstream of a
+    // daemon-supplied string: U+202E in the name reverses the suffix too, and
+    // the notification stops saying which session finished. The BODY is not,
+    // because it is one program's own output with no trusted text beside it
+    // and no action attached — and because bidi marks and ZWJ are how
+    // correct software renders RTL text and emoji. What a body can actually
+    // carry is measured in terminal/screenLine.test.ts.
+    vi.mocked(isPermissionGranted).mockResolvedValue(true);
+    const body = "done\u202E hs.log";
+    expect(await deliverNotification("proj\u202Egol.hs", body)).toBe(true);
+    expect(sendNotification).toHaveBeenCalledWith({
+      title: "projgol.hs — finished",
+      body,
+    });
+  });
+
+  it("marks an invisible character in the title instead of dropping it", async () => {
+    vi.mocked(isPermissionGranted).mockResolvedValue(true);
+    await deliverNotification("de\u200Bploy", "x");
+    expect(sendNotification).toHaveBeenCalledWith({
+      title: "de\uFFFDploy — finished",
+      body: "x",
+    });
+  });
+
   it("asks for permission once when not yet granted", async () => {
     vi.mocked(isPermissionGranted).mockResolvedValue(false);
     vi.mocked(requestPermission).mockResolvedValue("granted");

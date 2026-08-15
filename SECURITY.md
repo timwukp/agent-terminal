@@ -160,8 +160,30 @@ while that path is still a regular file, capped at 1 MiB.
   total for reordering and partial for invisibility — Unicode has more
   blank-rendering codepoints than a hand-written list holds, and confusable
   letters are outside what this layer can decide at all. Distinguishing two
-  similar names is what the pid in the row's tooltip is for.
-- **A notification body is arbitrary output from the session.** It is the last
-  non-empty screen line, so a program in a session controls it completely. It
-  is text, never markup or a command, and the notification's title carries the
-  session name it came from — but the body itself is not trustworthy content.
+  similar names is what the pid is for: it is in each row's tooltip, and in
+  the kill confirmation itself, where the decision is destructive and hovering
+  is not something a person about to click does.
+
+  The GUI additionally filters a name on its way to a screen, because the GUI
+  and the daemon ship and update separately: the v0.1.0 daemon validated names
+  with a byte loop that accepted all of the above, and its session list is
+  what fills the sidebar. Reordering characters are deleted; invisible ones
+  become U+FFFD rather than being dropped, because dropping them would make a
+  decoy render as *exactly* the name it impersonates. What addresses a session
+  — attach, kill, mute — always carries the name's real bytes.
+- **A notification body is arbitrary output from the session, and is passed
+  through unfiltered.** It is the last non-empty screen line, so a program in
+  a session controls it completely. It is text, never markup or a command.
+  What it can contain is measured against the real terminal parser
+  (`app/tauri/src/terminal/screenLine.test.ts`): all twelve reordering
+  characters and most zero-width ones reach it, no control character can (the
+  parser consumes them all, C1 included), and its length cannot exceed the
+  session's width.
+
+  It is deliberately not filtered. Unlike the session name in the title, the
+  body has no trusted text beside it and no action attached to it, so
+  reordering it produces a misleading sentence that the same program could
+  write in plain ASCII. Filtering would cost real output — bidi marks are how
+  correct software renders mixed right-to-left text, and ZWJ and variation
+  selectors are how it prints emoji. Read a notification body as a claim by
+  the program that produced it, not as a fact.
