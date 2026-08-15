@@ -81,18 +81,46 @@ export function fitGrid(
 }
 
 /** Fraction of the host area the letterbox (dead space around the
- * scaled terminal) occupies, 0..1. Unmeasurable input → 0: no reliable
+ * terminal) occupies, 0..1. Unmeasurable input → 0: no reliable
  * number, no hint — a hint that appears from garbage measurements is
  * worse than none. */
 export function letterboxFraction(
   hostW: number,
   hostH: number,
-  scaledTermW: number,
-  scaledTermH: number,
+  termW: number,
+  termH: number,
 ): number {
-  if (hostW <= 0 || hostH <= 0 || scaledTermW <= 0 || scaledTermH <= 0) return 0;
-  const used = Math.min(scaledTermW, hostW) * Math.min(scaledTermH, hostH);
+  if (hostW <= 0 || hostH <= 0 || termW <= 0 || termH <= 0) return 0;
+  const used = Math.min(termW, hostW) * Math.min(termH, hostH);
   return 1 - used / (hostW * hostH);
+}
+
+/** True when the grid is bigger than the window in either axis, so the
+ * view is clipped and has to be scrollable. Unmeasurable input → false,
+ * the same rule as letterboxFraction: no reliable number, no claim.
+ *
+ * Not the complement of a large letterboxFraction — a wide-but-short grid
+ * overflows sideways *and* leaves dead space below, so both would fire.
+ * Only one hint can be shown, and the caller prefers this one: a clipped
+ * session is the more urgent of the two and ⤢ answers both. */
+export function overflowsHost(
+  hostW: number,
+  hostH: number,
+  termW: number,
+  termH: number,
+): boolean {
+  if (hostW <= 0 || hostH <= 0 || termW <= 0 || termH <= 0) return false;
+  return termW > hostW || termH > hostH;
+}
+
+/** Scroll offset that puts the BOTTOM of a clipped grid on screen. That
+ * is where a terminal's prompt and newest output live, so it is what the
+ * default view has to show; scrolled to the top instead, a window one row
+ * too short hides exactly the line the user is waiting for. Zero when the
+ * grid fits — a small session keeps its dead space below it. */
+export function bottomScrollTop(hostH: number, termH: number): number {
+  if (hostH <= 0 || termH <= 0) return 0;
+  return Math.max(0, Math.round(termH - hostH));
 }
 
 /** Show the in-letterbox fit hint only when the dead space is a real

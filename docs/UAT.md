@@ -131,12 +131,12 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-07 | kill | right-click a throwaway session; read the prompt; press Escape; right-click again and click **Kill**. Do this in a real `.app` bundle, not only the debug binary | the prompt appears **inside the window** in place of the row, naming that session; Escape and Cancel restore the row and kill nothing; Kill ends the session, the row disappears and `ls` agrees. A prompt that never appears means the build regressed to `window.confirm`, which is a no-op on macOS |
 | GUI-08 | click-to-focus | in a split session, click a pane | that pane becomes active (cursor moves); clicking a divider changes nothing |
 | GUI-09 | session ends underneath | exit the child in a session the GUI shows | "session ended" state, no hang or spinner |
-| GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view scales and letter-boxes instead |
+| GUI-10 | **geometry is not imposed** | note `ls` geometry, launch the GUI, attach, re-check `ls`; then resize the window | cols×rows **unchanged** by either; the view stays 1:1 — a grid smaller than the window letter-boxes, a bigger one clips and scrolls |
 | GUI-11 | typing after clicking the sidebar | click the session row you are **already** on, then type | keystrokes reach the session; focus is not left on the sidebar button |
 | GUI-12 | IPC carries raw bytes | run the GUI from a shell so stderr is visible, type one key | **no** `IPC custom protocol failed` line; if it appears, `connect-src` is missing `ipc:` and every keystroke will be refused |
 | GUI-13 | active-pane outline | split a throwaway session via the toolbar, click each pane in turn | the outline sits exactly on the clicked pane's edges (not offset, not scaled wrong); single pane shows no outline |
 | GUI-14 | toolbar ops | on a throwaway session: split ▯▯, split ▤, zoom, unzoom, close | each button does what its tooltip says; zoom button shows pressed state while zoomed; close is absent at one pane |
-| GUI-15 | overlay tracks the window | with a split session, resize the window smaller | outlines shrink with the letter-boxed view and stay glued to their panes |
+| GUI-15 | overlay tracks the window | with a split session, resize the window smaller — small enough that the grid no longer fits — then scroll the clipped view in both directions | outlines stay glued to their panes at every size: same cell size as the text (they never shrink, because the text never does), moving with the scroll and clipped at the window edge rather than drawn over the sidebar |
 | GUI-16 | done notification | attach to a session, run `sleep 12 && echo done` via a loop that prints every second for ≥10 s, focus another app, wait ~5 s after it stops | ✓ appears on the session row; an OS notification appears **only if running from a real `.app` bundle** (`npm run bundle`, then launch the `.app`) — the unbundled debug binary shows the ✓ alone, by design |
 | GUI-17 | mute + focus rules | mute the session (🔕), repeat GUI-16; then repeat unmuted with the window focused | muted: ✓ but no pop-up; focused: neither — and selecting the session clears its ✓ |
 | GUI-18 | wheel scrolls into history | in a CLI attach, generate ≥3 screens of output (`seq 1 200`), detach, attach in the GUI, scroll the wheel up | output from **before** the GUI attached is there, continuous across the attach point (no gap, no duplicated screen); scrolling to the bottom resumes live following, and typing snaps back to the prompt |
@@ -155,6 +155,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-31 | a bell in a background SPLIT session notifies | split a session (`Ctrl-\ %` in a CLI attach or the toolbar), focus a DIFFERENT session in the GUI (window still frontmost is fine — use a second session, not an unfocused window, to isolate the trigger), then in one pane of the split run `sleep 1; printf '\a'` | the split session's row gets the ✓ badge (and an OS notification if the window is in the background and the row is not muted) — before MSG_PANE_BELL this was silent, because composite frames strip the raw `\a` and only the idle machine could fire |
 | GUI-32 | theme switch, and light is readable where dark was | with a session attached, pick **light** in the sidebar's Theme control: read the chrome, the session output (run `ls --color=always` and `printf '\e[97mbright white\e[0m\n'`), an active-pane border on a split, and the kill confirmation; then pick **system** and flip macOS System Settings ▸ Appearance while the window stays open; quit and relaunch after choosing **dark** | the whole window switches at once — chrome and terminal, no dark island; every glyph stays readable, including bright white, which xterm's own default palette renders at 1.46:1 on white; the pane border and the ✓ badge remain visible; on **system** the window follows the OS immediately without a relaunch; an explicit **dark** survives the relaunch (the preference is stored, and only `system` follows the OS) |
 | GUI-33 | a spoofed session name cannot lie in the chrome | with a **pre-#81 daemon** running (the released v0.1.0 accepts these names; after #81 the name cannot be created, so use an older daemon or an existing session directory), create `proj<U+202E>gol.hs` and `de<U+200B>ploy` — e.g. `agent-terminal new -s "$(printf 'proj\342\200\256gol.hs')" -- sleep 600` — then in the GUI read the sidebar rows, right-click one, and let a turn finish with the window in the background | the row reads `projgol.hs`, the second reads `de<U+FFFD>ploy` and is visibly wider than a real `deploy` row; the kill prompt reads `Kill projgol.hs (pid N)? Its child process ends.` left to right and the Kill button ends that session; the OS notification's title reads `projgol.hs — finished` and the window title (⌘-Tab) still ends in `— agent-terminal`; the notification BODY is whatever the program printed, unchanged — including any reordering it chose |
+| GUI-34 | a window smaller than the session is honest about it | attach to a session bigger than the window can show at 1:1 (`agent-terminal ls` for its grid; a CLI-made 111×54 needs ~870×810 px of terminal at the measured 7.825×15 px cell, so exact numbers depend on the font the engine resolves), then shrink the window until part of the session is out of view: read the hint, scroll both ways, drag-select a word near the bottom-right and press ⌘C, then run `vim` in that session and click a word in the lower half | text is the **same size** as before the window shrank (never shrunk to fit); the view opens at the **bottom** where the prompt is, scrolls to reach the rest, and a dashed hint says *"scroll to see it all — session is 111×54 · ⤢ fit to window"*; the selection covers exactly the cells the pointer crossed and ⌘C puts them on the clipboard; vim's cursor lands on the word actually clicked, not one up and to the left; ⤢ (or ⌘−) removes the clipping |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -854,6 +855,92 @@ renderer: this machine cannot post a notification at all (the unbundled binary f
 row. And the local formatter check paid off again: `npx prettier` (3.9.6, fetched ad hoc — the
 repo pins no formatter) reports style violations in files this change never touched, so it was
 not run on the ones it did; style here is hand-matched, as in round 6's clang-format incident.
+
+## Display round 8 (2026-08-15): a scaled terminal reports the wrong cell
+
+The last machine-checkable M2 item was *"copy/paste verification in the webview (⌘C with an
+xterm selection) — still unverified; needs a real-browser check, not a unit test."* It found a
+defect, and not the one it was looking for: **copy works, but selection and mouse reporting were
+wrong whenever the window was smaller than the session's grid** — one root cause with three
+symptoms.
+
+**Why.** xterm turns a pointer position into a cell by dividing a *visual* pixel offset
+(`getCoordsRelativeToElement` → `clientX - rect.left - padding`, taken from
+`getBoundingClientRect`) by its own *unscaled* cell width (`dimensions.css.cell.width`, its own
+measurement of the font). The GUI letter-boxed a fixed grid into a smaller window with
+`transform: scale(k)`, which multiplies that numerator by k and never the denominator, so the
+reported column is about `ceil(true × k)`. The app contains no clipboard code at all — xterm's
+own `copy` listener serializes `selectionText`, so a wrong selection is copied faithfully.
+
+Measured in Chromium with the app's own xterm constructor options, 80×24 at fontSize 13:
+
+| at scale | drag across `bravo` selects | `copy` event payload | click on cell (40,10) sends |
+| --- | --- | --- | --- |
+| 1.0 (control) | `bravo` | `bravo` | `ESC[<0;41;11M` ✅ |
+| 0.8 | `" bra"` | — | — |
+| 0.6 | `"a b"` | `"a b"`, `defaultPrevented` | `ESC[<0;25;7M` ❌ |
+| 0.35 | `"ph"` | — | — |
+
+The mouse report is the severest of the three: `vim` or `less` in a letter-boxed window acts on
+a cell the user did not click, and nothing on screen admits it. CSS `zoom` fails **identically**
+— and it was verified as *applied*, not ignored (`computedZoom` 0.6 / 0.35, `.xterm-screen`
+625.99 → 375.6 → 219.1 px), so the byte-identical result is a finding rather than a dead
+instrument.
+
+**The fix is to stop scaling.** Fitting by `fontSize` instead was rejected after measuring it:
+it is correct by construction (xterm re-measures its own cells) but bottoms out at `FONT_MIN = 9`,
+where 80×24 is still 433×251 px, and it would redefine ⌘+/− from "the size I chose" into "the
+size that fits". Reflowing the session to the window was already rejected on principle and by
+its own tooltip — *every attached viewer reflows* — so a viewer must not do it silently. So the
+view is **always 1:1**: a grid larger than the window is clipped and scrollable, pinned to the
+bottom where the prompt is, with a hint that names the mismatch and offers ⤢.
+
+Re-measured after the change, same probe, with a control **first and last** (a run with no
+passing control cannot tell a dead browser from a finding). Grid 626×360 px (cell 7.825×15 —
+the height depends on the font the engine resolves, which is why nothing in the code hard-codes
+it). Expectations are stated in cells, because a midpoint-to-midpoint drag selects exactly the
+cells the pointer crossed — cols 6→10 is four of them, `brav`, at every configuration:
+
+| configuration | host / scroll | selection | clipboard | mouse report |
+| --- | --- | --- | --- | --- |
+| control, whole grid visible | 900×400 / 0,0 | `brav` (cols 6–9) ✅ | `brav` ✅ | cell (40,10) → `ESC[<0;41;11M` ✅ |
+| clipped, pinned to the bottom | 400×200 / 0,160 | `lim` (cols 25–27) ✅ | `lim` ✅ | — |
+| clipped and panned sideways | 400×200 / 90,160 | `lim` ✅ | `lim` ✅ | cell (40,20) → `ESC[<0;41;21M` ✅ |
+| clipped hard, far corner | 300×150 / 326,210 | `yan` (cols 63–65) ✅ | `yan` ✅ | — |
+| trailing control | 900×400 / 0,0 | `brav` ✅ | `brav` ✅ | — |
+
+Every mapping is exact, including with the view scrolled in both axes: `getBoundingClientRect`
+is viewport-relative, so a scroll offset is already inside it — which is the property a scale
+does not have. The click-to-focus hit-test in the GUI now measures the same way for the same
+reason.
+
+⌘C itself could not be driven from the harness and that is an instrument limit, not a result:
+Playwright dispatches raw key events, so a synthetic `Meta+C` never reaches the browser's copy
+*accelerator*. Proven by contrast rather than assumed — `Ctrl+C` produced `0x03` on the session
+channel (so keys did arrive) and `document.execCommand("copy")` fired a real `copy` event with
+real `clipboardData` (so the listener works). **⌘C inside WKWebView stays a human row**
+(GUI-34); what is now verified is that whatever ⌘C copies is the right text.
+
+Numbers: **242 checks across 27 files** (223 before), **11/11** mutants killed with the
+no-mutant control passing before and after restore — including re-adding the scale, dropping the
+bottom pin, `||`→`&&` in the overflow test, and the overlay ignoring the pan. `npx tsc --noEmit`
+clean. The browser harness is deliberately **not** added to the repo: it needs a served page and
+a real engine, and a Playwright dependency for one measurement is a maintenance cost the numbers
+above pay for once.
+
+One thing the counting exposed, unrelated to this change: the **full-suite run is timing-flaky
+under load.** `notifyWiring.test.tsx`, `Sidebar.test.tsx` and `App.test.tsx` intermittently hit
+vitest's 5 s default while waiting on a polled session list, then pass in isolation and on a
+repeat run — three runs of identical code failed 5, then 0, then 1, and the failing set moved.
+A varying set of timeouts is the signature of machine load, not of a defect, and none of those
+files touch the code changed here. Left as an observation rather than papered over with a bigger
+`testTimeout`, which would also blunt the suite's only hang detector.
+
+Honest limits: measured in headless Chromium, not WKWebView. The coordinate arithmetic is
+WebKit-independent (both engines implement the same `getBoundingClientRect` semantics, and the
+defect was in *our* choice of denominator), but the eyeball items — that the hint reads well,
+that the pane outlines clip at the window edge, that scrolling feels right with the wheel
+already claimed by scrollback — are GUI-15 and GUI-34, both human.
 
 ## Reproducing this UAT
 

@@ -14,10 +14,12 @@ import { Backfill } from "./backfill";
 import {
   FIT_HINT_MIN_FRACTION,
   FONT_DEFAULT,
+  bottomScrollTop,
   fitGrid,
   isAtBottom,
   letterboxFraction,
   nextFontSize,
+  overflowsHost,
   zoomActionForKey,
 } from "./viewControls";
 import { currentTheme, onThemeChange, resolveTokens, theme } from "../theme";
@@ -80,14 +82,23 @@ export default function TerminalView({
   // the same layout event, so they cannot disagree.
   const [layout, setLayout] = useState<LayoutState | null>(null);
   const [metrics, setMetrics] = useState<CellMetrics | null>(null);
-  const [scale, setScale] = useState(1);
+  // How far a clipped view is scrolled inside its host, for the overlay.
+  // Always {0,0} while the whole grid fits, which is the common case.
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   // The viewport is scrolled up: new output is arriving out of sight.
   const [behind, setBehind] = useState(false);
-  // A large letterbox around a small session reads as "reserved space"
-  // (a real user asked what the empty half was FOR — twice). When it
-  // dominates the window, the dead space labels itself with a
-  // click-to-fit hint. Null = no hint.
-  const [fitHint, setFitHint] = useState<{ cols: number; rows: number } | null>(null);
+  // The window and the session's grid disagree, in one of two directions,
+  // and either way ⤢ is the answer. "empty": a large letterbox around a
+  // small session reads as "reserved space" (a real user asked what the
+  // empty half was FOR — twice). "clipped": the grid is bigger than the
+  // window, so part of the session is scrolled out of sight and the hint is
+  // the only thing on screen that says so. Null = the two agree closely
+  // enough to need no words.
+  const [fitHint, setFitHint] = useState<{
+    cols: number;
+    rows: number;
+    kind: "empty" | "clipped";
+  } | null>(null);
   // Latest-ref like onTurnDoneRef below: the attach effect must not
   // depend on it, must not capture a stale one.
   const autoFitRef = useRef(autoFit);
@@ -162,10 +173,10 @@ export default function TerminalView({
         const next = nextFontSize(term.options.fontSize ?? FONT_DEFAULT, action);
         if (next !== term.options.fontSize) {
           term.options.fontSize = next;
-          // The renderer re-measures on its own schedule; scale and
-          // overlay metrics must wait for the new cell size to exist.
+          // The renderer re-measures on its own schedule; the fit check
+          // and overlay metrics must wait for the new cell size to exist.
           requestAnimationFrame(() => {
-            scaleToFit();
+            fitView();
             setMetrics(readCellMetrics(term));
           });
         }
@@ -184,30 +195,52 @@ export default function TerminalView({
     const scrollEv = term.onScroll(updateBehind);
     const writeEv = term.onWriteParsed(updateBehind);
 
-    // The grid is the session's, so it cannot be reflowed to the window.
-    // Instead the rendered terminal is scaled to fit inside it, letter-
-    // boxed, preserving aspect ratio and never scaling past 1:1 (upscaled
-    // text is blurry; a smaller session simply sits centred).
-    const scaleToFit = () => {
+    // The grid is the session's, so it cannot be reflowed to the window —
+    // that is the ⤢ action, and every attached viewer feels it. It must
+    // not be visually SCALED to the window either, which is what this
+    // function used to do: xterm turns a pointer position into a cell by
+    // dividing a *visual* pixel offset (from element.getBoundingClientRect)
+    // by its own *unscaled* cell width, so a scale multiplies the numerator
+    // and never the denominator. Measured in Chromium at scale 0.6 with the
+    // app's own xterm options: dragging across `bravo` selected "a b", the
+    // native copy event carried "a b", and a click on cell (40,10) reported
+    // (25,7) to the session — so vim or less in a letterboxed window got
+    // the wrong cell, which is the severest of the three symptoms because
+    // nothing on screen admits it. `transform: scale()` and CSS `zoom`
+    // fail identically (both verified as applied, not ignored).
+    //
+    // So the view is always 1:1. A window smaller than the grid clips it
+    // and scrolls, anchored to the bottom where the prompt is; the hint
+    // names the mismatch and offers ⤢. ⌘− still shrinks the glyphs, which
+    // makes a big grid fit while changing nothing on the far end.
+    const fitView = () => {
       const el = term.element;
       if (!el) return;
-      el.style.transformOrigin = "top left";
+      // Nothing sets these any more. They are cleared here because this is
+      // where a future "just scale it to fit" edit would land, and the
+      // invariant is asserted in fitView.test.tsx.
       el.style.transform = "";
+      el.style.zoom = "";
       const w = el.offsetWidth;
       const h = el.offsetHeight;
       if (!w || !h) return;
-      const k = Math.min(host.clientWidth / w, host.clientHeight / h, 1);
-      el.style.transform = `scale(${k})`;
-      // The overlay must carry the same transform or its boxes drift off
-      // the panes they outline exactly when the window is small — the
-      // case where a user is most likely to be squinting at panes.
-      setScale(k);
-      // When the dead space around the terminal dominates, label it —
-      // otherwise it reads as "reserved for something" (it is not).
-      const frac = letterboxFraction(host.clientWidth, host.clientHeight, w * k, h * k);
-      setFitHint(
-        frac > FIT_HINT_MIN_FRACTION ? { cols: term.cols, rows: term.rows } : null,
-      );
+      const hostW = host.clientWidth;
+      const hostH = host.clientHeight;
+      if (overflowsHost(hostW, hostH, w, h)) {
+        host.scrollTop = bottomScrollTop(hostH, h);
+        setFitHint({ cols: term.cols, rows: term.rows, kind: "clipped" });
+      } else {
+        // When the dead space around the terminal dominates, label it —
+        // otherwise it reads as "reserved for something" (it is not).
+        const frac = letterboxFraction(hostW, hostH, w, h);
+        setFitHint(
+          frac > FIT_HINT_MIN_FRACTION ? { cols: term.cols, rows: term.rows, kind: "empty" } : null,
+        );
+      }
+      // The overlay is a sibling of the scrolling host (xterm owns the
+      // host's DOM), so it has to be moved by the same offset or its boxes
+      // drift off the panes they outline.
+      setPan({ x: host.scrollLeft, y: host.scrollTop });
     };
 
     let disposed = false;
@@ -280,10 +313,13 @@ export default function TerminalView({
           // history lines written before the repaint wrap at the
           // session's width, not the mount-default 80. This is also how
           // the viewer learns the session's real geometry.
-          if (term.cols !== cols || term.rows !== rows) {
-            term.resize(cols, rows);
-            scaleToFit();
-          }
+          if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+          // Outside the resize branch on purpose: a session that happens to
+          // be exactly the mount default (80×24) changes nothing here, and
+          // gating the fit check on a size *change* left that session with
+          // no hint at all until the user resized the window — the one case
+          // where the hint is the only explanation on screen.
+          fitView();
           backfill.onSnapshot(cols, rows, sbLines, blob);
           // Cell metrics change exactly when the grid or font does, and a
           // snapshot follows every geometry change — so this is the one
@@ -349,16 +385,18 @@ export default function TerminalView({
       if (panesRef.current.length < 2) return; // single pane: no pane to select
       const el = term.element;
       if (!el) return;
-      // Measure against the terminal element, not the host: it is the
-      // scaled box, so its client rect already carries the scale factor
-      // and cell sizes stay in unscaled CSS units.
+      // Measure against the terminal element, not the host, and exactly as
+      // xterm's own hit-test does: the rect is viewport-relative, so it
+      // already carries any scroll of a clipped view, and the view is never
+      // scaled — cell metrics are in the same CSS pixels as the rect. Those
+      // two facts are what make this agree with xterm's selection; when the
+      // element was scaled, they did not agree (see fitView).
       const rect = el.getBoundingClientRect();
-      const k = rect.width / el.offsetWidth || 1;
       // Same guarded reader the overlay uses: one place touches xterm's
       // private metrics, and both consumers degrade the same way.
       const m = readCellMetrics(term);
       if (!m) return;
-      const id = paneAtPixel((e.clientX - rect.left) / k, (e.clientY - rect.top) / k, m, panesRef.current);
+      const id = paneAtPixel(e.clientX - rect.left, e.clientY - rect.top, m, panesRef.current);
       if (id !== null) void transport.selectPane(id);
     };
     host.addEventListener("click", onClick);
@@ -369,8 +407,14 @@ export default function TerminalView({
     // does not reflow the far end. An explicit "resize session to window"
     // action is the right home for that, and needs the observer-geometry
     // question settled first (app/design/deferred-daemon-work.md).
-    const onResize = () => scaleToFit();
+    const onResize = () => fitView();
     window.addEventListener("resize", onResize);
+
+    // A clipped view can be panned (by the scrollbar, or by a wheel that
+    // has run out of scrollback to consume). The overlay lives outside the
+    // scroll container, so it only stays on its panes if it follows.
+    const onPan = () => setPan({ x: host.scrollLeft, y: host.scrollTop });
+    host.addEventListener("scroll", onPan);
 
     // Returning to the app must return the caret too. Switching away
     // (to a browser, to PowerPoint) and back otherwise leaves focus on
@@ -382,6 +426,7 @@ export default function TerminalView({
       disposed = true;
       window.removeEventListener("focus", onWindowFocus);
       window.removeEventListener("resize", onResize);
+      host.removeEventListener("scroll", onPan);
       host.removeEventListener("click", onClick);
       backfill.dispose();
       themeSub();
@@ -409,13 +454,19 @@ export default function TerminalView({
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       {/* xterm owns everything inside this div; React must not render
         * children into it or the two will fight over the DOM. Overlay and
-        * toolbar are siblings above it instead. */}
-      <div ref={hostRef} style={{ position: "absolute", inset: 0 }} />
+        * toolbar are siblings above it instead.
+        *
+        * overflow:auto, not hidden — the view is 1:1 (see fitView), so a
+        * window smaller than the session's grid has to be pannable or the
+        * rest of the session would be unreachable. `auto` shows nothing
+        * when the grid fits, which is the ordinary case. */}
+      <div ref={hostRef} style={{ position: "absolute", inset: 0, overflow: "auto" }} />
       <PaneOverlay
         panes={layout?.panes ?? []}
         activeId={layout?.activeId ?? 0}
         metrics={metrics}
-        scale={scale}
+        offsetX={pan.x}
+        offsetY={pan.y}
       />
       <PaneToolbar
         onSplitVertical={() => void transport.splitPane(false)}
@@ -429,7 +480,11 @@ export default function TerminalView({
       {fitHint !== null && (
         <button
           onClick={fitToWindow}
-          title="The dark area holds nothing — the session's grid is just smaller than the window. Click to resize the session to fill it (every attached viewer reflows)."
+          title={
+            fitHint.kind === "clipped"
+              ? "This window is smaller than the session's grid, so part of the session is scrolled out of view — scroll to reach it. The view is deliberately never shrunk to fit: a scaled terminal reports the wrong cell to the program running in it. Click to resize the session to this window instead (every attached viewer reflows), or press ⌘− to shrink the glyphs, which changes nothing on the far end."
+              : "The dark area holds nothing — the session's grid is just smaller than the window. Click to resize the session to fill it (every attached viewer reflows)."
+          }
           style={{
             position: "absolute",
             bottom: 48,
@@ -445,7 +500,8 @@ export default function TerminalView({
             cursor: "pointer",
           }}
         >
-          empty space — session is {fitHint.cols}×{fitHint.rows} · ⤢ fit to window
+          {fitHint.kind === "clipped" ? "scroll to see it all" : "empty space"}{" "}
+          — session is {fitHint.cols}×{fitHint.rows} · ⤢ fit to window
         </button>
       )}
       {behind && (
