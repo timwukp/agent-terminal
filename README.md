@@ -142,8 +142,15 @@ Hebrew, Arabic, Cyrillic, a plain emoji) are fine. A zero-width joiner or a
 variation selector is not, so an emoji built from a sequence cannot be a
 session name — a deliberate trade, since telling two names apart matters more
 here than spelling one with an emoji. Invalid names exit 1. Look-alikes built
-from ordinary letters (Cyrillic `е` for Latin `e`) are *not* caught; see
-[SECURITY.md](SECURITY.md).
+from ordinary letters (Cyrillic `е` for Latin `e`) are *not* caught; the GUI's
+kill confirmation shows the **pid** next to the name, which is the one thing a
+look-alike cannot copy. See [SECURITY.md](SECURITY.md).
+
+The GUI filters a name again on its way to a screen — reordering characters
+removed, invisible ones shown as `U+FFFD` so a decoy cannot render as the
+name it impersonates — because the GUI and the daemon update separately and
+an older daemon accepted names this one refuses. What addresses a session
+always carries its real bytes.
 
 ### Panes
 
@@ -326,6 +333,14 @@ session row has a 🔔/🔕 toggle; muting silences the pop-up but the row still
 gets a ✓ mark, which also covers the case where the OS notification cannot be
 delivered at all (macOS only shows notifications for real `.app` bundles, so
 the unbundled debug binary always falls back to the ✓).
+
+The notification's **body is the session's own last screen line**, passed
+through exactly as the program wrote it — read it as that program's claim, not
+as a fact; it is text, never markup or a command. The session name in the
+**title** is filtered, because our own `— finished` sits after it: measured in
+a browser engine, `proj<U+202E>gol.hs — finished` renders as
+`projdehsinif — sh.log`, with the app's own word reversed into the middle of
+the name. Filtered, it renders left to right with every glyph intact.
 
 One implementation note worth recording: the protocol's layout message carries
 no zoom flag, and none was added. While a pane is zoomed the daemon already

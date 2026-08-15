@@ -2,6 +2,8 @@
 // wiring in Terminal.tsx/App.tsx — these decisions are exactly the kind
 // that rot into "works when I tried it" without table tests.
 
+import { displayName } from "../displayName";
+
 /** Font sizes a terminal stays readable at. The default matches the
  * Terminal.tsx constructor. */
 export const FONT_MIN = 9;
@@ -44,9 +46,14 @@ export function isAtBottom(viewportY: number, baseY: number): boolean {
 }
 
 /** Window title: the active session first (that is what ⌘-Tab and
- * screenshots need), the app name as suffix. */
+ * screenshots need), the app name as suffix.
+ *
+ * The name is filtered for display. This composition puts our own app name
+ * downstream of a daemon-supplied string, so a name carrying U+202E reverses
+ * the suffix with it and the window in ⌘-Tab stops identifying the app —
+ * same shape as the notification title (../displayName.ts). */
 export function windowTitle(active: string | null): string {
-  return active === null ? "agent-terminal" : `${active} — agent-terminal`;
+  return active === null ? "agent-terminal" : `${displayName(active)} — agent-terminal`;
 }
 
 /** Grid floor for fit-to-window: below this a shell is unusable and

@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ControlApi, SessionRow, Template } from "./api";
 import { nextSessionName } from "./api";
+import { displayName } from "../displayName";
 import { theme } from "../theme";
 
 const POLL_MS = 2000;
@@ -111,130 +112,147 @@ export default function Sidebar({
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <h2 style={{ fontSize: 14, margin: "4px 0" }}>Sessions</h2>
       <ul style={{ listStyle: "none", padding: 0, margin: 0, flex: 1, overflowY: "auto" }}>
-        {sessions.map((s) => (
-          // Two sibling buttons, not a control nested inside a control: a
-          // button inside a button is invalid HTML, double-announces to
-          // screen readers, and needs a stopPropagation hack to keep the
-          // mute click from also attaching.
-          <li key={s.name} style={{ display: "flex", alignItems: "center" }}>
-            {pending?.name === s.name ? (
-              // The question replaces the row it is about, so the name on
-              // screen is the name that will be killed — a prompt floating
-              // elsewhere can be read against the wrong row.
-              <div
-                role="group"
-                aria-label={`confirm killing session ${s.name}`}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setPending(null);
-                }}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  padding: "6px 8px",
-                  borderRadius: 4,
-                  border: `1px solid ${theme.danger}`,
-                  fontSize: 12,
-                }}
-              >
-                <div style={{ marginBottom: 4 }}>
-                  Kill <strong>{s.name}</strong>? Its child process ends.
+        {sessions.map((s) => {
+          // Everything a person READS goes through displayName; everything
+          // that ADDRESSES a session — the key, onSelect, setPending, kill,
+          // the mute and done lookups, the active comparison — carries
+          // `s.name` unchanged. The daemon knows a session by its exact
+          // bytes, so a row that renders one string and acts on another is
+          // how a session becomes unkillable from its own row.
+          const shown = displayName(s.name);
+          return (
+            // Two sibling buttons, not a control nested inside a control: a
+            // button inside a button is invalid HTML, double-announces to
+            // screen readers, and needs a stopPropagation hack to keep the
+            // mute click from also attaching.
+            <li key={s.name} style={{ display: "flex", alignItems: "center" }}>
+              {pending?.name === s.name ? (
+                // The question replaces the row it is about, so the name on
+                // screen is the name that will be killed — a prompt floating
+                // elsewhere can be read against the wrong row.
+                <div
+                  role="group"
+                  aria-label={`confirm killing session ${shown}`}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setPending(null);
+                  }}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    padding: "6px 8px",
+                    borderRadius: 4,
+                    border: `1px solid ${theme.danger}`,
+                    fontSize: 12,
+                  }}
+                >
+                  {/* The pid is shown here, not only in the row tooltip, and
+                      it is the answer to the one spoof no character rule can
+                      catch: `deploy` and `dеploy` with a Cyrillic е are both
+                      well-formed names that render identically, so the name
+                      alone cannot tell you which session you are about to
+                      end. A number can. It is the same pid the prompt was
+                      opened with — refresh() drops a prompt whose row no
+                      longer matches on name AND pid. */}
+                  <div style={{ marginBottom: 4 }}>
+                    Kill <strong>{shown}</strong> (pid {s.pid})? Its child process ends.
+                  </div>
+                  <button
+                    onClick={() => void kill(s.name)}
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      marginRight: 4,
+                      cursor: "pointer",
+                      // The strong step, not `danger`: `danger` is picked to
+                      // be READ as text on a panel, which leaves it too pale
+                      // to sit UNDER white — 3.09:1 in dark, where the strong
+                      // step is 10.02:1.
+                      background: theme.dangerStrong,
+                      color: theme.onAccent,
+                      border: "none",
+                      borderRadius: 3,
+                    }}
+                  >
+                    Kill
+                  </button>
+                  <button
+                    ref={cancelRef}
+                    onClick={() => setPending(null)}
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      cursor: "pointer",
+                      background: theme.surface,
+                      color: theme.text,
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 3,
+                    }}
+                  >
+                    Cancel
+                  </button>
                 </div>
+              ) : (
                 <button
-                  onClick={() => void kill(s.name)}
+                  onClick={() => onSelect(s.name)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setPending({ name: s.name, pid: s.pid });
+                  }}
                   style={{
-                    fontSize: 11,
-                    padding: "2px 8px",
-                    marginRight: 4,
-                    cursor: "pointer",
-                    // The strong step, not `danger`: `danger` is picked to
-                    // be READ as text on a panel, which leaves it too pale
-                    // to sit UNDER white — 3.09:1 in dark, where the strong
-                    // step is 10.02:1.
-                    background: theme.dangerStrong,
-                    color: theme.onAccent,
+                    flex: 1,
+                    minWidth: 0,
+                    textAlign: "left",
+                    padding: "6px 8px",
                     border: "none",
-                    borderRadius: 3,
-                  }}
-                >
-                  Kill
-                </button>
-                <button
-                  ref={cancelRef}
-                  onClick={() => setPending(null)}
-                  style={{
-                    fontSize: 11,
-                    padding: "2px 8px",
+                    borderRadius: 4,
+                    background: s.name === active ? theme.accent : "transparent",
+                    color: s.name === active ? theme.onAccent : "inherit",
                     cursor: "pointer",
-                    background: theme.surface,
-                    color: theme.text,
-                    border: `1px solid ${theme.border}`,
-                    borderRadius: 3,
+                    fontSize: 13,
+                  }}
+                  title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s) — right-click kills (asks first)`}
+                >
+                  {shown}
+                  {done?.has(s.name) === true && (
+                    <span title="finished while you were away" style={{ color: theme.good }}>
+                      {" "}
+                      ✓
+                    </span>
+                  )}
+                  {s.npanes != null && s.npanes > 1 && (
+                    <span style={{ opacity: 0.75 }}> {s.npanes}⧉</span>
+                  )}
+                  {s.zoomed === true && <span style={{ opacity: 0.75 }}> 🔍</span>}
+                  {s.nclients > 0 && (
+                    <span style={{ float: "right", opacity: 0.6, fontSize: 11 }}>{s.nclients}●</span>
+                  )}
+                </button>
+              )}
+              {pending?.name !== s.name && onToggleMute && (
+                <button
+                  aria-label={
+                    muted?.has(s.name) === true
+                      ? `unmute notifications for ${shown}`
+                      : `mute notifications for ${shown}`
+                  }
+                  aria-pressed={muted?.has(s.name) === true}
+                  title={muted?.has(s.name) === true ? "notifications muted" : "mute notifications"}
+                  onClick={() => onToggleMute(s.name)}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    opacity: muted?.has(s.name) === true ? 0.9 : 0.35,
+                    fontSize: 11,
+                    padding: "2px 4px",
+                    cursor: "pointer",
                   }}
                 >
-                  Cancel
+                  {muted?.has(s.name) === true ? "🔕" : "🔔"}
                 </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => onSelect(s.name)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setPending({ name: s.name, pid: s.pid });
-                }}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  textAlign: "left",
-                  padding: "6px 8px",
-                  border: "none",
-                  borderRadius: 4,
-                  background: s.name === active ? theme.accent : "transparent",
-                  color: s.name === active ? theme.onAccent : "inherit",
-                  cursor: "pointer",
-                  fontSize: 13,
-                }}
-                title={`${s.view_cols}x${s.view_rows}, pid ${s.pid}, ${s.nclients} client(s) — right-click kills (asks first)`}
-              >
-                {s.name}
-                {done?.has(s.name) === true && (
-                  <span title="finished while you were away" style={{ color: theme.good }}>
-                    {" "}
-                    ✓
-                  </span>
-                )}
-                {s.npanes != null && s.npanes > 1 && (
-                  <span style={{ opacity: 0.75 }}> {s.npanes}⧉</span>
-                )}
-                {s.zoomed === true && <span style={{ opacity: 0.75 }}> 🔍</span>}
-                {s.nclients > 0 && (
-                  <span style={{ float: "right", opacity: 0.6, fontSize: 11 }}>{s.nclients}●</span>
-                )}
-              </button>
-            )}
-            {pending?.name !== s.name && onToggleMute && (
-              <button
-                aria-label={
-                  muted?.has(s.name) === true
-                    ? `unmute notifications for ${s.name}`
-                    : `mute notifications for ${s.name}`
-                }
-                aria-pressed={muted?.has(s.name) === true}
-                title={muted?.has(s.name) === true ? "notifications muted" : "mute notifications"}
-                onClick={() => onToggleMute(s.name)}
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  opacity: muted?.has(s.name) === true ? 0.9 : 0.35,
-                  fontSize: 11,
-                  padding: "2px 4px",
-                  cursor: "pointer",
-                }}
-              >
-                {muted?.has(s.name) === true ? "🔕" : "🔔"}
-              </button>
-            )}
-          </li>
-        ))}
+              )}
+            </li>
+          );
+        })}
         {sessions.length === 0 && !error && (
           <li style={{ fontSize: 12, color: theme.textMuted, padding: 8 }}>no sessions</li>
         )}
