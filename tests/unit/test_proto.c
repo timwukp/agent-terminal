@@ -102,6 +102,52 @@ TEST(scalar_helpers) {
     ASSERT_EQ_INT((long long)get_u64(b), (long long)0x0123456789ABCDEFull);
 }
 
+/* A MSG_ERR msg_len that the frame cannot hold must not yield a slice, or the
+ * "%.*s" at every call site reads past the buffer. The lie that actually got
+ * through in the field was a FILLED frame (no NUL to stop the scan early). */
+TEST(err_text_bounds_a_lying_msg_len) {
+    uint8_t pay[4096];
+    memset(pay, 'A', sizeof pay);
+    put_u16(pay, ERR_NO_SESSION);
+    put_u16(pay + 2, 65535); /* the lie: 65535 declared inside 4096 bytes */
+    uint16_t code = 0, mlen = 0;
+    const char *msg = (const char *)1;
+    ASSERT_TRUE(!proto_err_text(pay, sizeof pay, &code, &msg, &mlen));
+    ASSERT_EQ_INT(code, ERR_NO_SESSION); /* still usable for a fallback line */
+    ASSERT_TRUE(msg == NULL);
+    ASSERT_EQ_INT(mlen, 0);
+
+    /* Off by exactly one: 4 header bytes + 100 must fit in 103. */
+    put_u16(pay + 2, 100);
+    ASSERT_TRUE(!proto_err_text(pay, 103, NULL, &msg, &mlen));
+    ASSERT_TRUE(proto_err_text(pay, 104, NULL, &msg, &mlen));
+    ASSERT_EQ_INT(mlen, 100);
+}
+
+/* The counterpart the fix must not break: an honest error still prints. A
+ * "bound it by never printing" fix passes the test above and fails here. */
+TEST(err_text_passes_an_honest_message) {
+    uint8_t pay[24];
+    memset(pay, 'B', sizeof pay);
+    put_u16(pay, ERR_INTERNAL);
+    put_u16(pay + 2, 16);
+    uint16_t code = 0, mlen = 0;
+    const char *msg = NULL;
+    ASSERT_TRUE(proto_err_text(pay, 20, &code, &msg, &mlen));
+    ASSERT_EQ_INT(code, ERR_INTERNAL);
+    ASSERT_EQ_INT(mlen, 16);
+    ASSERT_TRUE(msg == (const char *)pay + 4);
+
+    /* Truncated frames: no code, no message, no read. */
+    ASSERT_TRUE(!proto_err_text(pay, 0, &code, &msg, &mlen));
+    ASSERT_EQ_INT(code, 0);
+    ASSERT_TRUE(!proto_err_text(pay, 3, &code, &msg, &mlen));
+    ASSERT_EQ_INT(code, ERR_INTERNAL); /* 2 bytes were there, so the code is */
+    /* A zero-length message is nothing to print, not an empty line. */
+    put_u16(pay + 2, 0);
+    ASSERT_TRUE(!proto_err_text(pay, 20, NULL, &msg, &mlen));
+}
+
 int main(void) {
     RUN(roundtrip_basic);
     RUN(roundtrip_empty_payload);
@@ -110,5 +156,7 @@ int main(void) {
     RUN(write_respects_ceiling);
     RUN(many_frames_stream);
     RUN(scalar_helpers);
+    RUN(err_text_bounds_a_lying_msg_len);
+    RUN(err_text_passes_an_honest_message);
     TEST_MAIN_END();
 }

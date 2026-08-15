@@ -170,9 +170,10 @@ static int cmd_kill(const char *name) {
     close(fd);
 
     if (type == MSG_ERR) {
-        uint16_t mlen = plen >= 4 ? get_u16(p + 2) : 0;
-        if (mlen && 4u + mlen <= plen)
-            fprintf(stderr, "agent-terminal: %.*s\n", (int)mlen, (char *)p + 4);
+        uint16_t mlen;
+        const char *emsg;
+        if (proto_err_text(p, plen, NULL, &emsg, &mlen))
+            fprintf(stderr, "agent-terminal: %.*s\n", (int)mlen, emsg);
         else
             fprintf(stderr, "agent-terminal: cannot kill '%s'\n", name);
         free(p);

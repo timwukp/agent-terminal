@@ -49,3 +49,20 @@ int proto_read_frame(ring *in, uint8_t *type, uint8_t *scratch, size_t *len) {
     *len = plen;
     return 1;
 }
+
+bool proto_err_text(const uint8_t *payload, size_t len, uint16_t *code,
+                    const char **msg, uint16_t *msg_len) {
+    if (code) *code = len >= 2 ? get_u16(payload) : 0;
+    if (msg) *msg = NULL;
+    if (msg_len) *msg_len = 0;
+    if (len < 4) return false;
+    uint16_t declared = get_u16(payload + 2);
+    /* 4u + declared cannot overflow: both operands promote to unsigned int and
+     * declared is at most 65535. Comparing against the frame's OWN length is
+     * the whole point — a declared length that does not fit is a lie, and the
+     * bytes past the frame are not ours to read. */
+    if (declared == 0 || 4u + declared > len) return false;
+    if (msg) *msg = (const char *)payload + 4;
+    if (msg_len) *msg_len = declared;
+    return true;
+}

@@ -126,4 +126,22 @@ bool proto_write_frame(ring *out, uint8_t type, const void *payload, size_t len)
  * scratch must be at least PROTO_MAX_PAYLOAD bytes. */
 int proto_read_frame(ring *in, uint8_t *type, uint8_t *scratch, size_t *len);
 
+/* Decode a MSG_ERR payload (u16 code, u16 msg_len, utf8 msg) into a slice that
+ * is safe to hand to "%.*s".
+ *
+ * msg_len is a PEER-SUPPLIED number and the frame it arrives in is not obliged
+ * to be big enough to hold it: a hostile or simply broken daemon can declare
+ * 65535 inside a 4096-byte frame. Passed to %.*s unbounded, the format scan
+ * runs past the end of the buffer holding the payload — a stack over-read in
+ * the client's HELLO path, where that buffer is 4096 bytes of stack. The check
+ * belongs here rather than at each call site because it already existed at one
+ * of four and was missing at the other three; one copy cannot drift.
+ *
+ * Returns true with *msg / *msg_len set to a complete message the frame really
+ * carries. Returns false when there is nothing trustworthy to print — *code is
+ * still set whenever the frame was long enough to carry one, so the caller can
+ * report the number instead of staying silent. Any out param may be NULL. */
+bool proto_err_text(const uint8_t *payload, size_t len, uint16_t *code,
+                    const char **msg, uint16_t *msg_len);
+
 #endif
