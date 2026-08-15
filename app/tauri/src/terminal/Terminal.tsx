@@ -20,7 +20,7 @@ import {
   nextFontSize,
   zoomActionForKey,
 } from "./viewControls";
-import { onThemeChange, resolveTokens, theme } from "../theme";
+import { currentTheme, onThemeChange, resolveTokens, theme } from "../theme";
 import { xtermTheme } from "./xtermTheme";
 import { readCellMetrics } from "./overlay";
 import { zoomedPaneId } from "./zoom";
@@ -152,13 +152,13 @@ export default function TerminalView({
       fontSize: FONT_DEFAULT,
       // Cells and chrome from the same tokens — xterm's canvas cannot
       // evaluate var(), so it gets the resolved hex (xtermTheme.ts).
-      theme: xtermTheme(resolveTokens()),
+      theme: xtermTheme(resolveTokens(), currentTheme()),
     });
     term.open(host);
     termRef.current = term;
 
     const themeSub = onThemeChange(() => {
-      term.options.theme = xtermTheme(resolveTokens());
+      term.options.theme = xtermTheme(resolveTokens(), currentTheme());
     });
 
     // ⌘/Ctrl +/−/0: resize the glyphs, not the grid — the grid belongs
@@ -470,7 +470,7 @@ export default function TerminalView({
             right: 16,
             zIndex: 2,
             background: theme.accent,
-            color: "#fff",
+            color: theme.onAccent,
             border: "none",
             borderRadius: 12,
             padding: "3px 10px",

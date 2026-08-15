@@ -332,6 +332,17 @@ Two properties are worth stating because they are easy to assume wrong:
   instead (letter-boxed, never past 1:1). Resizing the window changes nothing
   on the far end.
 
+The window has **two appearances, both designed** — light is not an inverted
+dark. Every ink-on-surface pairing a component actually renders is measured
+against WCAG 2.1 by a test that computes the ratios (4.5:1 for text, 3:1 for
+borders and sparklines) rather than trusting an eye; that measurement is also
+what caught dark's own error colour sitting at 4.21:1. Light additionally
+repaints all 16 ANSI slots, because xterm's defaults are dark-surface values —
+its `white` is 1.46:1 on a white terminal, i.e. session output you cannot read.
+The control at the bottom of the sidebar offers *system*, *light* and *dark*;
+on *system* the window follows macOS appearance live, and an explicit choice
+survives a relaunch.
+
 Not implemented yet: drag-to-resize panes (needs a new protocol message), and
 the token-usage, hooks and security panels — those crates are stubs today.
 Acceptance is a manual checklist in [docs/UAT.md](docs/UAT.md#gui-client-apptauri--manual-checklist);

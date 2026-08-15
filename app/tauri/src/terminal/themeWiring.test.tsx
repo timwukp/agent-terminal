@@ -9,7 +9,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import TerminalView from "./Terminal";
-import { applyTheme, DEFAULT_DARK } from "../theme";
+import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT } from "../theme";
+import { ANSI_LIGHT } from "./xtermTheme";
 
 interface CapturedTerm {
   ctorOpts: Record<string, unknown>;
@@ -73,6 +74,7 @@ function transport() {
 afterEach(() => {
   cleanup();
   lastTerm = null;
+  delete document.documentElement.dataset.theme;
 });
 
 describe("auto-fit wiring", () => {
@@ -141,5 +143,20 @@ describe("terminal theme wiring", () => {
     view.unmount();
     await act(async () => applyTheme("dark"));
     expect(term.options.theme).toBe("poisoned");
+  });
+
+  it("carries the light ANSI palette into the terminal on a switch to light", async () => {
+    // The mutation this catches: passing a literal "dark" (or dropping the
+    // second argument) to xtermTheme. Surfaces would still flip, so the
+    // window would look switched while session output kept xterm's
+    // dark-surface defaults — `white` at 1.4:1 on a white terminal.
+    render(<TerminalView transport={transport() as never} session="s" onClosed={() => {}} />);
+    await act(async () => {});
+    const term = lastTerm!;
+    await act(async () => applyTheme("light"));
+    const t = term.options.theme as Record<string, string>;
+    expect(t.background).toBe(DEFAULT_LIGHT.bgMain);
+    expect(t.white).toBe(ANSI_LIGHT.white);
+    expect(t.brightWhite).toBe(ANSI_LIGHT.brightWhite);
   });
 });

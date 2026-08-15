@@ -5,6 +5,8 @@
 // user picked here — the daemon owns which pane is active, and a toolbar
 // that guessed differently would act on the wrong one.
 
+import { theme } from "../theme";
+
 export interface PaneToolbarProps {
   onSplitVertical(): void;
   onSplitHorizontal(): void;
@@ -22,9 +24,9 @@ export interface PaneToolbarProps {
 }
 
 const btn: React.CSSProperties = {
-  background: "#2d3239",
-  color: "#dfe4ea",
-  border: "1px solid #3f464f",
+  background: theme.raised,
+  color: theme.text,
+  border: `1px solid ${theme.raisedBorder}`,
   borderRadius: 4,
   cursor: "pointer",
   fontSize: 12,
@@ -76,7 +78,7 @@ export default function PaneToolbar({
         ▤
       </button>
       <button
-        style={{ ...btn, background: zoomed ? "#2b6cb0" : btn.background }}
+        style={{ ...btn, background: zoomed ? theme.accent : btn.background }}
         onClick={onZoomToggle}
         title={zoomed ? "Unzoom pane" : "Zoom active pane"}
         aria-pressed={zoomed}

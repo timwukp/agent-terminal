@@ -8,6 +8,7 @@
 // that clicks on the letter-box margin still focus the terminal, and an
 // overlay that swallowed clicks would silently break click-to-focus.
 
+import { theme } from "../theme";
 import type { PaneRect } from "./transport";
 import type { CellMetrics } from "./hittest";
 import { paneRectToPixels } from "./overlay";
@@ -55,7 +56,7 @@ export default function PaneOverlay({ panes, activeId, metrics, scale }: PaneOve
               boxSizing: "border-box",
               // Inset so the border sits inside the pane's own cells and
               // cannot cover a neighbour's leftmost column.
-              border: active ? "1px solid #4a9eff" : "1px solid transparent",
+              border: active ? `1px solid ${theme.focusRing}` : "1px solid transparent",
               borderRadius: 2,
               transition: "border-color 120ms",
             }}

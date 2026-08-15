@@ -68,10 +68,36 @@ blank region:
 macOS notification when a session finishes a long task and the window is
 not focused. Triggers and thresholds in notifications.md.
 
+## Appearance
+
+- Two themes. Tokens live once, as CSS custom properties keyed on
+  `:root[data-theme]` (`app/tauri/src/theme.css`); inline styles read them
+  through `theme.*` (which is `var()` references, so a switch repaints them
+  for free), and xterm's canvas — which cannot evaluate `var()` — gets
+  concrete hex from `resolveTokens()`.
+- **Light is designed, not inverted.** Every ink/surface pairing a component
+  actually renders is measured against WCAG 2.1 in `theme.test.ts` (4.5:1
+  text, 3:1 non-text) instead of being eyeballed; the same measurement moved
+  dark's own `danger`, which sat at 4.21:1 on a panel row. `accent` is a fill
+  and a series colour, never text — the one policy the numbers depend on.
+- Light also ships all 16 ANSI slots, because xterm's defaults are
+  dark-surface values (`white` #d3d7cf is 1.46:1 on white, i.e. session output
+  the user cannot read). Dark deliberately sets none of them: the session owns
+  its colours.
+- The preference is `system` (the default), `light`, or `dark`, stored in
+  `localStorage` and switchable at the bottom of the sidebar. While it is
+  `system` the window follows OS appearance changes live; an explicit choice
+  stops the following without unsubscribing, so switching back to `system`
+  resumes immediately.
+- The first paint precedes any module, so `html` carries a static background
+  per `prefers-color-scheme`. Not an inline script: that would need a CSP
+  `script-src` relaxation, which this app does not grant for a flash of white.
+
 ## Non-goals (v1)
 
 - No tabs/windows beyond one attached session per window (matches the
   daemon's one-session-one-surface model; multiple windows = multiple
   attach connections, which the protocol already supports).
 - No hook editing (read-only until the viewer proves stable).
-- No theming beyond light/dark following the OS.
+- No theming beyond the two themes above — no custom palettes, no
+  per-session colours.
