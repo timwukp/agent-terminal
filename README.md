@@ -260,9 +260,10 @@ daemon-side history (up to the ring's 10 000 lines), so the mouse wheel
 scrolls back through output from before the GUI ever connected. ⌘/Ctrl `+`
 `−` `0` zoom the glyphs without reflowing the session's grid; the window
 never resizes a session someone else created — the toolbar's ⤢ button
-(or the hint shown in a large letterbox) does it on request, and every
-attached viewer reflows; sessions the GUI itself creates are fitted to
-the window once at birth. A collapsible right panel shows
+(or the hint that labels a large letterbox, or a window too small for the
+grid) does it on request, and every attached viewer reflows; sessions the
+GUI itself creates are fitted to the window once at birth. A collapsible
+right panel shows
 live Claude Code state, read from `~/.claude` (the terminal protocol
 itself stays workload-agnostic): a **Usage** tab with per-transcript
 in/out/cache token totals and an output-per-minute sparkline, and a
@@ -358,9 +359,14 @@ Two properties are worth stating because they are easy to assume wrong:
 - **It is a viewer: it never resizes your session.** Session geometry is durable
   session state shared by every client, so a window that imposed its own size
   would reflow a running TUI under whoever else is attached. The GUI attaches
-  with a "keep your current size" sentinel and scales its view to the window
-  instead (letter-boxed, never past 1:1). Resizing the window changes nothing
-  on the far end.
+  with a "keep your current size" sentinel and renders the grid **at 1:1**
+  instead: a grid smaller than the window sits in dead space, a bigger one is
+  clipped and scrolls, opened pinned to the bottom row where the prompt is.
+  Resizing the window changes nothing on the far end. It deliberately does not
+  scale the view to fit — a visually scaled terminal reports the *wrong cell*
+  to the program running in it (measured: at 0.6× a click on column 40 arrived
+  as column 25, so a mouse-aware `vim` or `less` acted on the wrong line while
+  the screen looked fine). Use ⤢ when you want the session to match the window.
 
 The window has **two appearances, both designed** — light is not an inverted
 dark. Every ink-on-surface pairing a component actually renders is measured

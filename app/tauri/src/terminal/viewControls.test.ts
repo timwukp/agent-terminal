@@ -6,11 +6,13 @@ import {
   FONT_DEFAULT,
   FONT_MAX,
   FONT_MIN,
+  bottomScrollTop,
   fitGrid,
   isAtBottom,
   letterboxFraction,
   makeOneShotSet,
   nextFontSize,
+  overflowsHost,
   windowTitle,
   zoomActionForKey,
 } from "./viewControls";
@@ -92,6 +94,48 @@ describe("letterboxFraction", () => {
   });
   it("a terminal larger than the host never goes negative", () => {
     expect(letterboxFraction(800, 600, 1000, 700)).toBe(0);
+  });
+});
+
+describe("overflowsHost", () => {
+  // Measured pixel sizes from the browser probe with the app's own xterm
+  // options at fontSize 13: an 80×24 grid renders 626×360 (cell 7.825×15).
+  it("an 80×24 session fits an ordinary window", () => {
+    expect(overflowsHost(900, 600, 626, 360)).toBe(false);
+  });
+  it("either axis alone is enough — one row too short still clips", () => {
+    expect(overflowsHost(900, 359, 626, 360)).toBe(true);
+    expect(overflowsHost(625, 600, 626, 360)).toBe(true);
+  });
+  it("exactly equal is not overflow (no scrollbar for a perfect fit)", () => {
+    expect(overflowsHost(626, 360, 626, 360)).toBe(false);
+  });
+  it("unmeasurable input yields false, not a hint from garbage", () => {
+    expect(overflowsHost(0, 600, 626, 360)).toBe(false);
+    expect(overflowsHost(900, 600, 626, 0)).toBe(false);
+  });
+  it("a wide-but-short grid overflows AND leaves dead space", () => {
+    // Both conditions hold at once, which is why the caller picks one
+    // instead of treating them as complements: 1200 wide in a 900 window,
+    // 120 tall in a 600 window.
+    expect(overflowsHost(900, 600, 1200, 120)).toBe(true);
+    expect(letterboxFraction(900, 600, 1200, 120)).toBeGreaterThan(
+      FIT_HINT_MIN_FRACTION,
+    );
+  });
+});
+
+describe("bottomScrollTop", () => {
+  it("scrolls a clipped grid to its last row", () => {
+    expect(bottomScrollTop(200, 360)).toBe(160);
+  });
+  it("is zero when the grid fits — the letterbox stays below the text", () => {
+    expect(bottomScrollTop(600, 360)).toBe(0);
+    expect(bottomScrollTop(360, 360)).toBe(0);
+  });
+  it("unmeasurable input yields 0", () => {
+    expect(bottomScrollTop(0, 360)).toBe(0);
+    expect(bottomScrollTop(200, 0)).toBe(0);
   });
 });
 
