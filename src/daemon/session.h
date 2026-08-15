@@ -37,6 +37,14 @@ typedef struct pane {
     int exit_status;      /* valid when pid == -1 */
     vt *vt;               /* screen state; snapshot source on reattach */
     scrollback *sb;       /* ring + disk persistence */
+    /* Stdin the PTY would not take yet. A non-blocking master accepts ~1KiB
+     * (the kernel input queue) and then EAGAINs; anything larger — a paste —
+     * must wait here for POLLOUT, or its tail is silently gone. Bytes drain
+     * strictly before any newer stdin, so input can never reorder. */
+    uint8_t *stdin_buf;
+    size_t stdin_len;     /* staged bytes not yet written */
+    size_t stdin_cap;     /* allocated size of stdin_buf */
+    size_t stdin_head;    /* read cursor; reset to 0 whenever len hits 0 */
 } pane;
 
 typedef struct session {
@@ -95,6 +103,7 @@ void session_kill(session *s);            /* SIGHUP children, free slot */
 void session_reap_children(void);         /* SIGCHLD bottom half */
 void session_flush_all(void);             /* periodic scrollback flush */
 void session_flush_screens_all(void);     /* shutdown: preserve visible screens */
+void session_stdin_drain_all(unsigned budget_ms); /* handoff: flush staged stdin */
 int  session_count(void);
 session *session_at(int idx);             /* iterate 0..MAX_SESSIONS-1, may be NULL */
 
