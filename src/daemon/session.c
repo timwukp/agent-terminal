@@ -155,6 +155,37 @@ void session_flush_screens_all(void) {
     }
 }
 
+static void pane_stdin_drain(pane *p); /* defined with pane_stdin below */
+
+/* Handoff prelude. The v2 state record carries no stdin staging, so bytes
+ * still staged when the re-exec happens are gone — this gives the children a
+ * bounded window to take them first. Bounded, because a reload must not hang
+ * behind one child that stopped reading; whatever remains after the budget is
+ * dropped LOUDLY, which is the difference this whole staging path exists for. */
+void session_stdin_drain_all(unsigned budget_ms) {
+    uint64_t deadline = now_ms() + budget_ms;
+    for (;;) {
+        size_t left = 0;
+        for (int i = 0; i < MAX_SESSIONS; i++) {
+            session *s = &g_sessions[i];
+            if (!s->in_use) continue;
+            for (int j = 0; j < MAX_PANES_PER_SESSION; j++) {
+                pane *p = &s->panes[j];
+                if (!p->in_use || !p->stdin_len) continue;
+                pane_stdin_drain(p);
+                left += p->stdin_len;
+            }
+        }
+        if (!left || now_ms() >= deadline) {
+            if (left)
+                log_msg(LOG_WARN, "handoff: %zu staged stdin byte(s) will not "
+                        "survive the re-exec", left);
+            return;
+        }
+        poll(NULL, 0, 5); /* let the children read; 5ms keeps this responsive */
+    }
+}
+
 int session_count(void) {
     int n = 0;
     for (int i = 0; i < MAX_SESSIONS; i++)
@@ -260,6 +291,9 @@ static void pane_free_slot(pane *p) {
         close(p->child.master_fd);
         p->child.master_fd = -1;
     }
+    free(p->stdin_buf);
+    p->stdin_buf = NULL;
+    p->stdin_len = p->stdin_cap = p->stdin_head = 0;
     vt_free(p->vt);
     p->vt = NULL;
     sb_close(p->sb);
@@ -583,7 +617,10 @@ void session_composite_all(void) {
 static void pane_pty_readable(int fd, short revents, void *ud) {
     pane *p = ud;
     session *s = p->sess;
-    (void)revents;
+    /* Writable first: staged stdin (the tail of a paste the kernel queue
+     * refused) drains the moment the child makes room. Reading first would
+     * work too, but draining first returns the queue to the child sooner. */
+    if ((revents & POLLOUT) && p->stdin_len) pane_stdin_drain(p);
     bool composite = session_should_composite(s);
     uint8_t buf[16384];
     for (;;) {
@@ -959,16 +996,82 @@ void session_detach(session *s, struct client *c) {
         if (s->panes[i].in_use) sb_flush(s->panes[i].sb);
 }
 
+/* 256 KiB of staged stdin per pane: far beyond any human paste, small enough
+ * that a client flooding a stopped child cannot grow the daemon unboundedly
+ * (the same posture as the DoS limits the protocol enforces). Overflow drops
+ * the EXCESS, loudly — the silent drop is the defect this staging replaces. */
+#define STDIN_STAGE_MAX (256 * 1024)
+
+/* Append to the pane's staging buffer, growing up to STDIN_STAGE_MAX. */
+static void pane_stdin_stage(pane *p, const uint8_t *data, size_t len) {
+    /* Compact first: head space is dead space against the cap. */
+    if (p->stdin_head) {
+        memmove(p->stdin_buf, p->stdin_buf + p->stdin_head, p->stdin_len);
+        p->stdin_head = 0;
+    }
+    size_t room = STDIN_STAGE_MAX - p->stdin_len;
+    if (len > room) {
+        log_msg(LOG_WARN, "pane %u: stdin staging full, dropping %zu bytes "
+                "(child not reading?)", p->id, len - room);
+        len = room;
+    }
+    if (!len) return;
+    if (p->stdin_len + len > p->stdin_cap) {
+        size_t cap = p->stdin_cap ? p->stdin_cap : 4096;
+        while (cap < p->stdin_len + len) cap *= 2;
+        if (cap > STDIN_STAGE_MAX) cap = STDIN_STAGE_MAX;
+        p->stdin_buf = xrealloc(p->stdin_buf, cap);
+        p->stdin_cap = cap;
+    }
+    memcpy(p->stdin_buf + p->stdin_len, data, len);
+    p->stdin_len += len;
+}
+
+/* Write staged bytes into the PTY until it EAGAINs or the buffer empties.
+ * Keeps the poll mask honest: POLLOUT interest exists exactly while bytes
+ * are staged, so an idle pane never busy-wakes the loop. */
+static void pane_stdin_drain(pane *p) {
+    if (p->child.master_fd < 0) { p->stdin_len = p->stdin_head = 0; return; }
+    while (p->stdin_len) {
+        ssize_t n = write(p->child.master_fd, p->stdin_buf + p->stdin_head,
+                          p->stdin_len);
+        if (n > 0) {
+            p->stdin_head += (size_t)n;
+            p->stdin_len -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        break; /* EAGAIN (queue full again) or a real error: POLLOUT retries */
+    }
+    if (!p->stdin_len) p->stdin_head = 0;
+    loop_mod_fd(p->child.master_fd,
+                p->stdin_len ? (POLLIN | POLLOUT) : POLLIN);
+}
+
 static void pane_stdin(pane *p, const uint8_t *data, uint32_t len) {
     if (p->child.master_fd < 0) return;
-    /* PTY master write; kernel buffers. Short writes under flood are
-     * tolerable for keyboard input in M1; M3 adds a staging ring. */
+    /* Staged bytes go first, always: writing new input directly while older
+     * bytes wait would reorder a paste around the keystroke after it. */
+    if (p->stdin_len) {
+        pane_stdin_stage(p, data, len);
+        pane_stdin_drain(p);
+        return;
+    }
+    /* Fast path: the kernel queue takes keyboard-sized input whole, and this
+     * degrades to exactly the pre-staging behaviour. A paste overruns the
+     * ~1KiB PTY input queue (measured on macOS: 1016 bytes accepted, then
+     * EAGAIN), and the remainder is STAGED rather than dropped — the M3
+     * staging this comment used to promise. */
     ssize_t off = 0;
     while (off < (ssize_t)len) {
         ssize_t n = write(p->child.master_fd, data + off, len - (size_t)off);
         if (n > 0) { off += n; continue; }
         if (n < 0 && errno == EINTR) continue;
         break;
+    }
+    if (off < (ssize_t)len) {
+        pane_stdin_stage(p, data + off, len - (size_t)off);
+        loop_mod_fd(p->child.master_fd, POLLIN | POLLOUT);
     }
 }
 

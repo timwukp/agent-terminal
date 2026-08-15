@@ -232,6 +232,9 @@ int main(int argc, char **argv) {
         loop_set_tick(20, daemon_tick); /* composite pacing; 1s flush inside */
         loop_run();
         if (!handoff_take_request()) break;
+        /* Staged stdin does not ride the state file (v2 has no field for it),
+         * so give the children a bounded window to drain it first. */
+        session_stdin_drain_all(200);
         /* handoff_exec does not return on success. On failure it has already
          * restored every FD_CLOEXEC flag it cleared, so serving on is safe —
          * and much better than exiting, which would kill the children this
