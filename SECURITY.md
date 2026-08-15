@@ -146,3 +146,22 @@ while that path is still a regular file, capped at 1 MiB.
   as running that program in the terminal directly.
 - The reattach snapshot re-arms terminal modes (mouse reporting, bracketed
   paste) exactly as the application left them.
+- **Look-alike session names built from ordinary letters are not detected.**
+  Because any same-UID client may create a session (see the boundary above), a
+  program in one session can create a decoy whose name reads as another's:
+  `dеploy` with a Cyrillic `е` is a different, entirely well-formed name that
+  renders as `deploy`. Clicking the decoy in the GUI attaches to it, so what
+  you type next goes to the attacker's PTY.
+
+  What *is* refused, at the wire edge, is the part with a closed definition:
+  a name may not contain the twelve UAX #9 explicit formatting characters,
+  which are exactly the characters that reorder neighbouring text, nor the
+  common zero-width and invisible ones, nor malformed UTF-8. That claim is
+  total for reordering and partial for invisibility — Unicode has more
+  blank-rendering codepoints than a hand-written list holds, and confusable
+  letters are outside what this layer can decide at all. Distinguishing two
+  similar names is what the pid in the row's tooltip is for.
+- **A notification body is arbitrary output from the session.** It is the last
+  non-empty screen line, so a program in a session controls it completely. It
+  is text, never markup or a command, and the notification's title carries the
+  session name it came from — but the body itself is not trustworthy content.

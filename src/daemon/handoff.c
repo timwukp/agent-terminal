@@ -47,6 +47,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "common/path.h"
 #include "common/proto.h"
 #include "common/xutil.h"
 #include "lockfile.h"
@@ -445,9 +446,28 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
         }
         name[nlen] = '\0';
 
+        /* The state file is an input like any other, and this is the one path
+         * by which a name reaches session_import_begin without having passed
+         * the wire edge: a file written by a build with a looser rule, or an
+         * edited one, would reintroduce a name handle_new now refuses. The
+         * session is skipped and reading continues — the records after it are
+         * still well-formed, and dropping them would turn one bad name into a
+         * lost reload.
+         *
+         * Checked HERE, before the first message that could quote the name,
+         * rather than next to the import call: a log line is a display surface
+         * too, so "truncated layout for '<name>'" would reorder the line it
+         * appears in, which is precisely what the name was built to do. Every
+         * message below quotes `disp`, which is the name only when it passed. */
+        bool name_ok = at_valid_session_name(name);
+        if (!name_ok)
+            log_msg(LOG_ERR, "handoff: record %u of %u has an invalid session "
+                             "name; skipping it", i, want);
+        const char *disp = name_ok ? name : "<invalid name>";
+
         uint8_t shdr[8];
         if (!rd(f, shdr, sizeof shdr)) {
-            log_msg(LOG_WARN, "handoff: truncated record for '%s'", name);
+            log_msg(LOG_WARN, "handoff: truncated record for '%s'", disp);
             break;
         }
         uint16_t view_cols = get_u16(shdr), view_rows = get_u16(shdr + 2);
@@ -455,13 +475,13 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
         uint8_t npanes = shdr[7];
         if (npanes == 0 || npanes > MAX_PANES_PER_SESSION) {
             log_msg(LOG_ERR, "handoff: '%s' claims %u panes; state file is "
-                             "corrupt, stopping here", name, npanes);
+                             "corrupt, stopping here", disp, npanes);
             break;
         }
 
         uint8_t lrec[1 + LAYOUT_NODES * 12];
         if (!rd(f, lrec, sizeof lrec)) {
-            log_msg(LOG_WARN, "handoff: truncated layout for '%s'", name);
+            log_msg(LOG_WARN, "handoff: truncated layout for '%s'", disp);
             break;
         }
         layout lt;
@@ -491,9 +511,10 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
             ln->rows = get_u16(q + 10);
         }
 
-        session *s = session_import_begin(name, view_cols, view_rows,
-                                          active_id, last_id, next_id, &lt);
-        if (!s)
+        session *s = name_ok ? session_import_begin(name, view_cols, view_rows,
+                                                    active_id, last_id, next_id, &lt)
+                             : NULL;
+        if (!s && name_ok)
             log_msg(LOG_ERR, "handoff: cannot restore '%s': %s", name,
                     strerror(errno));
 
@@ -501,7 +522,7 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
         for (uint8_t j = 0; j < npanes; j++) {
             uint8_t prec[22];
             if (!rd(f, prec, sizeof prec)) {
-                log_msg(LOG_WARN, "handoff: truncated pane record for '%s'", name);
+                log_msg(LOG_WARN, "handoff: truncated pane record for '%s'", disp);
                 file_ok = false;
                 break;
             }
@@ -514,20 +535,20 @@ int handoff_import(const char *state_path, int *listen_fd, int *lock_fd) {
             if (blob_len > HANDOFF_BLOB_MAX) {
                 log_msg(LOG_ERR, "handoff: '%s' pane %u claims a %u-byte screen; "
                                  "state file is corrupt, stopping here",
-                        name, id, blob_len);
+                        disp, id, blob_len);
                 file_ok = false;
                 break;
             }
             uint8_t *blob = blob_len ? xmalloc(blob_len) : NULL;
             if (blob_len && !rd(f, blob, blob_len)) {
-                log_msg(LOG_WARN, "handoff: truncated screen for '%s'", name);
+                log_msg(LOG_WARN, "handoff: truncated screen for '%s'", disp);
                 free(blob);
                 file_ok = false;
                 break;
             }
 
             char label[SESSION_NAME_MAX + 16];
-            snprintf(label, sizeof label, "%s pane %u", name, id);
+            snprintf(label, sizeof label, "%s pane %u", disp, id);
             if (!s || !adopt_master(master_fd, label) || pid <= 0) {
                 free(blob);
                 continue; /* record was readable, so keep going with the rest */

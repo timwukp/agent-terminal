@@ -145,7 +145,7 @@ is `$SHELL`. The daemon accepts `-f`/`--foreground` and `-v`.
 | unknown verb / missing `-s` | 2 | usage block |
 | `kill -s name`, session exists | 0 | `killed 'name'` |
 | `kill -s name`, no such session | 1 | `no such session` (the daemon's own message) |
-| any verb with an invalid `-s` name | 1 | `[fatal] invalid session name '<n>': no '/', no leading '.'` |
+| any verb with an invalid `-s` name | 1 | `[fatal] invalid session name: needs to be one path component (no '/', no leading '.'), valid UTF-8, and free of invisible or direction-changing characters` — the rejected name is deliberately **not** quoted back: it used to be, and a name carrying U+202E reversed the rest of the line it appeared in, so the message explaining the rule was rendered by the character the rule refuses |
 | `reload`, daemon running | 0 | `daemon reloaded in place (pid N, generation G)` |
 | `reload`, no daemon running | 1 | `cannot reach daemon at <socket path>` |
 | `version`, daemon running | 0 | client hash line, then `daemon: pid N, generation G, panes yes\|no` |
