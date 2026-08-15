@@ -10,9 +10,10 @@ rings the terminal bell when it finishes a turn (configurable on its side),
 so this is the precise signal — **but only in single-pane sessions**: with
 one pane the daemon tees raw child output; with ≥2 panes frames are
 composited from grid state and BEL never survives the wire
-(protocol-notes.md trap #1). Until `MSG_PANE_BELL` lands
-(deferred-daemon-work.md #2), the bell trigger is documented as
-single-pane-reliable.
+(protocol-notes.md trap #1). Split sessions arrive as `MSG_PANE_BELL`
+(0x38) instead, relayed to the webview as the `pane_bell` ctrl event and
+treated exactly like a local bell — so the trigger is now reliable at any
+pane count, through two disjoint paths that cannot double-ring.
 
 ## 2. Output idle
 

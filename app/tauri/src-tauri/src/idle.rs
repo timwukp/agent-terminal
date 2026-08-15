@@ -5,9 +5,9 @@
 //! because BEL is also the OSC terminator — `ESC ] 0 ; title BEL` sets a
 //! window title — so scanning raw output bytes for 0x07 here would ring on
 //! every title change. xterm's parser only reports a BEL that actually
-//! rings. This machine covers what the bell cannot: sessions where the
-//! child never rings, and composited multi-pane frames that drop BEL
-//! (protocol-notes.md trap #1, until MSG_PANE_BELL).
+//! rings. Split sessions ring via MSG_PANE_BELL (composited frames strip
+//! the raw 0x07 — protocol-notes.md trap #1). This machine covers what no
+//! bell can: sessions where the child never rings at all.
 //!
 //! Pure state machine: no timers in the logic, the caller delivers ticks.
 //! `step()` is the entire behaviour, so the tests enumerate transitions as

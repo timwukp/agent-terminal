@@ -319,6 +319,11 @@ export default function TerminalView({
             setMetrics(readCellMetrics(term));
           } else if (ev.kind === "turn_done") {
             onTurnDoneRef.current?.("idle", lastNonEmptyLine(term));
+          } else if (ev.kind === "pane_bell") {
+            // The split-session bell. xterm cannot ring it (composite frames
+            // strip the raw \x07), so the daemon attributes it and we treat
+            // it exactly like a local bell.
+            onTurnDoneRef.current?.("bell", lastNonEmptyLine(term));
           } else if (ev.kind === "closed") onClosed?.(ev.error);
           else if (ev.kind === "session_exited") onClosed?.(null);
         },
@@ -335,9 +340,10 @@ export default function TerminalView({
       term.scrollToBottom();
     });
 
-    // The bell trigger. Reliable single-pane only: composited multi-pane
-    // frames rebuild from grid state and drop BEL (protocol-notes.md
-    // trap #1) — the idle machine covers that case until MSG_PANE_BELL.
+    // The single-pane bell trigger: raw output reaches xterm only when the
+    // session is not composited. The split-session case arrives as the
+    // pane_bell ctrl event above (MSG_PANE_BELL) — two disjoint paths, so a
+    // bell can never ring twice.
     const bell = term.onBell(() => {
       if (!disposed) onTurnDoneRef.current?.("bell", lastNonEmptyLine(term));
     });

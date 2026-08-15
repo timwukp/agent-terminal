@@ -56,6 +56,13 @@ enum CtrlEvent {
     /// the idle machine (src/idle.rs); the webview decides whether that
     /// becomes an OS notification — focus and mute state live there.
     TurnDone {},
+    /// MSG_PANE_BELL: a bell attributed to a pane of a SPLIT session. The
+    /// single-pane bell never arrives this way — it rides the raw output and
+    /// xterm's parser rings it in the webview (Terminal.tsx onBell); this
+    /// event exists because composite frames strip the raw \a.
+    PaneBell {
+        pane_id: u8,
+    },
     PaneExited {
         pane_id: u8,
         exit_status: i32,
@@ -197,6 +204,7 @@ pub async fn attach_session(
                 Event::SessionExited(exit_status) => {
                     send_ctrl(&chan, &CtrlEvent::SessionExited { exit_status })
                 }
+                Event::PaneBell { pane_id } => send_ctrl(&chan, &CtrlEvent::PaneBell { pane_id }),
                 Event::PaneExited {
                     pane_id,
                     exit_status,

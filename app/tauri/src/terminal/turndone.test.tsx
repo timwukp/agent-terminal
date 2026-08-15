@@ -109,6 +109,20 @@ describe("turn_done wiring", () => {
     expect(spy).toHaveBeenCalledWith("bell", "$ make test");
   });
 
+  it("a pane_bell ctrl event reaches onTurnDone as a bell", async () => {
+    // The split-session bell: MSG_PANE_BELL relayed by the Rust core.
+    // xterm never sees a raw \x07 in a composited session, so this ctrl
+    // event is the ONLY way a split session can ring.
+    const { t, ctrl } = makeTransport();
+    const spy = vi.fn();
+    render(
+      <TerminalView transport={t as never} session="s" onClosed={() => {}} onTurnDone={spy} />,
+    );
+    await act(async () => {});
+    await act(async () => ctrl({ kind: "pane_bell", pane_id: 1 }));
+    expect(spy).toHaveBeenCalledWith("bell", "$ make test");
+  });
+
   it("a handler swap does NOT re-attach, and the NEW handler is the one called", async () => {
     // The latest-ref contract, both halves. Re-attaching per render drops
     // the connection (user-visible flicker + a daemon churn); calling the

@@ -81,7 +81,23 @@ static void vt_cb_scrollback(void *ud, const vt_cell *cells, uint16_t n) {
     sb_push_line(p->sb, cells, n);
 }
 
-static void vt_cb_bell(void *ud) { (void)ud; }
+/* A bell inside a split session would otherwise vanish: composite frames are
+ * rebuilt from grid state, so the raw \a never reaches a client. Attribute it
+ * to the pane and tell capable clients. With ONE pane this stays silent on
+ * purpose — the raw byte rides the MSG_OUTPUT tee and the hosting terminal
+ * rings natively, so sending here too would ring twice. Fires from
+ * vt_do_execute on a C0 BEL only; the BEL that terminates an OSC string is
+ * consumed by the parser and never reaches this callback. */
+static void vt_cb_bell(void *ud) {
+    pane *p = ud;
+    session *s = p->sess;
+    if (!session_should_composite(s))
+        return;
+    uint8_t payload = p->id;
+    for (int k = 0; k < MAX_CLIENTS_PER_SESSION; k++)
+        if (s->clients[k] && client_wants_panes(s->clients[k]))
+            client_send(s->clients[k], MSG_PANE_BELL, &payload, 1);
+}
 
 static void vt_cb_title(void *ud, const char *utf8, size_t len) {
     (void)ud; (void)utf8; (void)len; /* passthrough already forwards it */

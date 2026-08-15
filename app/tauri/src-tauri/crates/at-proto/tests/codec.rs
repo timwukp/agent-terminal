@@ -423,3 +423,15 @@ fn exit_and_pong_parse() {
     assert!(parse_pane_exited(&[0; 4]).is_err());
     assert!(parse_pong(&[0; 7]).is_err());
 }
+
+// ---- pane bell ----
+
+#[test]
+fn pane_bell_parses_id_and_tolerates_additive_tail() {
+    assert_eq!(MsgType::PaneBell as u8, 0x38); // proto.h value, pinned
+    assert_eq!(parse_pane_bell(&[7]).unwrap(), 7);
+    // additive-evolution rule: unknown trailing bytes are ignored
+    assert_eq!(parse_pane_bell(&[7, 0xde, 0xad]).unwrap(), 7);
+    // empty payload is a malformed frame, not pane 0
+    assert!(parse_pane_bell(&[]).is_err());
+}

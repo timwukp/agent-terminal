@@ -68,6 +68,9 @@ a DETACH state machine.
 - `MSG_OUTPUT` (0x30): raw bytes. Feed verbatim. In a multi-pane session
   these are daemon-composited frames (dividers included), so a client with
   zero pane-rendering code still displays splits correctly.
+- `MSG_PANE_BELL` (0x38): `u8 pane_id`. A BEL in a **split** session,
+  attributed to the pane that rang. Never sent for a single pane (the raw
+  `\x07` rides `MSG_OUTPUT` there) and only to `CLIENT_CAP_PANES` clients.
 - `MSG_LAYOUT` (0x35): `u16 view_cols, u16 view_rows, u8 active_id,
   u8 npanes`, then per pane `u8 id, u16 x, u16 y, u16 cols, u16 rows`
   (cell coordinates). Sent only to clients that set `CLIENT_CAP_PANES`.
@@ -105,11 +108,12 @@ append per-entry fields without breaking older GUIs.
 
 ## Traps
 
-1. **BEL is only observable in single-pane sessions.** With one pane the
-   daemon tees child output raw, so `\x07` reaches the client and
+1. **A raw BEL byte is only observable in single-pane sessions.** With one
+   pane the daemon tees child output raw, so `\x07` reaches the client and
    xterm.js's `onBell` fires. With ≥2 panes, frames are composited from
-   grid state and BEL never survives. There is no bell wire signal today
-   (see deferred-daemon-work.md).
+   grid state and BEL never survives — the daemon sends `MSG_PANE_BELL`
+   (0x38, `u8 pane_id`) instead, and only then, so the two paths are
+   disjoint and a bell cannot ring twice.
 2. **No pane-resize message exists.** Splits are 50/50, fixed
    (`src/daemon/layout.c`). Drag-to-resize is deferred daemon work.
 3. **Tail-optional parsing is mandatory**, not defensive: a v1 daemon
