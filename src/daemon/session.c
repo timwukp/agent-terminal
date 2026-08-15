@@ -1000,7 +1000,7 @@ void session_detach(session *s, struct client *c) {
  * that a client flooding a stopped child cannot grow the daemon unboundedly
  * (the same posture as the DoS limits the protocol enforces). Overflow drops
  * the EXCESS, loudly — the silent drop is the defect this staging replaces. */
-#define STDIN_STAGE_MAX (256 * 1024)
+#define STDIN_STAGE_MAX ((size_t)256 * 1024)
 
 /* Append to the pane's staging buffer, growing up to STDIN_STAGE_MAX. */
 static void pane_stdin_stage(pane *p, const uint8_t *data, size_t len) {
