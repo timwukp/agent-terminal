@@ -26,7 +26,7 @@ Zero runtime dependencies beyond libc. No network listener. No crypto code
 
 ```sh
 make                              # release → build/release/
-make test BUILD=asan              # 4701 unit checks under ASan+UBSan
+make test BUILD=asan              # 6541 unit checks under ASan+UBSan
 make BUILD=release all            # explicit variant
 BUILD=release bash tests/integration/test_reattach.sh   # acceptance test
 ```
@@ -308,6 +308,39 @@ the session's table and would send no snapshot at all.
 `history` reads the on-disk log directly, so it works with **no daemon
 running** and for dead sessions. Lines become durable on the 1 s flush tick
 (or on detach/exit), so allow ≥1 s before reading.
+
+**The ring is rebuilt at open time, and that is load-bearing.**
+`MSG_SCROLLBACK_REQ` is served from the in-memory ring **only** (`sb_fetch`,
+`server.c`), while the attach snapshot advertises `sb_total_lines()` — which is
+`next_seq`, the whole history. So a `scrollback` opened with an empty ring
+announces history it cannot serve, and a client with no filesystem access (the
+GUI) gets an empty scrollbar. `sb_open_pane` therefore refills the ring from the
+log tail on every open, including the in-place `reload` handoff that keeps the
+sessions and their children alive. Two halves of one guarantee: `handoff.c`
+flushes every session's un-flushed tail *before* the re-exec, and the new image
+re-reads it — neither is optional.
+
+The refill is bounded by the ring, not by the log: `scan_log` already walks every
+record to find `next_seq`, so it carries a rolling ring of record offsets and
+returns the offset that opens the last `mem_lines` records; the refill enters
+each generation at its own tail window. Only record boundaries are valid entry
+points — the format is forward-linked with no resync marker. Measured by paired
+runs of one `reload` against six real session logs totalling 36.8 MB (the largest
+18.1 MB / 93,374 lines), timed from `MSG_RELOAD` to a fresh client's `HELLO_OK`
+at the next generation — median of 4–5 alternating runs each: **no refill 838 ms,
+tail window 1057 ms, whole file 1631 ms.** So the refill costs ~220 ms across six
+panes and the window saves ~575 ms of that; all three serve the same last
+`mem_lines` lines, because the ring evicts either way. Both generations are read
+unconditionally (`.1` then the current one, so seqs arrive ascending); `.1` only
+contributes right after a rotation, and ~10k surplus parses there are cheaper
+than a counting pass to find out.
+
+Regression-testing this needs a **wire-only** client. `test_restart.sh` uses
+`history`, and copy-mode also loads the log locally (`pager.c:164`
+`sb_read_log`), using the wire only for the un-flushed tail — so both passed for
+two releases while the daemon served nothing over the wire.
+`tests/integration/test_reload_scrollback.sh` drives the protocol directly and
+asserts announced == served after a reload.
 
 `ls` never reports a session as dead: the daemon frees the slot as soon as the
 child is reaped, so a finished session simply disappears. Use `history` — not

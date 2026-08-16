@@ -123,7 +123,7 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal ls` | List sessions (size, pid, attached clients). |
 | `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
 | `agent-terminal kill -s name` | Terminate a session. |
-| `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves. |
+| `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves, and the new image rebuilds each pane's in-memory scrollback ring from the on-disk log, so history stays scrollable in a client after the reload (the ring's most recent 10,000 lines; `history` still reads the full log). |
 | `agent-terminal version` | Client build (git hash) plus the running daemon's pid, restart generation, and whether it supports panes. Works with no daemon (`daemon: not running`). |
 
 A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
@@ -533,13 +533,15 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,416 checks across 9 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 6,541 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 30 end-to-end scripts covering the failure modes this tool
+- **Integration**: 31 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
-  surviving, pane splits / directional navigation / zoom driven over the
+  surviving *and* with the scrollback a wire-only client can still read back
+  (a filesystem-reading test cannot fail for that one), pane splits /
+  directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,
   path-traversal probes, close races, honest error reporting, the
   same-uid abuse cases from the security rounds (inherited scrollback fds,

@@ -163,11 +163,27 @@ static int session_dir(const char *name, char *out, size_t outsz) {
 }
 
 /* Scan an existing log: returns highest seq + 1 (0 if empty/absent) and the
- * validated byte size. Truncates the file at the first corrupt record. */
-static uint64_t scan_log(const char *path, uint64_t *valid_size) {
+ * validated byte size. Truncates the file at the first corrupt record.
+ *
+ * `want` / `tail_off` let the caller learn where the last `want` records start
+ * without a second parse of the file: the scan already visits every record, so
+ * it carries a rolling ring of their offsets and hands back the one that opens
+ * the window (0 when the file holds `want` records or fewer, i.e. read it all).
+ * Pass want == 0 to skip that bookkeeping. This is what keeps the open-time
+ * ring refill proportional to the RING (~10k records) instead of to the LOG.
+ * Measured by paired runs of one reload restoring six real session logs, 36.8 MB
+ * total, timed MSG_RELOAD -> the next generation's HELLO_OK (median of 4-5
+ * alternating runs each): no refill 838 ms, this tail window 1057 ms, refilling
+ * from offset 0 instead 1631 ms. Same lines served either way — the ring evicts
+ * regardless — so the window buys ~575 ms for nothing but this bookkeeping. */
+static uint64_t scan_log(const char *path, uint64_t *valid_size, uint32_t want,
+                         uint64_t *tail_off) {
     *valid_size = 0;
+    if (tail_off) *tail_off = 0;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
+    uint64_t *offs = want ? xcalloc(want, sizeof *offs) : NULL;
+    uint64_t nrec = 0;
     uint64_t next = 0, off = 0;
     uint8_t hdr[16];
     static uint8_t payload[SB_LINE_MAX];
@@ -185,16 +201,51 @@ static uint64_t scan_log(const char *path, uint64_t *valid_size) {
         put_u64(scratch, seq);
         memcpy(scratch + 8, payload, plen);
         if (crc32_buf(scratch, 8 + plen) != crc) break;
+        if (offs) offs[nrec % want] = off;
+        nrec++;
         next = seq + 1;
         off += 4 + rec_len;
     }
     close(fd);
+    if (offs) {
+        /* nrec > want means the ring wrapped, so the oldest slot it still holds
+         * is the window's first record. */
+        if (tail_off && nrec > want) *tail_off = offs[nrec % want];
+        free(offs);
+    }
     *valid_size = off;
     return next;
 }
 
 scrollback *sb_open(const char *session_name, uint32_t mem_lines, uint32_t file_max) {
     return sb_open_pane(session_name, 0, mem_lines, file_max);
+}
+
+/* Insert one line into the ring, evicting the oldest when full. Shared by
+ * sb_push_line (live) and the open-time refill below, so a rebuilt ring is
+ * indistinguishable from one that was filled by running. */
+static void ring_put(scrollback *sb, uint64_t seq, const char *text, uint32_t len) {
+    mem_line *slot = &sb->ring[(sb->ring_head + sb->ring_count) % sb->mem_lines];
+    if (sb->ring_count == sb->mem_lines) {
+        slot = &sb->ring[sb->ring_head];
+        sb->ring_head = (sb->ring_head + 1) % sb->mem_lines;
+        free(slot->text);
+    } else {
+        sb->ring_count++;
+    }
+    slot->text = xmalloc(len ? len : 1);
+    memcpy(slot->text, text, len);
+    slot->len = len;
+    slot->seq = seq;
+}
+
+/* Declared here so the refill reuses the offline reader: one parser, one CRC
+ * check, for both `history` and this. */
+static int64_t read_one_log_from(const char *path, uint64_t start_off,
+                                 sb_read_cb cb, void *ud);
+
+static void refill_cb(void *ud, uint64_t seq, const char *text, uint32_t len) {
+    ring_put((scrollback *)ud, seq, text, len);
 }
 
 scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
@@ -215,10 +266,10 @@ scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
     /* Resume seq numbering after the previous generation too. */
     char old_path[648];
     snprintf(old_path, sizeof old_path, "%s.1", sb->log_path);
-    uint64_t old_size;
-    uint64_t next_old = scan_log(old_path, &old_size);
-    uint64_t valid;
-    uint64_t next_cur = scan_log(sb->log_path, &valid);
+    uint64_t old_size, tail_old = 0;
+    uint64_t next_old = scan_log(old_path, &old_size, sb->mem_lines, &tail_old);
+    uint64_t valid, tail_cur = 0;
+    uint64_t next_cur = scan_log(sb->log_path, &valid, sb->mem_lines, &tail_cur);
     sb->next_seq = next_cur > next_old ? next_cur : next_old;
 
     /* O_CLOEXEC is load-bearing, not hygiene: this fd is opened by the DAEMON
@@ -240,6 +291,26 @@ scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
         if (ftruncate(sb->fd, (off_t)valid) != 0) { /* keep going; append still safe */ }
     }
     sb->file_size = valid;
+
+    /* Rebuild the ring from the log tail. Without this, every daemon restart
+     * — including an in-place `reload` handoff, which keeps the sessions and
+     * their children — leaves the ring EMPTY while next_seq still advertises
+     * the whole history: sb_total_lines() rides the attach snapshot as
+     * sb_lines, the client dutifully pages for that history, and sb_fetch()
+     * (the ONLY source MSG_SCROLLBACK_REQ has, server.c) returns 0 every
+     * time. Measured before this fix, on an isolated daemon: 2977 lines
+     * announced, 0 servable, 61,410 bytes sitting in the log. The user's
+     * report was "I scroll up in the GUI and my whole conversation is gone".
+     * Older generation first so seqs arrive ascending, which is what
+     * sb_fetch's in-order walk assumes. WORK is bounded too, not just memory:
+     * each file is entered at its own tail window, so at most 2*mem_lines
+     * records are parsed and the surplus is evicted by ring_put in arrival
+     * order. Reading both windows unconditionally is deliberate — `.1` only
+     * contributes when the current generation holds fewer than mem_lines
+     * lines (right after a rotation), and paying ~10k extra parses there is
+     * cheaper than another counting pass to find out. */
+    read_one_log_from(old_path, tail_old, refill_cb, sb);
+    read_one_log_from(sb->log_path, tail_cur, refill_cb, sb);
     return sb;
 }
 
@@ -280,18 +351,7 @@ void sb_push_line(scrollback *sb, const vt_cell *cells, uint16_t n) {
     uint64_t seq = sb->next_seq++;
 
     /* ring */
-    mem_line *slot = &sb->ring[(sb->ring_head + sb->ring_count) % sb->mem_lines];
-    if (sb->ring_count == sb->mem_lines) {
-        slot = &sb->ring[sb->ring_head];
-        sb->ring_head = (sb->ring_head + 1) % sb->mem_lines;
-        free(slot->text);
-    } else {
-        sb->ring_count++;
-    }
-    slot->text = xmalloc(len ? len : 1);
-    memcpy(slot->text, text, len);
-    slot->len = (uint32_t)len;
-    slot->seq = seq;
+    ring_put(sb, seq, text, (uint32_t)len);
 
     /* disk record */
     uint8_t hdr[16];
@@ -342,11 +402,15 @@ void sb_close(scrollback *sb) {
 
 /* ---- offline log reading (history subcommand, dead sessions) ---- */
 
-static int64_t read_one_log(const char *path, sb_read_cb cb, void *ud) {
+/* start_off must be a record boundary (0, or a scan_log tail_off) — the format
+ * is forward-linked with no resync marker, so an arbitrary byte offset would
+ * read length and CRC fields out of the middle of a line. */
+static int64_t read_one_log_from(const char *path, uint64_t start_off,
+                                 sb_read_cb cb, void *ud) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     int64_t count = 0;
-    uint64_t off = 0;
+    uint64_t off = start_off;
     uint8_t hdr[16];
     static uint8_t payload[SB_LINE_MAX];
     static uint8_t scratch[8 + SB_LINE_MAX];
@@ -368,6 +432,10 @@ static int64_t read_one_log(const char *path, sb_read_cb cb, void *ud) {
     }
     close(fd);
     return count;
+}
+
+static int64_t read_one_log(const char *path, sb_read_cb cb, void *ud) {
+    return read_one_log_from(path, 0, cb, ud);
 }
 
 int64_t sb_read_log(const char *session_name, sb_read_cb cb, void *ud) {

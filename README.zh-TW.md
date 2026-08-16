@@ -112,7 +112,7 @@ agent-terminal attach -s work           # 一切都還在
 | `agent-terminal ls` | 列出 session(尺寸、pid、attach 中的客戶端數)。 |
 | `agent-terminal history -s 名稱` | 把 scrollback 傾印到 stdout。**daemon 不在也能用**,對已結束的 session 也有效。可接 `less -R`。 |
 | `agent-terminal kill -s 名稱` | 終止 session。 |
-| `agent-terminal reload` | 原地 re-exec daemon 以載入新的二進位檔。session、螢幕與 scrollback 全數保留;pid 不變。attach 中的客戶端會自行重連。 |
+| `agent-terminal reload` | 原地 re-exec daemon 以載入新的二進位檔。session、螢幕與 scrollback 全數保留;pid 不變。attach 中的客戶端會自行重連,新的映像也會從磁碟上的 log 重建每個窗格記憶體中的 scrollback ring,所以 reload 之後客戶端仍可往上捲動歷史(ring 最近的 10,000 行;`history` 仍讀完整的 log)。 |
 | `agent-terminal version` | 客戶端建置版本(git hash),加上運行中 daemon 的 pid、重啟世代數,以及是否支援窗格。daemon 不在也能用(顯示 `daemon: not running`)。 |
 
 Session 名稱會成為 `~/.agent-terminal/sessions/` 下的目錄,所以必須是單一
@@ -461,12 +461,13 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
 
 三個層次,`main` 上全綠:
 
-- **單元測試**:9 個套件共 6,416 個檢查(VT 解析器逐位元組、協定往返與
+- **單元測試**:9 個套件共 6,541 個檢查(VT 解析器逐位元組、協定往返與
   違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
   環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
   下運行。
-- **整合測試**:30 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
-  `kill -9` 後 reattach、daemon reload 且子行程存活、經協定驅動的窗格分割
+- **整合測試**:31 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
+  `kill -9` 後 reattach、daemon reload 且子行程存活、daemon reload 後只走協定
+  的客戶端仍能讀回 scrollback(讀檔案的測試對這個缺陷不可能紅)、經協定驅動的窗格分割
   / 方向導航 / 縮放、100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
   探測、關閉競態、誠實的錯誤回報、安全稽核輪次找出的同 uid 濫用案例
   (被繼承的 scrollback fd、超大幾何、連上後從不表明身分的連線),以及
