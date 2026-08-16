@@ -102,3 +102,24 @@ Parse `~/.claude/settings.json` → `hooks` into a table:
   pattern) is deliberately deferred until a genuinely streaming source
   exists (PR7 OTEL); when it lands, all panel consumers migrate to one
   `claude-events` channel at once.
+- **Superseded (2026-08-16):** all three panel consumers now share one
+  push stream — `panel_stream` in `src-tauri/src/panels.rs`, subscribed
+  through `src/panels/panelStream.ts`. Each panel still reads once when
+  it mounts, so it paints without waiting for a tick, and after that is
+  told. What changed is the traffic, not the disk work: the Rust side
+  polls the same three sources on the same 2 s tick (the reads were
+  already incremental) and sends a frame only when a snapshot's
+  serialization differs, so an idle panel costs nothing on the wire.
+  Only subscribed kinds are polled, which keeps the property the
+  `setInterval` version had for free — a hidden panel does no work.
+  - **The sidebar is not part of this.** Its data is a daemon
+    round-trip, and `MSG_SESSION_LIST` (0x11) exists only as a reply to
+    `MSG_LIST_SESSIONS` (0x10) — `src/common/proto.h` has no unsolicited
+    push to ride. Event-driving it needs a new cap-gated D→C message in
+    the `MSG_PANE_BELL` mould, i.e. protocol work, not frontend work.
+  - Still a timer, not a filesystem watcher: `notify` is not a
+    dependency and one `stat` per two seconds does not justify a new
+    crate. The webview's contract is "frames arrive when things
+    change", so the producer can become a watcher without the frontend
+    changing.
+  - OTEL is still deferred, and this is the channel it will arrive on.

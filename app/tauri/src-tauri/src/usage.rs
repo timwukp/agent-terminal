@@ -20,10 +20,13 @@ fn projects_root() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("projects"))
 }
 
-/// Current per-transcript token totals, newest activity first. The
-/// frontend polls this while the panel is open (2 s, the sidebar's
-/// cadence); each call stats the active files and reads only appended
-/// bytes, so polling costs what changed, not what exists.
+/// Current per-transcript token totals, newest activity first. Each call
+/// stats the active files and reads only appended bytes, so a call costs
+/// what changed, not what exists.
+///
+/// Called twice: once by the panel when it mounts, so it paints without
+/// waiting for a tick, and then once per tick by the push stream
+/// (panels.rs), which sends the result on only when it differs.
 #[tauri::command]
 pub fn usage_snapshot(state: tauri::State<'_, UsageState>) -> Result<Vec<TranscriptUsage>, String> {
     let mut guard = state.0.lock().unwrap();

@@ -14,8 +14,6 @@ import type { Bucket, TranscriptUsage, UsageApi } from "./usageApi";
 import { agoText, fmtTokens } from "./usageApi";
 import { theme } from "../theme";
 
-const POLL_MS = 2000;
-
 /** Inline SVG micro bars: baseline-anchored, 2px gaps, value scaled to
  * the window max. Native title per bar is the hover layer at this size. */
 export function Sparkline({ buckets }: { buckets: Bucket[] }) {
@@ -63,25 +61,24 @@ export default function TokenPanel({ api }: { api: UsageApi }) {
   const [rows, setRows] = useState<TranscriptUsage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // One read for the first paint — the panel must not sit blank waiting
+  // for a tick — then pushed updates (panelStream.ts).
   useEffect(() => {
     let live = true;
-    const poll = () =>
-      api.snapshot().then(
-        (r) => {
-          if (live) {
-            setRows(r);
-            setError(null);
-          }
-        },
-        (e) => {
-          if (live) setError(String(e));
-        },
-      );
-    void poll();
-    const t = setInterval(() => void poll(), POLL_MS);
+    const show = (r: TranscriptUsage[]) => {
+      if (live) {
+        setRows(r);
+        setError(null);
+      }
+    };
+    const fail = (m: string) => {
+      if (live) setError(m);
+    };
+    api.snapshot().then(show, (e) => fail(String(e)));
+    const off = api.subscribe(show, fail);
     return () => {
       live = false;
-      clearInterval(t);
+      off();
     };
   }, [api]);
 

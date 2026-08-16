@@ -37,6 +37,8 @@ function apiOf(snap: HooksSnapshot, script = "#!/bin/sh\n# Blocks: git push\nexi
   return {
     calls: 0,
     scriptCalls: [] as string[],
+    /** Live rule subscriptions, so a test can push and count teardown. */
+    subs: [] as ((s: HooksSnapshot) => void)[],
     snapshot() {
       this.calls++;
       return Promise.resolve(snap);
@@ -44,6 +46,16 @@ function apiOf(snap: HooksSnapshot, script = "#!/bin/sh\n# Blocks: git push\nexi
     readScript(command: string) {
       this.scriptCalls.push(command);
       return Promise.resolve(script);
+    },
+    subscribe(onData: (s: HooksSnapshot) => void) {
+      this.subs.push(onData);
+      return () => {
+        this.subs = this.subs.filter((f) => f !== onData);
+      };
+    },
+    subscribeLog() {
+      // SecurityCard has its own test file; nothing pushes here.
+      return () => {};
     },
     logSnapshot() {
       // SecurityCard has its own test file; here the log is just absent.
@@ -57,7 +69,11 @@ function apiOf(snap: HooksSnapshot, script = "#!/bin/sh\n# Blocks: git push\nexi
         break_at: null,
       });
     },
-  } satisfies HooksApi & { calls: number; scriptCalls: string[] };
+  } satisfies HooksApi & {
+    calls: number;
+    scriptCalls: string[];
+    subs: ((s: HooksSnapshot) => void)[];
+  };
 }
 
 beforeEach(() => vi.useFakeTimers());
@@ -116,20 +132,19 @@ describe("HooksPanel", () => {
     expect(bad.container.textContent).toContain("2 unparsed");
   });
 
-  it("polls while mounted and stops after unmount", async () => {
+  it("reads once, repaints from pushed frames, and unsubscribes on unmount", async () => {
     const api = apiOf(snapshot());
     const view = render(<HooksPanel api={api} />);
     await act(async () => {});
     expect(api.calls).toBe(1);
+    expect(api.subs.length).toBe(1);
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      api.subs[0](snapshot({ rules: [], malformed: 0 }));
     });
-    expect(api.calls).toBe(2);
+    expect(view.container.textContent).toContain("no hooks configured");
+    expect(api.calls).toBe(1); // pushed, not re-fetched
     view.unmount();
-    await act(async () => {
-      vi.advanceTimersByTime(6000);
-    });
-    expect(api.calls).toBe(2);
+    expect(api.subs.length).toBe(0);
   });
 });
 

@@ -8,25 +8,30 @@ import { useEffect, useState } from "react";
 import type { HookLogSnapshot, HooksApi } from "./hooksApi";
 import { theme } from "../theme";
 
-const POLL_MS = 2000;
-
 export default function SecurityCard({ api }: { api: HooksApi }) {
   const [snap, setSnap] = useState<HookLogSnapshot | null>(null);
 
+  // One read for the first paint, then pushed updates (panelStream.ts).
+  // Errors are swallowed here on purpose: the rules table above shares
+  // this api and surfaces them, and two alerts for one failure reads as
+  // two failures.
   useEffect(() => {
     let live = true;
-    const poll = () =>
-      api.logSnapshot().then(
-        (s) => {
-          if (live) setSnap(s);
-        },
-        () => {}, // the rules table above already surfaces api errors
-      );
-    void poll();
-    const t = setInterval(() => void poll(), POLL_MS);
+    api.logSnapshot().then(
+      (s) => {
+        if (live) setSnap(s);
+      },
+      () => {},
+    );
+    const off = api.subscribeLog(
+      (s) => {
+        if (live) setSnap(s);
+      },
+      () => {},
+    );
     return () => {
       live = false;
-      clearInterval(t);
+      off();
     };
   }, [api]);
 
