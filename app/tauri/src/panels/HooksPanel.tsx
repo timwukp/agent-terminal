@@ -10,8 +10,6 @@ import { commandBasename, isScriptPath } from "./hooksApi";
 import SecurityCard from "./SecurityCard";
 import { theme } from "../theme";
 
-const POLL_MS = 2000;
-
 interface Viewer {
   command: string;
   /** null while loading; the command string itself for inline commands. */
@@ -24,25 +22,23 @@ export default function HooksPanel({ api }: { api: HooksApi }) {
   const [error, setError] = useState<string | null>(null);
   const [viewer, setViewer] = useState<Viewer | null>(null);
 
+  // One read for the first paint, then pushed updates (panelStream.ts).
   useEffect(() => {
     let live = true;
-    const poll = () =>
-      api.snapshot().then(
-        (s) => {
-          if (live) {
-            setSnap(s);
-            setError(null);
-          }
-        },
-        (e) => {
-          if (live) setError(String(e));
-        },
-      );
-    void poll();
-    const t = setInterval(() => void poll(), POLL_MS);
+    const show = (s: HooksSnapshot) => {
+      if (live) {
+        setSnap(s);
+        setError(null);
+      }
+    };
+    const fail = (m: string) => {
+      if (live) setError(m);
+    };
+    api.snapshot().then(show, (e) => fail(String(e)));
+    const off = api.subscribe(show, fail);
     return () => {
       live = false;
-      clearInterval(t);
+      off();
     };
   }, [api]);
 

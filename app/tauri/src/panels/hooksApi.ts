@@ -2,6 +2,7 @@
 // tests inject fixtures). Shapes mirror src-tauri/src/hooks.rs.
 
 import { invoke } from "@tauri-apps/api/core";
+import { panelStream } from "./panelStream";
 
 export interface HookRule {
   event: string;
@@ -37,12 +38,21 @@ export interface HookLogSnapshot {
 }
 
 export interface HooksApi {
+  /** One reading, for the first paint. */
   snapshot(): Promise<HooksSnapshot>;
   /** Source of a configured hook script. Rejects for inline commands
    * and for anything not currently in the snapshot (hooks.rs gate). */
   readScript(command: string): Promise<string>;
   /** Recent hook executions + chain verdict (app/design/hook-log.md). */
   logSnapshot(): Promise<HookLogSnapshot>;
+  /** Subsequent rule readings, pushed when they differ (panelStream.ts).
+   * Returns an unsubscribe. */
+  subscribe(onData: (snap: HooksSnapshot) => void, onError: (msg: string) => void): () => void;
+  /** The same, for the hook log the security card shows. */
+  subscribeLog(
+    onData: (snap: HookLogSnapshot) => void,
+    onError: (msg: string) => void,
+  ): () => void;
 }
 
 export class TauriHooksApi implements HooksApi {
@@ -54,6 +64,15 @@ export class TauriHooksApi implements HooksApi {
   }
   logSnapshot(): Promise<HookLogSnapshot> {
     return invoke("hook_log_snapshot");
+  }
+  subscribe(onData: (snap: HooksSnapshot) => void, onError: (msg: string) => void): () => void {
+    return panelStream.subscribe<HooksSnapshot>("hooks", onData, onError);
+  }
+  subscribeLog(
+    onData: (snap: HookLogSnapshot) => void,
+    onError: (msg: string) => void,
+  ): () => void {
+    return panelStream.subscribe<HookLogSnapshot>("hook_log", onData, onError);
   }
 }
 

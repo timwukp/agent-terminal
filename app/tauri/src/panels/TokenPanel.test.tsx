@@ -26,12 +26,29 @@ function transcript(over: Partial<TranscriptUsage> = {}): TranscriptUsage {
   };
 }
 
-function apiOf(rows: TranscriptUsage[]): UsageApi & { calls: number } {
-  const api = {
+type Pushers = {
+  calls: number;
+  /** Live subscriptions, so a test can push a frame and count teardown. */
+  subs: ((rows: TranscriptUsage[]) => void)[];
+  fails: ((msg: string) => void)[];
+};
+
+function apiOf(rows: TranscriptUsage[]): UsageApi & Pushers {
+  const api: UsageApi & Pushers = {
     calls: 0,
+    subs: [],
+    fails: [],
     snapshot() {
       api.calls++;
       return Promise.resolve(rows);
+    },
+    subscribe(onData, onError) {
+      api.subs.push(onData);
+      api.fails.push(onError);
+      return () => {
+        api.subs = api.subs.filter((f) => f !== onData);
+        api.fails = api.fails.filter((f) => f !== onError);
+      };
     },
   };
   return api;
@@ -69,27 +86,50 @@ describe("TokenPanel", () => {
     expect(view.container.textContent).toContain("3 unparsed");
   });
 
-  it("polls on the sidebar cadence and stops when unmounted", async () => {
+  it("reads once for the first paint, then repaints from pushed frames", async () => {
+    const api = apiOf([transcript({ messages: 12 })]);
+    const view = render(<TokenPanel api={api} />);
+    await act(async () => {});
+    // One read, not a timer: the panel paints immediately and then waits
+    // to be told (src/panels/panelStream.ts).
+    expect(api.calls).toBe(1);
+    expect(view.container.textContent).toContain("12 msgs");
+    expect(api.subs.length).toBe(1);
+    await act(async () => {
+      api.subs[0]([transcript({ messages: 99 })]);
+    });
+    expect(api.calls).toBe(1);
+    expect(view.container.textContent).toContain("99 msgs");
+  });
+
+  it("unsubscribes when unmounted", async () => {
     const api = apiOf([]);
     const view = render(<TokenPanel api={api} />);
     await act(async () => {});
-    expect(api.calls).toBe(1);
-    await act(async () => {
-      vi.advanceTimersByTime(2000);
-    });
-    expect(api.calls).toBe(2);
+    expect(api.subs.length).toBe(1);
     view.unmount();
-    await act(async () => {
-      vi.advanceTimersByTime(6000);
-    });
-    expect(api.calls).toBe(2);
+    expect(api.subs.length).toBe(0);
   });
 
   it("shows a fetch failure as an alert instead of a stale blank", async () => {
-    const api: UsageApi = { snapshot: () => Promise.reject(new Error("HOME is not set")) };
+    const api: UsageApi = {
+      snapshot: () => Promise.reject(new Error("HOME is not set")),
+      subscribe: () => () => {},
+    };
     const view = render(<TokenPanel api={api} />);
     await act(async () => {});
     expect(view.getByRole("alert").textContent).toContain("HOME is not set");
+  });
+
+  it("shows a broken stream as an alert too, not as a panel that stopped moving", async () => {
+    const api = apiOf([transcript()]);
+    const view = render(<TokenPanel api={api} />);
+    await act(async () => {});
+    expect(view.queryByRole("alert")).toBeNull();
+    await act(async () => {
+      api.fails[0]("panel_stream not registered");
+    });
+    expect(view.getByRole("alert").textContent).toContain("panel_stream not registered");
   });
 });
 

@@ -34,15 +34,25 @@ function log(over: Partial<HookLogSnapshot> = {}): HookLogSnapshot {
   };
 }
 
-function apiOf(snap: HookLogSnapshot): HooksApi & { calls: number } {
-  const api = {
+type Pushers = { calls: number; subs: ((s: HookLogSnapshot) => void)[] };
+
+function apiOf(snap: HookLogSnapshot): HooksApi & Pushers {
+  const api: HooksApi & Pushers = {
     calls: 0,
+    subs: [],
     snapshot: () =>
       Promise.resolve({ path: "", exists: false, rules: [], malformed: 0 }),
     readScript: () => Promise.reject(new Error("unused")),
+    subscribe: () => () => {},
     logSnapshot() {
       api.calls++;
       return Promise.resolve(snap);
+    },
+    subscribeLog(onData) {
+      api.subs.push(onData);
+      return () => {
+        api.subs = api.subs.filter((f) => f !== onData);
+      };
     },
   };
   return api;
@@ -90,19 +100,18 @@ describe("SecurityCard", () => {
     expect(view.container.textContent).toContain("3 unparsed");
   });
 
-  it("polls while mounted, stops after unmount", async () => {
+  it("reads once, repaints from pushed frames, and unsubscribes on unmount", async () => {
     const api = apiOf(log());
     const view = render(<SecurityCard api={api} />);
     await act(async () => {});
     expect(api.calls).toBe(1);
+    expect(api.subs.length).toBe(1);
     await act(async () => {
-      vi.advanceTimersByTime(2000);
+      api.subs[0](log({ chain_ok: false, break_at: 1 }));
     });
-    expect(api.calls).toBe(2);
+    expect(view.container.textContent).toContain("chain broken at line 2");
+    expect(api.calls).toBe(1); // pushed, not re-fetched
     view.unmount();
-    await act(async () => {
-      vi.advanceTimersByTime(6000);
-    });
-    expect(api.calls).toBe(2);
+    expect(api.subs.length).toBe(0);
   });
 });

@@ -3,6 +3,7 @@
 // serialization exactly — the Rust side is the source of truth.
 
 import { invoke } from "@tauri-apps/api/core";
+import { panelStream } from "./panelStream";
 
 export interface Usage {
   input_tokens: number;
@@ -28,12 +29,25 @@ export interface TranscriptUsage {
 }
 
 export interface UsageApi {
+  /** One reading, for the first paint. */
   snapshot(): Promise<TranscriptUsage[]>;
+  /** Subsequent readings, pushed when they differ (panelStream.ts).
+   * Returns an unsubscribe. */
+  subscribe(
+    onData: (rows: TranscriptUsage[]) => void,
+    onError: (msg: string) => void,
+  ): () => void;
 }
 
 export class TauriUsageApi implements UsageApi {
   snapshot(): Promise<TranscriptUsage[]> {
     return invoke("usage_snapshot");
+  }
+  subscribe(
+    onData: (rows: TranscriptUsage[]) => void,
+    onError: (msg: string) => void,
+  ): () => void {
+    return panelStream.subscribe<TranscriptUsage[]>("usage", onData, onError);
   }
 }
 

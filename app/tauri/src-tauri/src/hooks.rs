@@ -164,8 +164,9 @@ fn read_capped(f: std::fs::File) -> Result<(String, u64), String> {
     Ok((text, read))
 }
 
-/// Current hooks rules. Polled at the sidebar cadence while the tab is
-/// open; the (mtime, len) cache means a poll normally costs one stat.
+/// Current hooks rules. Called once by the panel when it mounts and then
+/// once per tick by the push stream (panels.rs); the (mtime, len) cache
+/// means a call normally costs one stat.
 #[tauri::command]
 pub fn hooks_snapshot(state: tauri::State<'_, HooksState>) -> Result<HooksSnapshot, String> {
     let path = settings_path().ok_or("HOME is not set")?;
