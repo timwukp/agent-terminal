@@ -266,9 +266,14 @@ int handoff_exec(void) {
     }
 
     /* Durability before the point of no return: the ring's un-flushed tail is
-     * process memory, and the new image rebuilds scrollback by re-reading the
-     * on-disk log. Without this the last second of every session's history
-     * would be dropped by a *successful* reload. */
+     * process memory, and the new image rebuilds the ring by re-reading the
+     * on-disk log (sb_open_pane's refill). Without this the last second of
+     * every session's history would be dropped by a *successful* reload.
+     * This comment described the intended contract before the refill existed
+     * — the new image re-read the log only to resume the sequence NUMBER, so
+     * the whole ring came back empty and MSG_SCROLLBACK_REQ could serve
+     * nothing. The flush and the refill are two halves of one guarantee;
+     * neither is optional. */
     session_flush_all();
 
     /* Clients are not serialized. They already retry ATTACH on a 250 ms→4 s
