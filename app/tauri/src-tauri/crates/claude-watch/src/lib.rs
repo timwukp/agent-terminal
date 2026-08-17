@@ -128,12 +128,16 @@ pub struct Accumulator {
     /// Timestamp of the newest event (ISO text, lexicographic max).
     pub last_timestamp: String,
     pub buckets: Vec<Bucket>,
-    /// message.id → usage already counted. Repeats with identical usage
-    /// are the norm (one line per content block); a repeat with
-    /// DIFFERENT usage replaces its predecessor in the totals rather
-    /// than double-counting.
+    /// message.id → (usage already counted, the timestamp it was counted
+    /// under). Repeats with identical usage are the norm (one line per
+    /// content block); a repeat with DIFFERENT usage replaces its
+    /// predecessor in the totals rather than double-counting.
+    ///
+    /// The timestamp is kept because the retraction has to hit the minute
+    /// bucket the tokens went INTO, and a finalized usage can arrive in a
+    /// later minute than the one it was first counted in.
     #[serde(skip)]
-    seen: HashMap<String, Usage>,
+    seen: HashMap<String, (Usage, String)>,
 }
 
 fn add(t: &mut Usage, u: &Usage) {
@@ -161,12 +165,18 @@ impl Accumulator {
 
     fn apply(&mut self, ev: UsageEvent) {
         match self.seen.get(&ev.message_id) {
-            Some(prev) if *prev == ev.usage => return, // routine repeat
-            Some(prev) => {
-                // The message's usage was rewritten: keep the newest.
+            Some((prev, _)) if *prev == ev.usage => return, // routine repeat
+            Some((prev, prev_ts)) => {
+                // The message's usage was rewritten: keep the newest. The
+                // bucket credited earlier is the one identified by the
+                // PREVIOUS timestamp — `ev.timestamp` may be a later
+                // minute, and subtracting there would strand the old
+                // tokens in their bucket and take tokens out of a bucket
+                // that never held them.
                 let prev = *prev;
+                let prev_ts = prev_ts.clone();
                 sub(&mut self.totals, &prev);
-                self.bucket_sub(&ev.timestamp, prev.output_tokens);
+                self.bucket_sub(&prev_ts, prev.output_tokens);
                 self.messages -= 1;
             }
             None => {}
@@ -178,7 +188,7 @@ impl Accumulator {
             self.last_timestamp = ev.timestamp.clone();
             self.model = ev.model.clone();
         }
-        self.seen.insert(ev.message_id, ev.usage);
+        self.seen.insert(ev.message_id, (ev.usage, ev.timestamp));
     }
 
     fn bucket_add(&mut self, ts: &str, tokens: u64) {
