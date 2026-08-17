@@ -26,7 +26,7 @@ Zero runtime dependencies beyond libc. No network listener. No crypto code
 
 ```sh
 make                              # release → build/release/
-make test BUILD=asan              # 6541 unit checks under ASan+UBSan
+make test BUILD=asan              # 13567 unit checks under ASan+UBSan
 make BUILD=release all            # explicit variant
 BUILD=release bash tests/integration/test_reattach.sh   # acceptance test
 ```
@@ -309,12 +309,27 @@ the session's table and would send no snapshot at all.
 running** and for dead sessions. Lines become durable on the 1 s flush tick
 (or on detach/exit), so allow ≥1 s before reading.
 
-**The ring is rebuilt at open time, and that is load-bearing.**
-`MSG_SCROLLBACK_REQ` is served from the in-memory ring **only** (`sb_fetch`,
-`server.c`), while the attach snapshot advertises `sb_total_lines()` — which is
-`next_seq`, the whole history. So a `scrollback` opened with an empty ring
-announces history it cannot serve, and a client with no filesystem access (the
-GUI) gets an empty scrollbar. `sb_open_pane` therefore refills the ring from the
+**`MSG_SCROLLBACK_REQ` serves any depth, ring first and the log below it.**
+The attach snapshot advertises `sb_total_lines()` — `next_seq`, the whole
+history — so anything short of that is a range announced and then not served.
+Lines the ring still holds come from the ring (`sb_fetch`); older ones are
+seeked out of the log by `sb_fetch_deep` (`scrollback.c`), which each generation
+supports with a sparse index of one file offset per `SB_INDEX_STEP` (512)
+records, accumulated during the scan `sb_open_pane` already makes. A request
+therefore costs a seek plus at most 511 records of forward sweep (~285 KB
+measured) rather than up to 32 MiB — which is what makes it safe on the
+daemon's single `poll` loop and its 20 ms composite tick. An index offset that
+does not name a record boundary fails the `rec_len`+CRC check and the code falls
+back to sweeping that generation from 0: correct, just slow. Note the
+consequence for tests — because the fallback returns exactly the right lines, a
+broken index is invisible to content assertions, so `sb_fetch_stats` exposes
+`disk_bytes_read`/`disk_recs_swept` and the tests assert those as exact
+arithmetic on `SB_INDEX_STEP`.
+
+**The ring is still rebuilt at open time, and that is load-bearing** — a
+scrollback opened with an empty ring would serve every scroll from disk, and
+copy-mode's un-flushed-tail request (above) has no log to read. `sb_open_pane`
+therefore refills the ring from the
 log tail on every open, including the in-place `reload` handoff that keeps the
 sessions and their children alive. Two halves of one guarantee: `handoff.c`
 flushes every session's un-flushed tail *before* the re-exec, and the new image

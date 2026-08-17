@@ -385,7 +385,17 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
          * payload: read only when present, 255/absent = active. */
         pane *ap = len >= 13 ? session_pane_by_id(c->attached, p[12])
                              : session_active_pane(c->attached);
-        uint32_t got = ap ? sb_fetch(ap->sb, start, maxn, refs, 1000) : 0;
+        /* Lines the ring still holds come from the ring; older ones are seeked
+         * out of the log. Serving the miss matters because the attach snapshot
+         * advertises sb_total_lines() — the WHOLE history — so a client that
+         * scrolls past the ring used to be told the range exists and then
+         * handed nothing. The read is bounded (one page plus at most
+         * SB_INDEX_STEP-1 records of sweep, ~285 KB measured) which is what
+         * keeps it safe on this single-threaded loop's 20 ms tick. */
+        static char sbtext[PROTO_MAX_PAYLOAD];
+        uint32_t got = ap ? sb_fetch_deep(ap->sb, start, maxn, refs, 1000,
+                                          sbtext, sizeof sbtext)
+                          : 0;
         /* payload: u64 first_seq, u32 nlines, then {u32 len, bytes}... */
         static uint8_t payload[PROTO_MAX_PAYLOAD];
         size_t off = 12;

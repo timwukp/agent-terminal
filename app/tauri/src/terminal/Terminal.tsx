@@ -10,7 +10,7 @@ import type { PaneRect, Transport } from "./transport";
 import type { CellMetrics } from "./hittest";
 import { paneAtPixel } from "./hittest";
 import { createStdinQueue } from "./stdinQueue";
-import { Backfill } from "./backfill";
+import { Backfill, FETCH_MAX } from "./backfill";
 import {
   FIT_HINT_MIN_FRACTION,
   FONT_DEFAULT,
@@ -145,11 +145,17 @@ export default function TerminalView({
     // the user's browser. If links are ever wanted, they need an explicit
     // in-app confirmation showing the resolved URL — not the platform's.
     const term = new XTerm({
-      // Sized to the daemon's own ring (SB_MEM_LINES_DEFAULT): attach
-      // backfills up to that much history, and everything after attach
-      // accumulates client-side, so the wheel scrolls back seamlessly
-      // across the attach point.
-      scrollback: 10000,
+      // Must be >= backfill's FETCH_MAX, or the oldest history written at
+      // attach is evicted by the newest before the user can scroll to it —
+      // which is the shape of the bug this number used to have: it was
+      // sized to the daemon's ring rather than to what the client writes,
+      // so backfill and live output competed for the same 10,000 slots.
+      // Headroom above FETCH_MAX is close to free: xterm allocates a
+      // line's cells when the line is written, not when the buffer is
+      // created (12 B/cell x cols, see backfill.ts). Derived from
+      // FETCH_MAX rather than asserted against it, so the invariant
+      // cannot rot when one of the two numbers moves.
+      scrollback: Math.max(50000, FETCH_MAX),
       fontFamily: "ui-monospace, Menlo, monospace",
       fontSize: FONT_DEFAULT,
       // Cells and chrome from the same tokens — xterm's canvas cannot

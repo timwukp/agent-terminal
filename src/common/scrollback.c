@@ -48,6 +48,20 @@ typedef struct {
     uint64_t seq;
 } mem_line;
 
+/* Sparse record index for ONE generation: off[i] is the byte offset of record
+ * i*SB_INDEX_STEP. The seq is not stored because seqs are contiguous within a
+ * generation (verified on the real 93,374-record log: seq 0..93373 exactly), so
+ * entry i means seq first_seq + i*SB_INDEX_STEP. If that ever stops being true
+ * this must grow a seq per entry — 16 B instead of 8, still negligible, but the
+ * premise is what's load-bearing. */
+typedef struct {
+    uint64_t *off;
+    uint32_t n, cap;
+    uint64_t first_seq;  /* seq of record 0 in this generation */
+    uint64_t nrec;       /* records in this generation */
+    bool have;           /* the generation exists (may still hold 0 records) */
+} sb_index;
+
 struct scrollback {
     char dir[600];       /* sessions/<name>/ */
     char log_path[640];
@@ -59,8 +73,13 @@ struct scrollback {
     mem_line *ring;      /* mem_lines entries */
     uint32_t mem_lines, ring_head, ring_count;
 
+    sb_index idx_cur, idx_old; /* .log and .log.1 */
+
     uint8_t wbuf[64 * 1024]; /* write coalescing */
     size_t wbuf_len;
+
+    /* see sb_fetch_stats: a broken index is invisible without these */
+    uint64_t disk_bytes_read, disk_recs_swept;
 };
 
 /* ---- serialization: cells → ANSI text ---- */
@@ -176,12 +195,27 @@ static int session_dir(const char *name, char *out, size_t outsz) {
  * alternating runs each): no refill 838 ms, this tail window 1057 ms, refilling
  * from offset 0 instead 1631 ms. Same lines served either way — the ring evicts
  * regardless — so the window buys ~575 ms for nothing but this bookkeeping. */
+static void idx_reset(sb_index *ix) {
+    free(ix->off);
+    *ix = (sb_index){0};
+}
+
+static void idx_append(sb_index *ix, uint64_t off) {
+    if (ix->n == ix->cap) {
+        ix->cap = ix->cap ? ix->cap * 2 : 64;
+        ix->off = xrealloc(ix->off, (size_t)ix->cap * sizeof *ix->off);
+    }
+    ix->off[ix->n++] = off;
+}
+
 static uint64_t scan_log(const char *path, uint64_t *valid_size, uint32_t want,
-                         uint64_t *tail_off) {
+                         uint64_t *tail_off, sb_index *idx) {
     *valid_size = 0;
     if (tail_off) *tail_off = 0;
+    if (idx) idx_reset(idx);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
+    if (idx) idx->have = true;
     uint64_t *offs = want ? xcalloc(want, sizeof *offs) : NULL;
     uint64_t nrec = 0;
     uint64_t next = 0, off = 0;
@@ -202,11 +236,20 @@ static uint64_t scan_log(const char *path, uint64_t *valid_size, uint32_t want,
         memcpy(scratch + 8, payload, plen);
         if (crc32_buf(scratch, 8 + plen) != crc) break;
         if (offs) offs[nrec % want] = off;
+        /* The sparse index rides this pass. The pass itself is not new work —
+         * it already ran to resume next_seq — so building the index costs no
+         * extra I/O, only the branch. Recorded BEFORE nrec++ so entry i is
+         * record i*SB_INDEX_STEP, which is what the derived seq assumes. */
+        if (idx) {
+            if (nrec == 0) idx->first_seq = seq;
+            if (nrec % SB_INDEX_STEP == 0) idx_append(idx, off);
+        }
         nrec++;
         next = seq + 1;
         off += 4 + rec_len;
     }
     close(fd);
+    if (idx) idx->nrec = nrec;
     if (offs) {
         /* nrec > want means the ring wrapped, so the oldest slot it still holds
          * is the window's first record. */
@@ -267,9 +310,9 @@ scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
     char old_path[648];
     snprintf(old_path, sizeof old_path, "%s.1", sb->log_path);
     uint64_t old_size, tail_old = 0;
-    uint64_t next_old = scan_log(old_path, &old_size, sb->mem_lines, &tail_old);
+    uint64_t next_old = scan_log(old_path, &old_size, sb->mem_lines, &tail_old, &sb->idx_old);
     uint64_t valid, tail_cur = 0;
-    uint64_t next_cur = scan_log(sb->log_path, &valid, sb->mem_lines, &tail_cur);
+    uint64_t next_cur = scan_log(sb->log_path, &valid, sb->mem_lines, &tail_cur, &sb->idx_cur);
     sb->next_seq = next_cur > next_old ? next_cur : next_old;
 
     /* O_CLOEXEC is load-bearing, not hygiene: this fd is opened by the DAEMON
@@ -291,6 +334,11 @@ scrollback *sb_open_pane(const char *session_name, uint8_t pane_id,
         if (ftruncate(sb->fd, (off_t)valid) != 0) { /* keep going; append still safe */ }
     }
     sb->file_size = valid;
+    /* The current generation exists from here on (O_CREAT just made it), even
+     * when the scan found no file to index — otherwise a scrollback that was
+     * created rather than resumed indexes every pushed line into an index that
+     * fetch_from_gen refuses to open, and serves nothing. */
+    sb->idx_cur.have = true;
 
     /* Rebuild the ring from the log tail. Without this, every daemon restart
      * — including an in-place `reload` handoff, which keeps the sessions and
@@ -338,6 +386,14 @@ static void maybe_rotate(scrollback *sb) {
     char old_path[648];
     snprintf(old_path, sizeof old_path, "%s.1", sb->log_path);
     rename(sb->log_path, old_path); /* clobbers previous .1 */
+    /* The index follows the bytes: renaming a file moves no offset, so the
+     * current generation's index becomes the old one wholesale and the new
+     * generation starts empty. Getting this wrong is invisible to a content
+     * assertion (see sb_fetch_stats) — a lost index still serves the right
+     * lines, by sweeping the whole file. */
+    free(sb->idx_old.off);
+    sb->idx_old = sb->idx_cur;
+    sb->idx_cur = (sb_index){.have = true};
     /* Same reason as sb_open_pane: rotation must not hand a fresh inheritable
      * fd to the next child a long-lived session spawns. */
     sb->fd = open(sb->log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
@@ -363,6 +419,16 @@ void sb_push_line(scrollback *sb, const vt_cell *cells, uint16_t n) {
     put_u32(hdr + 4, crc32_buf(scratch, 8 + len));
     put_u64(hdr + 8, seq);
 
+    /* Index this record at its own start offset, before its bytes are staged.
+     * file_size + wbuf_len is the offset the record will occupy and is
+     * invariant across a drain (a drain moves bytes from one term to the
+     * other), so it is correct on either side of the flush below. */
+    if (sb->idx_cur.nrec % SB_INDEX_STEP == 0) {
+        if (sb->idx_cur.nrec == 0) sb->idx_cur.first_seq = seq;
+        idx_append(&sb->idx_cur, sb->file_size + sb->wbuf_len);
+    }
+    sb->idx_cur.nrec++;
+
     if (sb->wbuf_len + 16 + len > sizeof sb->wbuf) wbuf_drain(sb);
     memcpy(sb->wbuf + sb->wbuf_len, hdr, 16);
     memcpy(sb->wbuf + sb->wbuf_len + 16, text, len);
@@ -385,6 +451,138 @@ uint32_t sb_fetch(const scrollback *sb, uint64_t start_seq, uint32_t max_lines,
     return filled;
 }
 
+/* ---- disk-served fetch: the sparse index, the bounded sweep ---- */
+
+/* Read the record at `off`. Returns its total on-disk size (4 + rec_len), or 0
+ * when `off` is not a valid record boundary — which is the whole safety
+ * argument for seeking at all: the format is forward-linked with no resync
+ * marker, so a wrong offset reads a length and a CRC out of the middle of a
+ * line and is rejected here. Verified against the real log by shifting every
+ * index entry one byte: 0 of 50 seeks were accepted. */
+static uint32_t read_rec(scrollback *sb, int fd, uint64_t off, uint64_t *seq,
+                         const char **text, uint32_t *len) {
+    static uint8_t hdr[16];
+    static uint8_t payload[SB_LINE_MAX];
+    static uint8_t scratch[8 + SB_LINE_MAX];
+    if (pread(fd, hdr, 16, (off_t)off) != 16) return 0;
+    sb->disk_bytes_read += 16;
+    uint32_t rec_len = get_u32(hdr);
+    if (rec_len < 12 || rec_len - 12 > SB_LINE_MAX) return 0;
+    uint32_t plen = rec_len - 12;
+    if (pread(fd, payload, plen, (off_t)(off + 16)) != (ssize_t)plen) return 0;
+    sb->disk_bytes_read += plen;
+    uint64_t s = get_u64(hdr + 8);
+    put_u64(scratch, s);
+    memcpy(scratch + 8, payload, plen);
+    if (crc32_buf(scratch, 8 + plen) != get_u32(hdr + 4)) return 0;
+    *seq = s;
+    *text = (const char *)payload;
+    *len = plen;
+    return 4 + rec_len;
+}
+
+/* Largest index entry whose derived seq is <= want. Returns its offset, or 0
+ * (the generation's first record) when the index cannot place it — a miss
+ * degrades to a longer sweep, never to a wrong answer. */
+static uint64_t idx_seek(const sb_index *ix, uint64_t want) {
+    if (ix->n == 0) return 0;
+    uint32_t lo = 0, hi = ix->n - 1, pick = 0;
+    while (lo <= hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (ix->first_seq + (uint64_t)mid * SB_INDEX_STEP <= want) {
+            pick = mid;
+            if (mid == ix->n - 1) break;
+            lo = mid + 1;
+        } else {
+            if (mid == 0) break;
+            hi = mid - 1;
+        }
+    }
+    return ix->off[pick];
+}
+
+/* Serve from one generation. `off_in_buf` tracks the caller's text buffer. */
+static uint32_t fetch_from_gen(scrollback *sb, const char *path,
+                              const sb_index *ix, uint64_t start_seq,
+                              uint32_t max_lines, sb_line_ref *out,
+                              uint32_t out_cap, char *buf, size_t bufsz,
+                              size_t *buf_used, uint32_t filled) {
+    if (!ix->have || ix->nrec == 0) return filled;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return filled;
+    uint64_t off = idx_seek(ix, start_seq);
+    /* Bounded sweep to the exact seq: at most SB_INDEX_STEP-1 records when the
+     * index placed it, the generation otherwise. */
+    uint64_t seq = 0, step;
+    const char *text;
+    uint32_t len;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        uint64_t from = off;
+        while ((step = read_rec(sb, fd, off, &seq, &text, &len)) != 0) {
+            if (seq >= start_seq) break;
+            sb->disk_recs_swept++;
+            off += step;
+        }
+        /* An index entry that does not name a record boundary is rejected by
+         * read_rec at the FIRST read — nothing was swept — and the honest answer
+         * then is the slow one: sweep the generation from its start. That keeps a
+         * corrupt index CORRECT while making it expensive, which is exactly why
+         * sb_fetch_stats exists: the fallback is invisible to any assertion about
+         * content. Failing after sweeping forward is end-of-generation (or a
+         * truncated tail) instead, and rewinding there would re-read the whole
+         * file to reach the same answer. */
+        if (step != 0 || off != from || off == 0) break;
+        off = 0;
+    }
+    /* Emit forward from here. A short buf serves fewer lines rather than
+     * overrunning; the caller pages again from where it got to. */
+    while (step != 0 && filled < max_lines && filled < out_cap) {
+        if (*buf_used + len > bufsz) break;
+        memcpy(buf + *buf_used, text, len);
+        out[filled++] = (sb_line_ref){.text = buf + *buf_used, .len = len, .seq = seq};
+        *buf_used += len;
+        off += step;
+        step = read_rec(sb, fd, off, &seq, &text, &len);
+    }
+    close(fd);
+    return filled;
+}
+
+uint32_t sb_fetch_deep(scrollback *sb, uint64_t start_seq, uint32_t max_lines,
+                       sb_line_ref *out, uint32_t out_cap,
+                       char *buf, size_t bufsz) {
+    if (!sb) return 0;
+    /* The ring is authoritative for anything it holds — same answer, no I/O. */
+    if (sb->ring_count > 0 &&
+        start_seq >= sb->ring[sb->ring_head].seq)
+        return sb_fetch(sb, start_seq, max_lines, out, out_cap);
+
+    /* Buffered lines are not in the file yet, and a fetch that crosses from
+     * disk into the ring must not skip them. */
+    sb_flush(sb);
+
+    size_t buf_used = 0;
+    uint32_t filled = 0;
+    char old_path[648];
+    snprintf(old_path, sizeof old_path, "%s.1", sb->log_path);
+    /* Older generation first so seqs arrive ascending. */
+    if (sb->idx_old.nrec > 0 &&
+        start_seq < sb->idx_old.first_seq + sb->idx_old.nrec)
+        filled = fetch_from_gen(sb, old_path, &sb->idx_old, start_seq, max_lines,
+                                out, out_cap, buf, bufsz, &buf_used, filled);
+    if (filled < max_lines && filled < out_cap) {
+        uint64_t next = filled ? out[filled - 1].seq + 1 : start_seq;
+        filled = fetch_from_gen(sb, sb->log_path, &sb->idx_cur, next, max_lines,
+                                out, out_cap, buf, bufsz, &buf_used, filled);
+    }
+    return filled;
+}
+
+void sb_fetch_stats(const scrollback *sb, uint64_t *bytes_read, uint64_t *recs_swept) {
+    if (bytes_read) *bytes_read = sb ? sb->disk_bytes_read : 0;
+    if (recs_swept) *recs_swept = sb ? sb->disk_recs_swept : 0;
+}
+
 void sb_flush(scrollback *sb) {
     if (sb) wbuf_drain(sb);
 }
@@ -397,6 +595,8 @@ void sb_close(scrollback *sb) {
     for (uint32_t i = 0; i < sb->ring_count; i++)
         free(sb->ring[(sb->ring_head + i) % sb->mem_lines].text);
     free(sb->ring);
+    free(sb->idx_cur.off);
+    free(sb->idx_old.off);
     free(sb);
 }
 

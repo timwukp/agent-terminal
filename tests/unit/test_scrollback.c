@@ -317,6 +317,281 @@ TEST(combining_survives_roundtrip) {
     ASSERT_TRUE(strstr(got.lines[0], "\xcc\xad" "z") != NULL);
 }
 
+/* ---- sb_fetch_deep: ranges older than the ring, served from the log ----
+ *
+ * The ring holds mem_lines; the daemon announces sb_total_lines(). Everything
+ * between the two used to be announced and then unservable — #85 refilled the
+ * ring so the newest mem_lines work, and these cover the rest.
+ *
+ * Every helper below writes each line's own seq into its text ("D0123"), so an
+ * assertion on content is also an assertion on which record was read: a fetch
+ * that returned the right COUNT from the wrong offset cannot pass. */
+#define DEEP_LINES 3000u
+
+static void deep_push(scrollback *sb, uint64_t from, uint64_t to) {
+    vt_cell cells[16];
+    char text[32];
+    for (uint64_t i = from; i < to; i++) {
+        snprintf(text, sizeof text, "D%04llu", (unsigned long long)i);
+        make_line(cells, 16, text);
+        sb_push_line(sb, cells, 16);
+    }
+}
+
+/* Assert refs[i] is exactly the record whose seq is base+i, by seq AND by the
+ * seq printed inside its payload. Disk-served text is not NUL-terminated (it
+ * borrows the caller's buffer), so compare with a length. */
+static int deep_is(const sb_line_ref *r, uint64_t seq) {
+    char want[32];
+    int n = snprintf(want, sizeof want, "D%04llu", (unsigned long long)seq);
+    return r->seq == seq && r->len == (uint32_t)n && memcmp(r->text, want, (size_t)n) == 0;
+}
+
+/* The index has TWO producers — sb_push_line while the daemon runs, and
+ * scan_log when it opens an existing log — and only the second one serves the
+ * case this feature exists for, since a GUI scrolling into deep history is
+ * usually doing it after a restart or a `reload`. So every check below runs
+ * twice: once against the live index, then once against the same log reopened.
+ * Found by mutation: with the checks running only against the live index, a
+ * mutant that corrupted every scan_log offset survived all of them. */
+static void deep_check_below_ring(scrollback *sb) {
+    static sb_line_ref refs[1024];
+    static char buf[1 << 16];
+
+    /* First claim, and it has to come first: the ring cannot be the source.
+     * sb_fetch from 0 returns the ring's oldest line, which must be strictly
+     * ABOVE the whole range asked for below. Without this, "1000 lines came
+     * back" would also pass against a fetch that served the ring's tail. */
+    uint32_t ring = sb_fetch(sb, 0, 1, refs, 1);
+    ASSERT_EQ_INT(ring, 1);
+    ASSERT_EQ_INT((long long)refs[0].seq, DEEP_LINES - 100); /* 2900 > 999 */
+
+    uint32_t got = sb_fetch_deep(sb, 0, 1000, refs, 1024, buf, sizeof buf);
+    ASSERT_EQ_INT(got, 1000);
+    ASSERT_TRUE(deep_is(&refs[0], 0));
+    ASSERT_TRUE(deep_is(&refs[999], 999));
+    /* Contiguous and ascending throughout, not just at the two ends. */
+    for (uint32_t i = 0; i < got; i++) ASSERT_TRUE(deep_is(&refs[i], i));
+}
+
+TEST(deep_fetch_below_ring) {
+    scrollback *sb = sb_open("t-deep", 100, 0); /* ring: 100 of 3000 lines */
+    ASSERT_TRUE(sb != NULL);
+    deep_push(sb, 0, DEEP_LINES);
+    deep_check_below_ring(sb); /* index built by sb_push_line */
+    sb_close(sb);
+
+    sb = sb_open("t-deep", 100, 0);
+    ASSERT_TRUE(sb != NULL);
+    ASSERT_EQ_INT((long long)sb_total_lines(sb), DEEP_LINES);
+    deep_check_below_ring(sb); /* index rebuilt by scan_log */
+    sb_close(sb);
+}
+
+static void deep_check_boundaries(scrollback *sb) {
+    static sb_line_ref refs[8];
+    static char buf[4096];
+    /* An exact index entry, one below, one above, the first record, and the
+     * last record still below the ring. Off-by-one in the binary search or in
+     * the derived first_seq + i*STEP shows up here and nowhere else, because a
+     * fetch that starts one record late still returns a full, valid page. */
+    const uint64_t at[] = {0, 1, SB_INDEX_STEP - 1, SB_INDEX_STEP, SB_INDEX_STEP + 1,
+                           2 * SB_INDEX_STEP - 1, 2 * SB_INDEX_STEP,
+                           4 * SB_INDEX_STEP, DEEP_LINES - 101};
+    for (size_t k = 0; k < sizeof at / sizeof at[0]; k++) {
+        uint32_t got = sb_fetch_deep(sb, at[k], 3, refs, 8, buf, sizeof buf);
+        ASSERT_EQ_INT(got, 3);
+        ASSERT_TRUE(deep_is(&refs[0], at[k]));
+        ASSERT_TRUE(deep_is(&refs[1], at[k] + 1));
+        ASSERT_TRUE(deep_is(&refs[2], at[k] + 2));
+    }
+}
+
+TEST(deep_fetch_index_boundaries) {
+    scrollback *sb = sb_open("t-deepidx", 100, 0);
+    deep_push(sb, 0, DEEP_LINES);
+    deep_check_boundaries(sb); /* index built by sb_push_line */
+    sb_close(sb);
+
+    sb = sb_open("t-deepidx", 100, 0);
+    deep_check_boundaries(sb); /* index rebuilt by scan_log */
+    sb_close(sb);
+}
+
+/* The counter assertions, run against one scrollback whose index came from
+ * whichever producer the caller set up. `logsize` is the file the fetch has to
+ * beat. */
+static void deep_check_bounded_work(scrollback *sb, off_t logsize) {
+    uint64_t bytes0 = 0, swept0 = 0;
+    sb_fetch_stats(sb, &bytes0, &swept0);
+    ASSERT_EQ_INT((long long)bytes0, 0); /* nothing read from disk yet */
+    ASSERT_EQ_INT((long long)swept0, 0);
+
+    static sb_line_ref refs[128];
+    static char buf[8192];
+    const uint64_t start = 1000;
+    uint32_t got = sb_fetch_deep(sb, start, 100, refs, 128, buf, sizeof buf);
+    ASSERT_EQ_INT(got, 100);
+    ASSERT_TRUE(deep_is(&refs[0], start));
+
+    uint64_t bytes = 0, swept = 0;
+    sb_fetch_stats(sb, &bytes, &swept);
+    /* Exact: the index places the seek at record start - (start % STEP), so the
+     * sweep is that remainder and nothing more. 1000 - 512 = 488. Written as
+     * arithmetic on SB_INDEX_STEP rather than as the number, so the assertion
+     * follows the constant if the constant moves. */
+    ASSERT_EQ_INT((long long)swept, (long long)(start % SB_INDEX_STEP));
+    ASSERT_TRUE(swept < SB_INDEX_STEP); /* the bound the design promises */
+    /* And the volume: 588 records of a 3000-record file. A fallback sweep from
+     * offset 0 would read 1100 records plus the whole seek, i.e. past half. */
+    ASSERT_TRUE((long long)bytes < logsize / 2);
+    ASSERT_TRUE(bytes > 0); /* it really did go to disk */
+
+    /* The other half of the contract: anything the ring holds is served from
+     * the ring, at zero I/O. Asserted at the exact boundary — the ring's oldest
+     * seq — because that is the one request a >=/> slip sends to disk, and it
+     * would still return the right lines from there. The counters are the only
+     * witness. */
+    uint32_t r = sb_fetch_deep(sb, DEEP_LINES - 100, 100, refs, 128, buf, sizeof buf);
+    ASSERT_EQ_INT(r, 100);
+    ASSERT_TRUE(deep_is(&refs[0], DEEP_LINES - 100));
+    uint64_t bytes2 = 0, swept2 = 0;
+    sb_fetch_stats(sb, &bytes2, &swept2);
+    ASSERT_EQ_INT((long long)bytes2, (long long)bytes);
+    ASSERT_EQ_INT((long long)swept2, (long long)swept);
+}
+
+TEST(deep_fetch_bounded_work) {
+    /* The test that makes the others worth anything. A broken index is
+     * INVISIBLE to every assertion above: a wrong offset is rejected by
+     * rec_len+CRC, the fallback sweeps the generation from 0, and the right
+     * lines come back — after reading the whole file. So assert the WORK.
+     *
+     * Both producers, for the reason given above deep_check_below_ring: the
+     * mutant that shifts every scan_log offset by one byte is the whole point of
+     * this test, and it is invisible unless the index under test was built by
+     * scan_log. */
+    scrollback *sb = sb_open("t-deepwork", 100, 0);
+    deep_push(sb, 0, DEEP_LINES);
+    sb_flush(sb);
+
+    char path[512];
+    snprintf(path, sizeof path,
+             "%s/.agent-terminal/sessions/t-deepwork/scrollback.log", g_home);
+    struct stat st;
+    ASSERT_TRUE(stat(path, &st) == 0);
+    /* Assert the log is genuinely big first, so the margin cannot be satisfied
+     * by an accidentally tiny file. 3000 records x (16 B header + 5 B payload)
+     * = 63,000 B minimum. */
+    ASSERT_TRUE(st.st_size >= 63000);
+
+    deep_check_bounded_work(sb, st.st_size); /* index built by sb_push_line */
+    sb_close(sb);
+
+    sb = sb_open("t-deepwork", 100, 0);
+    ASSERT_TRUE(sb != NULL);
+    deep_check_bounded_work(sb, st.st_size); /* index rebuilt by scan_log */
+    sb_close(sb);
+}
+
+TEST(deep_fetch_spans_generations) {
+    /* One rotation, nothing dropped: .log.1 holds the older seqs, .log the
+     * newer, and a single fetch must cross the seam without a gap, a repeat, or
+     * a reordering. 64 KB cap over ~21 B records rotates at ~3100. */
+    scrollback *sb = sb_open("t-deepgen", 100, 64 * 1024);
+    deep_push(sb, 0, 4000);
+    sb_close(sb);
+
+    char path1[512];
+    snprintf(path1, sizeof path1,
+             "%s/.agent-terminal/sessions/t-deepgen/scrollback.log.1", g_home);
+    struct stat st;
+    ASSERT_TRUE(stat(path1, &st) == 0); /* rotation happened */
+
+    sb = sb_open("t-deepgen", 100, 64 * 1024);
+    /* Exactly one rotation, so nothing was dropped and the seam is interior. */
+    collect all = {0};
+    ASSERT_EQ_INT((long long)sb_read_log("t-deepgen", collect_cb, &all), 4000);
+
+    static sb_line_ref refs[4096];
+    static char buf[1 << 17];
+    uint32_t got = sb_fetch_deep(sb, 0, 3800, refs, 4096, buf, sizeof buf);
+    ASSERT_EQ_INT(got, 3800);
+    for (uint32_t i = 0; i < got; i++) ASSERT_TRUE(deep_is(&refs[i], i));
+    sb_close(sb);
+}
+
+TEST(deep_fetch_after_rotation_of_the_index) {
+    /* The range lives entirely in .log.1. This is the test that catches
+     * "rotation forgot to move the index": with idx_old empty the old
+     * generation is skipped and the fetch answers with .log's seqs instead —
+     * a full page of valid lines, all of them wrong. */
+    scrollback *sb = sb_open("t-deeprot2", 100, 64 * 1024);
+    deep_push(sb, 0, 4000);
+    static sb_line_ref refs[256];
+    static char buf[8192];
+    uint32_t got = sb_fetch_deep(sb, 100, 200, refs, 256, buf, sizeof buf);
+    ASSERT_EQ_INT(got, 200);
+    for (uint32_t i = 0; i < got; i++) ASSERT_TRUE(deep_is(&refs[i], 100 + i));
+    sb_close(sb);
+}
+
+TEST(deep_fetch_partial_and_empty) {
+    scrollback *sb = sb_open("t-deepedge", 100, 4096); /* many rotations */
+    deep_push(sb, 0, DEEP_LINES);
+    static sb_line_ref refs[256];
+    static char buf[8192];
+
+    /* Repeated rotation dropped the oldest generations, so seq 0 is gone. A
+     * request from 0 must clamp UP to the oldest surviving record rather than
+     * returning nothing or reading past a file's start. */
+    uint32_t got = sb_fetch_deep(sb, 0, 200, refs, 256, buf, sizeof buf);
+    ASSERT_TRUE(got > 0);
+    ASSERT_TRUE(refs[0].seq > 0);
+    ASSERT_TRUE(deep_is(&refs[0], refs[0].seq));
+    for (uint32_t i = 1; i < got; i++) ASSERT_TRUE(deep_is(&refs[i], refs[0].seq + i));
+
+    /* Entirely past the newest line: well-defined empty, not a read past EOF. */
+    ASSERT_EQ_INT(sb_fetch_deep(sb, DEEP_LINES + 1000, 200, refs, 256, buf, sizeof buf), 0);
+
+    /* A text buffer far too small serves fewer lines; it is never overrun
+     * (ASan is the assertion here). Each line is 5 payload bytes. */
+    uint32_t few = sb_fetch_deep(sb, refs[0].seq, 200, refs, 256, buf, 12);
+    ASSERT_TRUE(few >= 1 && few <= 3);
+    sb_close(sb);
+}
+
+TEST(deep_fetch_torn_tail) {
+    /* A crash-truncated log must not leave an index entry pointing past
+     * valid_size: the scan builds the index and the truncation point on the
+     * same pass, so a fetch after recovery has to stop at the last good
+     * record. 700 lines puts an index entry (512) inside the surviving range. */
+    scrollback *sb = sb_open("t-deeptorn", 100, 0);
+    deep_push(sb, 0, 700);
+    sb_close(sb);
+
+    char path[512];
+    snprintf(path, sizeof path,
+             "%s/.agent-terminal/sessions/t-deeptorn/scrollback.log", g_home);
+    int fd = open(path, O_WRONLY | O_APPEND);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_TRUE(write(fd, "\x30\x00\x00\x00GARBAGE-partial-record", 27) == 27);
+    close(fd);
+
+    sb = sb_open("t-deeptorn", 100, 0);
+    ASSERT_EQ_INT((long long)sb_total_lines(sb), 700);
+    static sb_line_ref refs[1024];
+    static char buf[1 << 16];
+    uint32_t got = sb_fetch_deep(sb, 0, 1000, refs, 1024, buf, sizeof buf);
+    ASSERT_EQ_INT(got, 700); /* every good record, and nothing past them */
+    for (uint32_t i = 0; i < got; i++) ASSERT_TRUE(deep_is(&refs[i], i));
+    /* From an exact index entry near the recovered tail. */
+    got = sb_fetch_deep(sb, SB_INDEX_STEP, 1000, refs, 1024, buf, sizeof buf);
+    ASSERT_EQ_INT(got, (long long)(700 - SB_INDEX_STEP));
+    ASSERT_TRUE(deep_is(&refs[0], SB_INDEX_STEP));
+    sb_close(sb);
+}
+
 TEST(list_logs) {
     char buf[4096];
     int n = sb_list_logs(buf, sizeof buf);
@@ -385,6 +660,13 @@ int main(void) {
     RUN(ring_refilled_after_reopen);
     RUN(refill_bounded_to_ring_window);
     RUN(refill_spans_rotation);
+    RUN(deep_fetch_below_ring);
+    RUN(deep_fetch_index_boundaries);
+    RUN(deep_fetch_bounded_work);
+    RUN(deep_fetch_spans_generations);
+    RUN(deep_fetch_after_rotation_of_the_index);
+    RUN(deep_fetch_partial_and_empty);
+    RUN(deep_fetch_torn_tail);
     RUN(sgr_survives_roundtrip);
     RUN(combining_survives_roundtrip);
     RUN(list_logs);

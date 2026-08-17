@@ -80,6 +80,42 @@ describe("Backfill", () => {
     expect(requests).toEqual([[5000, PAGE_LINES]]);
   });
 
+  // FETCH_MAX used to equal the daemon's ring, so "pages to the cap" and
+  // "pages to what the daemon can serve" were the same claim. They are not
+  // any more (sb_fetch_deep serves the log), and the cap is now a
+  // client-side memory budget — so assert the full walk, in pages, and
+  // that every page is asked for and written. Nothing else in this file
+  // exercises more than three pages.
+  it("pages the whole FETCH_MAX depth, one PAGE_LINES page at a time", () => {
+    const { requests, calls, sinks } = journal();
+    const b = new Backfill(sinks);
+    const total = FETCH_MAX + 4321; // deeper than the cap: start is clamped
+    b.onSnapshot(80, 24, total, enc("P"));
+    let seq = total - FETCH_MAX;
+    expect(requests[0]).toEqual([seq, PAGE_LINES]);
+    for (let page = 0; page < FETCH_MAX / PAGE_LINES; page++) {
+      b.onScrollback(seq, lines(PAGE_LINES));
+      seq += PAGE_LINES;
+    }
+    expect(requests.length).toBe(FETCH_MAX / PAGE_LINES);
+    expect(calls.filter((c) => c.startsWith("line:")).length).toBe(FETCH_MAX);
+    // Reached the announced total exactly: pad, paint, and no further ask.
+    expect(seq).toBe(total);
+    expect(calls[calls.length - 2]).toBe("pad");
+    expect(calls[calls.length - 1]).toBe("snap:80x24:P");
+  });
+
+  it("stops on an empty page part-way down, without waiting for the cap", () => {
+    const { requests, calls, sinks } = journal();
+    const b = new Backfill(sinks);
+    b.onSnapshot(80, 24, FETCH_MAX, enc("P"));
+    b.onScrollback(0, lines(PAGE_LINES));
+    b.onScrollback(PAGE_LINES, []); // the log ends here (rotation dropped it)
+    expect(requests.length).toBe(2); // no third ask
+    expect(calls.filter((c) => c.startsWith("line:")).length).toBe(PAGE_LINES);
+    expect(calls[calls.length - 1]).toBe("snap:80x24:P");
+  });
+
   it("follows the daemon when eviction moved the start forward", () => {
     const { requests, sinks } = journal();
     const b = new Backfill(sinks);

@@ -1,8 +1,10 @@
 // History backfill: make the wheel scroll back past the attach point.
 //
 // The attach snapshot is only the visible screen; everything that ever
-// scrolled off lives daemon-side (scrollback.c ring, announced as
-// sb_lines on the snapshot). xterm has no way to prepend into its
+// scrolled off lives daemon-side (scrollback.c: a ring of the newest
+// SB_MEM_LINES_DEFAULT lines over an append-only log holding the rest,
+// the whole of it announced as sb_lines on the snapshot). xterm has no
+// way to prepend into its
 // buffer, so history must be written BEFORE the snapshot repaint — which
 // forces an ordering dance at attach:
 //
@@ -47,9 +49,29 @@ export interface BackfillSinks {
 /** The daemon serves at most this many lines per MSG_SCROLLBACK_DATA
  * (server.c clamps maxn to 1000). */
 export const PAGE_LINES = 1000;
-/** Fetch at most this much history: the daemon's own in-memory ring
- * default (SB_MEM_LINES_DEFAULT) — asking for more can only 404. */
-export const FETCH_MAX = 10000;
+/** Fetch at most this much history.
+ *
+ * It used to be 10,000 because that was the daemon's in-memory ring
+ * (SB_MEM_LINES_DEFAULT) and asking deeper could only come back empty.
+ * The daemon now serves any depth from the log (sb_fetch_deep), so this
+ * number stopped describing the daemon and became purely a client-side
+ * budget — which makes the number itself the whole decision:
+ *
+ *   xterm stores a line as a Uint32Array of 3 words per cell allocated to
+ *   the line's width, i.e. 12 B/cell. At 124 cols that is 1,488 B/line;
+ *   at 155 cols, 1,860 B. So 25,000 lines is 37.2 MB per tab at 124 cols
+ *   and 46.5 MB at 155 — and 100,000 would be 148.8 / 186.0 MB, per tab.
+ *   The socket cost is small either way (177.9 B/line measured across 28
+ *   real logs, so ~4.4 MB and 25 round trips for a 25,000-line attach).
+ *
+ * Memory is the binding constraint and it is paid EAGERLY: xterm cannot
+ * prepend to its buffer (see the header), so history has to be written
+ * before the repaint, which means at attach and not when the user
+ * actually scrolls. Deeper-on-demand needs a different mechanism than
+ * this module, and until it exists this constant is the depth a user can
+ * reach: 2.5x the old one, and 27% of the largest real session measured
+ * on this machine (93,374 lines / 18.1 MB). */
+export const FETCH_MAX = 25000;
 /** A fetch stalled this long paints without history. */
 export const STALL_MS = 2000;
 
