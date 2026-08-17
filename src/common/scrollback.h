@@ -26,6 +26,14 @@
 #define SB_FILE_MAX_DEFAULT (32u << 20) /* 32 MiB per file */
 #define SB_LINE_MAX 8192               /* serialized line cap */
 
+/* Records between sparse-index entries. A straight memory/sweep trade at the
+ * 346,100-lines-per-pane worst case (2 generations x SB_FILE_MAX / 189.9 B per
+ * record, measured across 28 real logs): 256 -> 10.6 KB per pane and a <=47 KB
+ * sweep, 512 -> 5.3 KB and <=95 KB, 1024 -> 2.6 KB and <=190 KB. 512 keeps the
+ * whole worst-case fleet (MAX_SESSIONS x LAYOUT_MAX_LEAVES = 384 panes) under
+ * 2.1 MB while keeping the sweep smaller than the page it serves. */
+#define SB_INDEX_STEP 512u
+
 typedef struct scrollback scrollback;
 
 /* Open (creating dir/file as needed) the scrollback for a session name.
@@ -51,10 +59,37 @@ uint64_t sb_total_lines(const scrollback *sb);
 /* Fetch up to max_lines starting at start_seq from the in-memory ring.
  * Returns the number filled into out[] (borrowed pointers, valid until the
  * next sb_push_line). Lines older than the ring cannot be fetched here —
- * the client reads the disk log for those (history subcommand). */
+ * use sb_fetch_deep, which falls back to the disk log. */
 typedef struct { const char *text; uint32_t len; uint64_t seq; } sb_line_ref;
 uint32_t sb_fetch(const scrollback *sb, uint64_t start_seq, uint32_t max_lines,
                   sb_line_ref *out, uint32_t out_cap);
+
+/* Same contract as sb_fetch, but a start_seq below the ring's oldest line is
+ * served from the disk log instead of returning nothing. Disk-served text is
+ * copied into `buf` and out[].text points into it, so it stays valid until the
+ * caller reuses buf (ring-served text is still borrowed from the ring). A
+ * short buf serves fewer lines; it is never overrun.
+ *
+ * The seek is O(log n) + a bounded sweep because each generation carries a
+ * sparse index of every SB_INDEX_STEPth record's offset, built during the scan
+ * sb_open already performs. Without it, serving one page means reading both
+ * generations entire — measured at 181 MB per 10,000-line backfill on a real
+ * 18.1 MB log, i.e. 200-450 ms of a SINGLE-threaded event loop per request. */
+uint32_t sb_fetch_deep(scrollback *sb, uint64_t start_seq, uint32_t max_lines,
+                       sb_line_ref *out, uint32_t out_cap,
+                       char *buf, size_t bufsz);
+
+/* Work done by disk-served fetches so far: bytes pread, and records skipped
+ * before the first served line.
+ *
+ * These exist for the tests, and they are not optional decoration. A broken
+ * index is INVISIBLE to any assertion about content: a wrong offset lands off a
+ * record boundary, rec_len+CRC rejects it, and the fallback sweeps the
+ * generation from 0 — which returns exactly the right lines after reading the
+ * whole file. Every content check passes while the mechanism above is dead and
+ * the daemon is back to blocking its loop for hundreds of milliseconds. So one
+ * test asserts these counters as numbers. */
+void sb_fetch_stats(const scrollback *sb, uint64_t *bytes_read, uint64_t *recs_swept);
 
 /* Flush buffered writes to disk (called on a timer + on detach). */
 void sb_flush(scrollback *sb);

@@ -123,7 +123,7 @@ agent-terminal attach -s work           # everything is still there
 | `agent-terminal ls` | List sessions (size, pid, attached clients). |
 | `agent-terminal history -s name` | Dump scrollback to stdout. Works with **no daemon running** and for dead sessions. Pipe through `less -R`. |
 | `agent-terminal kill -s name` | Terminate a session. |
-| `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves, and the new image rebuilds each pane's in-memory scrollback ring from the on-disk log, so history stays scrollable in a client after the reload (the ring's most recent 10,000 lines; `history` still reads the full log). |
+| `agent-terminal reload` | Re-exec the daemon in place to pick up a new binary. Sessions, screens and scrollback survive; the pid does not change. Attached clients reconnect themselves, and the new image rebuilds each pane's in-memory scrollback ring from the on-disk log, so history stays scrollable in a client after the reload — and ranges older than the ring are seeked out of the log, so the depth a client can page back to is the whole log either way. |
 | `agent-terminal version` | Client build (git hash) plus the running daemon's pid, restart generation, and whether it supports panes. Works with no daemon (`daemon: not running`). |
 
 A session name becomes a directory under `~/.agent-terminal/sessions/`, so it
@@ -256,8 +256,12 @@ agent-terminal new -s work -- claude
 
 A desktop client lives in [`app/tauri`](app/tauri) — Tauri + xterm.js over the
 same Unix socket, no network listener added. On attach it backfills the
-daemon-side history (up to the ring's 10 000 lines), so the mouse wheel
-scrolls back through output from before the GUI ever connected. ⌘/Ctrl `+`
+daemon-side history — up to 25,000 lines, from the in-memory ring and, below
+it, seeked out of the on-disk log — so the mouse wheel scrolls back through
+output from before the GUI ever connected. The cap is a client-side memory
+budget, not the daemon's limit: xterm.js stores 12 bytes per cell, so 25,000
+lines is ~37 MB per tab at 124 columns, and it is paid at attach because
+xterm cannot prepend to its buffer. ⌘/Ctrl `+`
 `−` `0` zoom the glyphs without reflowing the session's grid; the window
 never resizes a session someone else created — the toolbar's ⤢ button
 (or the hint that labels a large letterbox, or a window too small for the
@@ -394,6 +398,16 @@ The log survives daemon crashes — recovery truncates at the first torn
 record — and `history` reads it directly, no daemon required. Records
 store rendered ANSI text, so even a raw `less -R scrollback.log` is
 legible.
+
+A client asking for lines the ring no longer holds is served from the log
+rather than refused: each generation carries a sparse index of one file
+offset per 512 records, built during the scan the daemon already makes when
+it opens a session, so a request seeks to the nearest indexed record and
+sweeps at most 511 forward instead of reading the file from the start. That
+matters because the daemon is a single `poll` loop on a 20 ms tick — one
+request costs a bounded read (~285 KB measured) instead of up to 32 MiB. The
+index costs 8 bytes per entry, ~5 KB per pane at the measured 190 bytes per
+record.
 
 When a session ends, the still-visible screen is flushed to the log as
 well, so a short crash message that never scrolled off is still
@@ -533,14 +547,15 @@ against a wedged daemon. See
 
 Three layers, all green on `main`:
 
-- **Unit**: 6,541 checks across 9 suites (VT parser byte-at-a-time, protocol
+- **Unit**: 13,567 checks across 9 suites (VT parser byte-at-a-time, protocol
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 31 end-to-end scripts covering the failure modes this tool
+- **Integration**: 32 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving *and* with the scrollback a wire-only client can still read back
-  (a filesystem-reading test cannot fail for that one), pane splits /
+  (a filesystem-reading test cannot fail for that one), a page of history
+  from below the 10,000-line ring served out of the log, pane splits /
   directional navigation / zoom driven over the
   wire, a 100 MB memory-bound soak, malformed handoff state files,
   path-traversal probes, close races, honest error reporting, the

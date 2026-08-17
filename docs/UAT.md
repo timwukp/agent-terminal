@@ -157,7 +157,8 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-33 | a spoofed session name cannot lie in the chrome | with a **pre-#81 daemon** running (the released v0.1.0 accepts these names; after #81 the name cannot be created, so use an older daemon or an existing session directory), create `proj<U+202E>gol.hs` and `de<U+200B>ploy` — e.g. `agent-terminal new -s "$(printf 'proj\342\200\256gol.hs')" -- sleep 600` — then in the GUI read the sidebar rows, right-click one, and let a turn finish with the window in the background | the row reads `projgol.hs`, the second reads `de<U+FFFD>ploy` and is visibly wider than a real `deploy` row; the kill prompt reads `Kill projgol.hs (pid N)? Its child process ends.` left to right and the Kill button ends that session; the OS notification's title reads `projgol.hs — finished` and the window title (⌘-Tab) still ends in `— agent-terminal`; the notification BODY is whatever the program printed, unchanged — including any reordering it chose |
 | GUI-34 | a window smaller than the session is honest about it | attach to a session bigger than the window can show at 1:1 (`agent-terminal ls` for its grid; a CLI-made 111×54 needs ~870×810 px of terminal at the measured 7.825×15 px cell, so exact numbers depend on the font the engine resolves), then shrink the window until part of the session is out of view: read the hint, scroll both ways, drag-select a word near the bottom-right and press ⌘C, then run `vim` in that session and click a word in the lower half | text is the **same size** as before the window shrank (never shrunk to fit); the view opens at the **bottom** where the prompt is, scrolls to reach the rest, and a dashed hint says *"scroll to see it all — session is 111×54 · ⤢ fit to window"*; the selection covers exactly the cells the pointer crossed and ⌘C puts them on the clipboard; vim's cursor lands on the word actually clicked, not one up and to the left; ⤢ (or ⌘−) removes the clipping |
 | GUI-35 | the panels update without polling, and say so when they can't | open the **Usage** tab and leave it: watch a running Claude session's numbers move, then let the machine sit idle for a minute; switch to **Hooks** and back to Usage a few times quickly; with Usage open, `printf '%s\n' '{"bad":' >> ~/.claude/hooks/hooks.log` then switch to Hooks and watch the security card; finally quit and relaunch | Usage still tracks within ~2 s of a change and the counts stop moving when nothing is happening (no repaint flicker on an idle machine); rapid tab switching leaves both tabs live — each paints immediately on arrival rather than blanking for a tick, and neither ends up frozen; the security card notices the appended line and reports the chain broken; nothing in the panel ever silently stops updating — a stream that cannot start shows a red alert row with the reason, not a stale-looking panel |
-| GUI-36 | scroll-back survives a daemon `reload` | in a GUI-attached session print more than one screenful (`for i in $(seq 1 300); do echo "line-$i"; done`), scroll the GUI up and note the oldest line you can reach; then run `agent-terminal reload` from a shell OUTSIDE the GUI, wait for the GUI to reconnect, and scroll up again — do this against a session whose log is already large (`agent-terminal ls`, then `agent-terminal history -s NAME \| wc -l`) so the ring is full rather than short | the reconnected view scrolls back at least as far as the ring holds (the most recent 10,000 lines — `line-1` here), not to an empty scrollbar; the reload takes about as long as it did before (no multi-second stall on a session with a 20 MB log); `agent-terminal history -s NAME \| wc -l` is unchanged across the reload, and is larger than what the GUI can scroll — the GUI shows the ring, `history` shows the whole log. Before this fix the same steps produced a scrollbar with nothing above the current screen, which is how the bug was reported |
+| GUI-36 | scroll-back survives a daemon `reload` | in a GUI-attached session print more than one screenful (`for i in $(seq 1 300); do echo "line-$i"; done`), scroll the GUI up and note the oldest line you can reach; then run `agent-terminal reload` from a shell OUTSIDE the GUI, wait for the GUI to reconnect, and scroll up again — do this against a session whose log is already large (`agent-terminal ls`, then `agent-terminal history -s NAME \| wc -l`) so the ring is full rather than short | the reconnected view scrolls back at least as far as the client's 25,000-line backfill cap reaches (`line-1` here), not to an empty scrollbar; the reload takes about as long as it did before (no multi-second stall on a session with a 20 MB log); `agent-terminal history -s NAME \| wc -l` is unchanged across the reload — on a log longer than 25,000 lines it stays larger than what the GUI can scroll, because the cap is the client's memory budget, not the daemon's depth (GUI-37). Before this fix the same steps produced a scrollbar with nothing above the current screen, which is how the bug was reported |
+| GUI-37 | scroll-back reaches BELOW the daemon's in-memory ring | in a session whose log is longer than the 10,000-line ring (`agent-terminal history -s NAME \| wc -l` to confirm; `for i in $(seq 1 15000); do echo "deep-$i"; done` makes one), attach it in the GUI **fresh** (⌘Q and relaunch, so the tab backfills from scratch rather than from what xterm already held), then scroll to the very top and read the oldest line; repeat after `agent-terminal reload`, which rebuilds the ring from the log | the oldest reachable line is ~25,000 back — for a 15,000-line log that is `deep-1`, i.e. the top of the log, and not `deep-5001` where the ring's own oldest line sits; the attach does not visibly stall (each 1,000-line page is a bounded seek + sweep, not a 32 MiB read), and the same depth is reachable after the reload, when the ring's index was rebuilt by the open-time scan rather than by live pushes. Before this fix the daemon announced the whole log's line count on the snapshot and then answered any request below the ring with the ring's oldest page instead — the scrollbar stopped 10,000 lines back with 18 MB of history still on disk |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -943,6 +944,90 @@ WebKit-independent (both engines implement the same `getBoundingClientRect` sema
 defect was in *our* choice of denominator), but the eyeball items — that the hint reads well,
 that the pane outlines clip at the window edge, that scrolling feels right with the wheel
 already claimed by scrollback — are GUI-15 and GUI-34, both human.
+
+## Scrollback round 9 (2026-08-17): the half of the report that was still broken
+
+The user's report was *"I scrolled up in the GUI and could not see many earlier turns —
+was the session restarted, is it a bug, was the session's memory wiped?"* #85 fixed the
+half where a daemon `reload` left the in-memory ring **empty** (GUI-36). This round is the
+other half, and it was never a restart or a wipe: **the history was on disk the whole time
+and the daemon would not serve it.**
+
+**What the defect was.** The attach snapshot advertises `sb_total_lines()` — the whole log,
+93,374 lines / 18.1 MB for this machine's `claude` session — but `MSG_SCROLLBACK_REQ` was
+answered out of the 10,000-line in-memory ring only. A request for anything older did not
+fail: `sb_fetch` clamped it up to the ring's oldest line and returned a full, well-formed
+1,000-line page. The client had no way to tell that page from the one it asked for, so the
+scrollbar simply ended ~10,000 lines back, with correct-looking content right up to the
+edge. Announcing a range and then substituting a different one is worse than refusing it.
+
+**The fix, and why it is bounded.** Each generation now carries a sparse index — one file
+offset per `SB_INDEX_STEP` (512) records — accumulated during the scan the daemon *already*
+performs when it opens a pane, so it costs no extra I/O and 8 bytes per entry (~5 KB per
+pane at the measured 189.9 bytes per record; 2.08 MB across a 384-pane worst case). A
+request seeks to the nearest indexed record and sweeps at most 511 forward. That bound is
+the whole safety argument: the daemon is a single-threaded `poll` loop on a 20 ms composite
+tick, so one deep request must cost ~285 KB of reading, not up to 32 MiB. If an offset does
+not name a real record boundary the `rec_len`+CRC check rejects it and the code falls back
+to sweeping the generation from 0 — correct, just slow.
+
+**Why the tests had to count bytes, not lines.** That honest fallback is also what makes a
+broken index *invisible*: with the index destroyed, every content assertion still passes,
+because sweeping the whole file arrives at exactly the right lines. So `sb_fetch_stats`
+exposes work-done counters (`disk_bytes_read`, `disk_recs_swept`) and the tests assert them
+as exact arithmetic on the constant — `swept == start_seq % SB_INDEX_STEP` (488 for the
+case used), bytes below half the log — plus a fetch at exactly the ring's oldest line that
+must move **neither** counter. Each fixture line's text is its own sequence number
+(`D%04llu`), so a content check is simultaneously an offset check.
+
+**What mutation testing found that review did not.** M3 (index offsets stored one byte
+past the record) initially **survived**, and M1 killed the wrong tests. Cause: the index has
+**two producers** — `sb_push_line` for live output and `scan_log` at open time — and the
+first three tests only ever exercised the live one, while the case the feature exists for is
+a GUI scrolling deep *after a restart or `reload`*, which is served entirely by the
+scan-built index. That is a coverage gap in the shape of a passing suite. Fixed by splitting
+those tests into helpers run twice, live and then after reopening the scrollback.
+
+**Two bugs the tests caught during implementation.** Every disk-served fetch returned zero
+lines, because the index is gated on `have`, which only `scan_log` set — so a scrollback
+that was *created* rather than resumed indexed everything into an index the fetch path
+refused to open. And a request past a generation's end swept the generation twice; the
+retry now distinguishes "the index offset was bad" (nothing swept yet → rewind) from
+"end of generation" (already swept → stop).
+
+**Client side.** `FETCH_MAX` was 10,000 because that used to be all the daemon could serve.
+It is now purely a client memory budget, so the number is the decision: xterm stores a line
+as 3 words per cell = 12 B/cell, i.e. 1,488 B/line at 124 columns, so **25,000 lines is
+37.2 MB per tab** (46.5 MB at 155 columns) and 100,000 would be 148.8 MB. The cost is paid
+**eagerly at attach**, because xterm cannot prepend to its buffer — which is also why
+deeper-on-demand paging needs a different mechanism and is recorded as a follow-up rather
+than claimed. xterm's own `scrollback` is now derived (`Math.max(50000, FETCH_MAX)`) instead
+of asserted; at 10,000 it had been sized to the *daemon's* ring, so backfill and live output
+were competing for the same slots.
+
+**Numbers.** Unit: **13,567 checks across 9 suites** (6,541 before — the new
+`test_scrollback.c` cases assert every line of multiple 1,000-line pages), 0 failures under
+ASan+UBSan. Integration: **32 scripts** (31 before), all passing, including the new
+`test_deep_scrollback.sh` — 11,000 real lines through a real PTY against a daemon at its
+**default** ring size, because a smaller fixture cannot fail for this bug; it runs in ~1.5 s
+and was confirmed 5/5 stable. Frontend: 256 tests across 28 files (242/27 before), `npx tsc
+--noEmit` clean, `cargo test --workspace` + clippy + `cargo fmt --check` clean. Mutation:
+**10/10 killed** (7 in the C index, 3 in the client pager) with the no-mutant control green
+before *and* after restore.
+
+**Vacuous-test check.** With `server.c` reverted to the old `sb_fetch` call, the integration
+test failed twice with exactly the predicted signature — `first_seq=977` (= 10,977 − 10,000,
+the ring's oldest line) for a request that asked for seq 0 — and passed again once restored.
+The assertion that separates fixed from unfixed is that **first seq**, not the line count:
+the count was always 1,000.
+
+**Honest limits.** Everything above is machine-measured. What a human still has to confirm
+is the thing the user actually reported — that scrolling to the top of a real `claude` tab
+in a relaunched GUI reaches the start of the conversation — which is **GUI-37**. Two
+instrument notes worth keeping: the readiness probe cannot stay attached through an 11,000-line
+burst (a wire client falls behind the 20 ms tick, overflows its out-ring and is dropped by the
+daemon — seen as 9,426 or 10,474 of 10,977 on 2 of 3 runs), and `grep -q .` does not match an
+empty file, so a `touch`-based marker silently burns the whole timeout instead of signalling.
 
 ## Reproducing this UAT
 
