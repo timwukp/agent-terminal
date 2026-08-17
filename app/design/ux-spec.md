@@ -17,7 +17,11 @@ One window, three regions:
 
 ## Sidebar (session dashboard)
 
-- Backed by `MSG_LIST_SESSIONS2` polled every 2 s on the control connection.
+- Backed by `MSG_LIST_SESSIONS2` on the control connection, asked for when
+  the daemon pushes `MSG_SESSIONS_CHANGED` (0x39) and otherwise polled every
+  2 s. The poll is the behaviour for every case push cannot cover — a daemon
+  without `SERVER_CAP_SESSION_EVENTS`, no daemon yet, a dropped watcher — so
+  the list is never left waiting on a notification that will not come.
 - Per session: name, `npanes` badge (`2⧉`), zoom marker, attached-client
   count, child pid. Dead entries never appear (daemon contract: finished
   sessions vanish from the list; `history` recovers their output).

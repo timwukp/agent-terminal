@@ -279,7 +279,8 @@ cd src-tauri && cargo build      # ./target/debug/agent-terminal-gui
 policy 保留了那個 scheme。
 
 目前可用的功能:側邊欄列出活的 session,含窗格數、zoom 標記與客戶端數量
-(與 `ls` 同一份資料,輪詢取得);點擊即 attach 並渲染;一鍵範本建立新的
+(與 `ls` 同一份資料,由 daemon 在 session 表變動時主動通知後更新;遇到還不會
+通知的舊 daemon 則每 2 秒輪詢);點擊即 attach 並渲染;一鍵範本建立新的
 Claude 或 shell session;結束 session(右鍵,並且會先詢問——詢問的視窗是 app
 自己畫的,因為平台的 `confirm()` 對話框在這個 webview 裡是死的按鈕,所以這裡
 唯一的破壞性操作不依賴它);鍵盤輸入;在分割中點擊切換焦點窗格;
@@ -476,11 +477,13 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
   違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
   環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
   下運行。
-- **整合測試**:32 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
+- **整合測試**:33 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
   `kill -9` 後 reattach、daemon reload 且子行程存活、daemon reload 後只走協定
   的客戶端仍能讀回 scrollback(讀檔案的測試對這個缺陷不可能紅)、比 10,000 行
   ring 更舊的一頁歷史從 log 中提供、經協定驅動的窗格分割
-  / 方向導航 / 縮放、100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
+  / 方向導航 / 縮放、session 表變動主動推送給並未 attach 到該 session 的客戶端
+  (受能力位元把關,且會合併,所以一連串變動只發一次通知)、
+  100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
   探測、關閉競態、誠實的錯誤回報、安全稽核輪次找出的同 uid 濫用案例
   (被繼承的 scrollback fd、超大幾何、連上後從不表明身分的連線),以及
   可能留下舊 daemon 應答 socket 的安裝路徑。每個 PR

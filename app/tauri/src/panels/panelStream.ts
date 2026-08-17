@@ -4,10 +4,13 @@
 // sends a frame only when a snapshot changed; see src-tauri/src/panels.rs
 // for why it is still a timer over there and not a filesystem watcher.
 //
-// The sidebar keeps polling. Its data is a daemon round-trip and
-// MSG_SESSION_LIST exists only as a REPLY to MSG_LIST_SESSIONS
-// (src/common/proto.h) — there is no unsolicited push to ride, so moving
-// it needs a new protocol message, not a new frontend module.
+// The sidebar is NOT one of these kinds and never will be: its data is a
+// daemon round-trip, not a file, so it rides its own channel over a
+// persistent daemon connection (sidebar/api.ts watchSessions,
+// src-tauri/src/control.rs). That took the new protocol message this
+// comment used to say it needed — MSG_SESSIONS_CHANGED — and the sidebar
+// still falls back to polling when a daemon does not offer it, which is a
+// state no filesystem panel has.
 //
 // The stream lives behind a StreamHost so tests drive it without mocking
 // Tauri, the same reason UsageApi/HooksApi/ControlApi are interfaces.

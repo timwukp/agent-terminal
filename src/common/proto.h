@@ -89,14 +89,44 @@ enum proto_type {
      * this is NOT sent then (it would ring twice). ≥2 panes only, and only to
      * clients that set CLIENT_CAP_PANES. */
     MSG_PANE_BELL      = 0x38, /* D→C: u8 pane_id */
+    /* "The session table changed — ask again." Broadcast to every
+     * HELLO-completed client that set CLIENT_CAP_SESSION_EVENTS, attached or
+     * not. That delivery set is the whole point and it is NOT the one
+     * MSG_PANE_BELL uses: a bell goes to a session's own clients
+     * (session.c walks s->clients[]), while a client listing sessions cares
+     * about ones it is not attached to — a GUI sidebar is attached to at most
+     * one session and lists all of them.
+     *
+     * Deliberately EMPTY. Carrying the list would duplicate
+     * MSG_SESSION_LIST2's entry encoding in a second message that then has to
+     * be versioned in lockstep with it; an empty "look again" costs one
+     * MSG_LIST_SESSIONS2 round trip per CHANGE instead of one per poll
+     * interval per client, which is the whole saving. It also means the
+     * notification is idempotent: two of them are as harmless as one, so no
+     * path here has to be exactly-once.
+     *
+     * Coalesced on the daemon's 20 ms tick rather than emitted from each
+     * mutator, so a burst (a reload, a script killing five sessions) is one
+     * notification, and no fan-out ever runs from inside a session mutator. */
+    MSG_SESSIONS_CHANGED = 0x39, /* D→C: empty */
     MSG_PING           = 0x40, /* both: u64 nonce */
     MSG_PONG           = 0x41, /* both: u64 nonce */
 };
 
 /* MSG_HELLO u16 flags (always sent, 0 before panes existed). */
 #define CLIENT_CAP_PANES 0x0001
+/* Send this client MSG_SESSIONS_CHANGED. It needs its own bit rather than
+ * riding CLIENT_CAP_PANES: a client that set only 0x0001 was built before
+ * 0x39 existed, and while framing makes an unknown type safe to skip, sending
+ * one to a peer that never asked for it is how a capability negotiation stops
+ * meaning anything. */
+#define CLIENT_CAP_SESSION_EVENTS 0x0002
 /* MSG_HELLO_OK grows u16 server_flags (additive append at offset 10). */
 #define SERVER_CAP_PANES 0x0001
+/* Advertised so a capable client can tell "this daemon will notify me" from
+ * "this daemon is old and my sidebar must keep polling". Without it the two
+ * are the same observation — silence. */
+#define SERVER_CAP_SESSION_EVENTS 0x0002
 
 enum proto_err {
     ERR_VERSION      = 1,

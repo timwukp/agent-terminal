@@ -318,7 +318,9 @@ oddly specific: rendering, the sidebar and session switching all work, and the
 keyboard is dead. A unit test asserts the shipped policy keeps that scheme.
 
 What works today: a sidebar listing live sessions with pane count, zoom badge
-and client count (the same data as `ls`, polled); click to attach and render;
+and client count (the same data as `ls`, refreshed when the daemon says the
+session table changed and polled every 2 s against a daemon too old to say
+so); click to attach and render;
 one-click templates for a new Claude or shell session; kill a session (right-click,
 asked first by a prompt the app draws itself — a platform `confirm()` dialog is a
 dead button in this webview, so the only destructive action here does not depend
@@ -551,13 +553,15 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 32 end-to-end scripts covering the failure modes this tool
+- **Integration**: 33 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving *and* with the scrollback a wire-only client can still read back
   (a filesystem-reading test cannot fail for that one), a page of history
   from below the 10,000-line ring served out of the log, pane splits /
   directional navigation / zoom driven over the
-  wire, a 100 MB memory-bound soak, malformed handoff state files,
+  wire, session-table changes pushed to a client that is not attached to the
+  session that changed (capability-gated, and coalesced so a burst is one
+  notification), a 100 MB memory-bound soak, malformed handoff state files,
   path-traversal probes, close races, honest error reporting, the
   same-uid abuse cases from the security rounds (inherited scrollback fds,
   oversized geometry, connections that never identify themselves), and the

@@ -424,6 +424,16 @@ Load-bearing rules, each pinned by a test:
   entries carry a u16 length prefix, so unknown tail fields skip cleanly
   and future appends stay additive. The client uses it when `server_flags`
   says panes exist, and falls back to v1 otherwise.
+- **`MSG_SESSIONS_CHANGED`** (0x39, empty payload) means "the session table
+  changed, ask again" — the daemon compares the re-encoded LIST2 **bytes**
+  against the last set it sent on each 20 ms tick, so every producer that
+  mutates the table is covered by one gate and appended LIST2 fields are
+  covered for free. It is the one D→C message with a **global** delivery
+  set: every `CLIENT_CAP_SESSION_EVENTS` client gets it whether attached or
+  not, because a session list is not a view of one session. Empty and
+  idempotent by design, which is what lets a burst coalesce onto one tick;
+  gate on `SERVER_CAP_SESSION_EVENTS` (0x0002), since an old daemon and an
+  idle new one both look like silence.
 
 ## 5. Working on the code
 

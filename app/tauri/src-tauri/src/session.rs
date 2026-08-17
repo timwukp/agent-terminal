@@ -219,9 +219,11 @@ pub async fn attach_session(
                     send_ctrl(&chan, &CtrlEvent::Closed { error });
                     return;
                 }
-                // Sidebar traffic (session lists) rides the control
-                // connection, not the attach one; pong unused in v1.
-                Event::SessionList(_) | Event::Pong(_) => {}
+                // Sidebar traffic (session lists, table-change pushes) rides
+                // the control connection, not the attach one — this HELLO
+                // carries only CLIENT_CAP_PANES, so the daemon never sends
+                // 0x39 here; pong unused in v1.
+                Event::SessionList(_) | Event::SessionsChanged | Event::Pong(_) => {}
             }
         }
     });

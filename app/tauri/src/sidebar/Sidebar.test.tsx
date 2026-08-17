@@ -11,8 +11,8 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, screen, cleanup, act } from "@testing-library/react";
-import Sidebar from "./Sidebar";
-import type { ControlApi, SessionRow, Template } from "./api";
+import Sidebar, { POLL_MS } from "./Sidebar";
+import type { ControlApi, SessionRow, SessionWatch, Template } from "./api";
 
 const row = (name: string, pid: number): SessionRow => ({
   name,
@@ -166,6 +166,91 @@ describe("Sidebar kill confirmation", () => {
 
     expect(screen.getAllByRole("group", { name: /confirm killing/i }).length).toBe(1);
     expect(screen.getByRole("group", { name: /confirm killing session logs/i })).toBeTruthy();
+  });
+});
+
+// The daemon can now say "the session table changed" (MSG_SESSIONS_CHANGED),
+// which is what lets the 2 s poll stop. Both halves are load-bearing: the
+// push must actually replace the poll (or nothing was saved), and the poll
+// must survive every state the push cannot cover (or a session list simply
+// stops updating against an older daemon).
+describe("Sidebar session-table push", () => {
+  /** An api whose watcher this test drives by hand. */
+  function watchable(rows: SessionRow[]) {
+    const { api, state } = mockApi(rows);
+    const held: { watch: SessionWatch | null; stops: number } = { watch: null, stops: 0 };
+    api.watchSessions = (w) => {
+      held.watch = w;
+      return () => {
+        held.stops++;
+        held.watch = null;
+      };
+    };
+    return { api, state, held };
+  }
+
+  it("stops polling while push is live, and re-lists when told to", async () => {
+    const { api, state, held } = watchable([row("work", 4242)]);
+    await mount(api);
+    const afterMount = vi.mocked(api.listSessions).mock.calls.length;
+
+    await act(async () => held.watch?.onPush(true));
+    // Going live is itself a re-list: the push carries no data, so the
+    // table may have changed during the connect.
+    const afterPush = vi.mocked(api.listSessions).mock.calls.length;
+    expect(afterPush).toBeGreaterThan(afterMount);
+
+    // Five poll intervals with push live must cost nothing.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS * 5);
+    });
+    expect(vi.mocked(api.listSessions).mock.calls.length).toBe(afterPush);
+
+    // ...and the notification is what brings a new session in.
+    state.rows = [row("work", 4242), row("built", 4243)];
+    await act(async () => held.watch?.onChanged());
+    expect(screen.getByText("built")).toBeTruthy();
+  });
+
+  it("resumes polling when push goes away", async () => {
+    // The reload path: the daemon disconnects every client, so a live
+    // watcher becomes a dead one and the sidebar must not go quiet.
+    const { api, state, held } = watchable([row("work", 4242)]);
+    await mount(api);
+    await act(async () => held.watch?.onPush(true));
+    await act(async () => held.watch?.onPush(false));
+
+    state.rows = [row("work", 4242), row("later", 4243)];
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS);
+    });
+    expect(screen.getByText("later")).toBeTruthy();
+  });
+
+  it("polls when the api has no watcher at all", async () => {
+    // The mutation this kills: making the poll conditional in a way that
+    // skips it unconditionally. An old daemon, or any build where the
+    // channel cannot be created, lands here — and with no poll the list is
+    // frozen at whatever the first render saw, which is the empty state.
+    const { api, state } = mockApi([]);
+    expect(api.watchSessions).toBeUndefined();
+    await mount(api);
+    expect(screen.getByText("no sessions")).toBeTruthy();
+
+    state.rows = [row("appeared", 4242)];
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS);
+    });
+    expect(screen.getByText("appeared")).toBeTruthy();
+  });
+
+  it("stops the watcher on unmount", async () => {
+    const { api, held } = watchable([row("work", 4242)]);
+    const { unmount } = await mount(api);
+    expect(held.watch).not.toBeNull();
+    unmount();
+    expect(held.stops).toBe(1);
+    expect(held.watch).toBeNull();
   });
 });
 

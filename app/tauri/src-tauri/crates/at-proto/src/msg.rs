@@ -37,6 +37,12 @@ pub enum MsgType {
     PaneExited = 0x36,
     SessionList2 = 0x37,
     PaneBell = 0x38,
+    /// Empty by contract, so there is no parser for it below and there must
+    /// never be one: it means "the session table changed, ask again", and a
+    /// client that grew a dependency on bytes inside it would be depending on
+    /// bytes the daemon does not send. Sent only to clients that set
+    /// `CLIENT_CAP_SESSION_EVENTS`, attached or not.
+    SessionsChanged = 0x39,
     Ping = 0x40,
     Pong = 0x41,
 }
