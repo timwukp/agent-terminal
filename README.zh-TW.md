@@ -477,7 +477,7 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
   違規、環形緩衝區、scrollback CRC 復原、窗格版面幾何(含狀態檔可能帶進來的
   環狀樹)、輸入按鍵掃描器、翻頁器、路徑驗證、事件迴圈)— 在 ASan+UBSan
   下運行。
-- **整合測試**:33 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
+- **整合測試**:34 個端到端腳本,覆蓋本工具存在意義上的失效模式 — 客戶端
   `kill -9` 後 reattach、daemon reload 且子行程存活、daemon reload 後只走協定
   的客戶端仍能讀回 scrollback(讀檔案的測試對這個缺陷不可能紅)、比 10,000 行
   ring 更舊的一頁歷史從 log 中提供、經協定驅動的窗格分割
@@ -485,7 +485,8 @@ session 直接消失,而非顯示「dead」)。最後的螢幕已刷入 scrollba
   (受能力位元把關,且會合併,所以一連串變動只發一次通知)、
   100 MB 記憶體上限 soak、畸形 handoff 狀態檔、路徑穿越
   探測、關閉競態、誠實的錯誤回報、安全稽核輪次找出的同 uid 濫用案例
-  (被繼承的 scrollback fd、超大幾何、連上後從不表明身分的連線),以及
+  (被繼承的 scrollback fd、超大幾何、連上後從不表明身分的連線)、
+  daemon 中可重用的 session 槽與 client 槽之間兩個方向的過期指標,以及
   可能留下舊 daemon 應答 socket 的安裝路徑。每個 PR
   在 macOS 與 Linux 的 CI 上運行。
 - **真實 Claude Code session 的終端使用者驗收測試(UAT)** — 真實工作負載,

@@ -553,7 +553,7 @@ Three layers, all green on `main`:
   round-trips and violations, ring, scrollback CRC recovery, pane layout
   geometry including cyclic trees a state file could carry, input-chord
   scanner, pager, path validation, event loop) — run under ASan+UBSan.
-- **Integration**: 33 end-to-end scripts covering the failure modes this tool
+- **Integration**: 34 end-to-end scripts covering the failure modes this tool
   exists for — client `kill -9` + reattach, daemon reload with children
   surviving *and* with the scrollback a wire-only client can still read back
   (a filesystem-reading test cannot fail for that one), a page of history
@@ -564,7 +564,9 @@ Three layers, all green on `main`:
   notification), a 100 MB memory-bound soak, malformed handoff state files,
   path-traversal probes, close races, honest error reporting, the
   same-uid abuse cases from the security rounds (inherited scrollback fds,
-  oversized geometry, connections that never identify themselves), and the
+  oversized geometry, connections that never identify themselves), both
+  directions of a stale pointer between the daemon's reused session and client
+  slots, and the
   install path that could otherwise leave an older daemon answering the
   socket. Run on macOS and Linux in CI on every PR.
 - **End-user UAT with a real Claude Code session** — the actual workload,

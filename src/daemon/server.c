@@ -348,6 +348,16 @@ static void handle_new(client *c, const uint8_t *p, size_t len) {
         client_err(c, errno == EEXIST ? ERR_NAME_TAKEN : ERR_INTERNAL, strerror(errno));
         return;
     }
+    /* Leave the old session the way handle_attach does. Without this the
+     * previous session keeps this client in its clients[] forever: g_clients
+     * is a static table of reused slots, so once this connection closes the
+     * stale entry names whoever lands in that slot next — a client that never
+     * asked for the session receives its OUTPUT and votes in its
+     * smallest-attached-client geometry, and `ls` counts it. Only reachable
+     * from a connection that creates twice (or attaches, then creates); both
+     * shipped clients create once per connection, which is why it went
+     * unnoticed. */
+    if (c->attached && c->attached != s) session_detach(c->attached, c);
     c->attached = s;
     session_attach(s, c, cols, rows);
 }
