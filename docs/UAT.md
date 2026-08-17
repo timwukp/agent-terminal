@@ -160,6 +160,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-36 | scroll-back survives a daemon `reload` | in a GUI-attached session print more than one screenful (`for i in $(seq 1 300); do echo "line-$i"; done`), scroll the GUI up and note the oldest line you can reach; then run `agent-terminal reload` from a shell OUTSIDE the GUI, wait for the GUI to reconnect, and scroll up again — do this against a session whose log is already large (`agent-terminal ls`, then `agent-terminal history -s NAME \| wc -l`) so the ring is full rather than short | the reconnected view scrolls back at least as far as the client's 25,000-line backfill cap reaches (`line-1` here), not to an empty scrollbar; the reload takes about as long as it did before (no multi-second stall on a session with a 20 MB log); `agent-terminal history -s NAME \| wc -l` is unchanged across the reload — on a log longer than 25,000 lines it stays larger than what the GUI can scroll, because the cap is the client's memory budget, not the daemon's depth (GUI-37). Before this fix the same steps produced a scrollbar with nothing above the current screen, which is how the bug was reported |
 | GUI-37 | scroll-back reaches BELOW the daemon's in-memory ring | in a session whose log is longer than the 10,000-line ring (`agent-terminal history -s NAME \| wc -l` to confirm; `for i in $(seq 1 15000); do echo "deep-$i"; done` makes one), attach it in the GUI **fresh** (⌘Q and relaunch, so the tab backfills from scratch rather than from what xterm already held), then scroll to the very top and read the oldest line; repeat after `agent-terminal reload`, which rebuilds the ring from the log | the oldest reachable line is ~25,000 back — for a 15,000-line log that is `deep-1`, i.e. the top of the log, and not `deep-5001` where the ring's own oldest line sits; the attach does not visibly stall (each 1,000-line page is a bounded seek + sweep, not a 32 MiB read), and the same depth is reachable after the reload, when the ring's index was rebuilt by the open-time scan rather than by live pushes. Before this fix the daemon announced the whole log's line count on the snapshot and then answered any request below the ring with the ring's oldest page instead — the scrollbar stopped 10,000 lines back with 18 MB of history still on disk |
 | GUI-38 | the sidebar hears about a change instead of asking every 2 s | with the GUI open on the sidebar, create a session from a **terminal** (`agent-terminal new -s uat-push -- sleep 600 < /dev/null`) and time how long the row takes to appear; then split it from a CLI attach (`Ctrl-\ %`) and watch its `⧉` badge, `agent-terminal kill -s uat-push` and watch the row go; then run three creates back to back in one command line and watch the sidebar settle; finally run the GUI against a **v0.1.0 daemon** (`PREFIX=/tmp/old make install` from the release tag, or just check out the tag and run its `agent-terminald`) and repeat the first step | against a current daemon each change shows up in well under a second — noticeably faster than the old fixed 2 s, and the three-create burst lands as one settled list rather than three staggered repaints; against the v0.1.0 daemon the row still appears, just within ~2 s, because the sidebar falls back to polling when `SERVER_CAP_SESSION_EVENTS` is absent. Kill the daemon under the GUI (`kill <pid from agent-terminal version>`) and start it again: the sidebar recovers on its own within a few seconds without a relaunch. Nothing here needs the GUI window focused |
+| GUI-39 | the top of the buffer says what is behind it, and can show it | in a session whose log is longer than the 25,000-line backfill cap (`agent-terminal history -s NAME \| wc -l`; the `claude` session measured here has 93,374 lines / 18.1 MB), attach it in the GUI and **scroll up immediately, while history is still loading** (25 pages, so there is a visible window on a real log), then scroll to the very top once it settles: read the pill and hover it, then click it and page around with ⤒ / ↑ / ↓ / ⤓, Home, End, PageUp/PageDown and the arrows, keep scrolling past the top edge and past the bottom edge, watch RSS (`ps -o rss= -p <gui pid>`) while paging, press Escape, then **narrow the window by a third and press ⤢ so the session is fewer columns than the history was written at**, open history again, then type into the terminal | no pill offers itself while history is still loading (opening a viewer then would take a page the live buffer was waiting for, and the buffer would end up holding 1,000 lines instead of 25,000), and it appears on its own when loading finishes without needing another scroll; the pill reads *"↑ 68,374 earlier lines — open history"* with the exact arithmetic (total − what the buffer holds) and its tooltip says nothing was cleared and the session was not restarted — the answer to how the bug was reported; the viewer opens on the 4,000 lines immediately *older* than the buffer's oldest line, so no line is skipped and none repeats, and it then **stays there** — the position label must not move, and the lines must not reorder, until you act (xterm's own reset- and parse-time scroll events land on both edges of a window that has just opened; unguarded, one open walked the window to the start of the log and left it scrambled); the position label counts in the whole log (`1,001–5,000 of 93,374`); paging at either edge advances by 2,000 lines and the label follows; RSS rises by roughly 6 MB while it is open and comes back down after Escape (the window is bounded, not a second full backfill); after the narrower ⤢ the viewer still opens at the join rather than half a window above it (wrapped lines occupy two rows each, and the opening scroll counts rows, not lines); Escape returns focus to the live terminal and typing goes to the session, not the viewer — the viewer never accepts input, and the live view has not moved from where you left it |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -1149,6 +1150,219 @@ Mutation: 1/1 killed, control green before and after restore.
 
 **Nothing for a human to check.** No shipped client can reach the path, so there is no GUI row
 for this round; the wire script is the whole acceptance.
+
+## Scrollback round 12 (2026-08-17): the 68,374 lines the cap leaves behind
+
+Rounds 9 and 10 fixed the two ways the GUI *lost* history it had already reached. This round
+addresses what is left of the original report — **"滾上去,沒看到之前很多次對話的信息"** — after
+both of those fixes: the client's 25,000-line backfill cap is a real ceiling, and on the session
+that produced the report it sits **68,374 lines below the top of the log** (93,374 lines /
+18.1 MB, measured with `agent-terminal history -s … | wc -l`). Nothing was cleared and nothing
+restarted; the GUI simply never said so, and a scrollbar that stops is indistinguishable from a
+session that was reset.
+
+**Why the cap is not the thing to raise.** xterm.js stores every cell as three `Uint32Array`
+words whether or not the line has content, so a line costs `12 × cols` bytes — 1,488 B at the
+124 columns this session runs, i.e. **37.2 MB per tab** for the current 25,000, and 139 MB if
+the cap were lifted to the whole log. Worse, it is paid **eagerly at attach**: xterm cannot
+prepend to its buffer, so history has to be written before the snapshot repaint or it lands in
+the wrong order. The cap is a memory budget, not a daemon limit.
+
+**What shipped instead.** A read-only second terminal showing a bounded **4,000-line window**
+(5.95 MB at 124 columns, freed when it closes), moved by symmetric reset-and-refetch, over the
+message pair that has served any depth since round 9's `sb_fetch_deep` — so this round adds
+**no protocol message, no daemon change and no Rust change**; it is entirely
+`app/tauri/src/terminal/`. It is a real VT emulator rather than a text list because the stored
+records *are* rendered ANSI — the same bytes `pager.c` hands a terminal in copy-mode.
+
+**The bug this round nearly shipped.** The viewer must abut the live buffer, and the obvious
+anchor — `sb_lines − 25000`, the floor the backfill *requested* — is wrong. Rotation moves the
+oldest seq the log still holds forward while a fetch is in flight, so the daemon answers from
+its own oldest and the backfill's first written line can be **newer** than what it asked for. A
+viewer anchored to the request would leave a gap between its last line and the live buffer's
+first and present the two as continuous — the same class of silent hole as the original report,
+introduced by the fix for it. `Backfill.oldestWritten()` reports the **served** seq, and the
+`deepHistory` rotation case pins it: a 93,374-line log whose backfill asked from 68,374 but was
+answered from 70,000 must open its window at `70000 − 4000`, not at `68374 − 4000`. Anchored on
+the request, the window's last 1,626 lines would repeat lines the live buffer already held and
+the 1,626 before 70,000 would be missing from both views.
+
+**And a second one, found by re-reading the diff rather than by a test.** The machine counts
+stored *lines*; xterm scrolls to *rows*, and those are the same number only while nothing wraps.
+A stored record is one screen row as wide as the grid was when it scrolled off
+(`vt_cb_scrollback` pushes `cols` cells), so history written at 155 columns occupies two rows in
+a viewer opened at 124 — and this GUI causes exactly that, because ⤢ and the fit hint resize the
+session. Anchoring the opening scroll on the line index put the join with the live buffer **half
+a window off screen** (measured in the new test: row 3,970 instead of 7,970), which reads as
+"the viewer opened in the wrong place". The mapping now asks xterm for what it already parsed —
+`isWrapped` per row — instead of re-deriving widths from bytes that carry SGR, which would mean
+a second VT parser in the GUI.
+
+**And a third, of a different kind: a number the GUI could not know.** If the backfill's first
+page comes back empty — rotation dropped everything it asked for, or the fetch stalled before a
+page landed — the client never learns where its own buffer begins, and the fallback made the pill
+claim the whole log was out of reach and the tooltip say *"holds the newest 0 lines"*. The second
+is false the moment live output scrolls into the buffer, and the first overstates by however much
+did. The pill now drops the count in that state and says the reach is **unknown**, keeping the
+one number that is known (the log's size) and the sentence the pill exists for. It still opens —
+on the newest window, which is the only honest place — because the reporter's complaint was
+missing history, and refusing to show any would answer it worse than showing it without a
+number.
+
+**A fourth, and the one worth generalizing: a tested feature that nothing called.**
+`HistoryView.setTotal` exists so a viewer open across a busy minute counts in the log as it grows,
+it is documented in two files, and `historyView.test.ts` covers it — but the overlay was handed
+the line count *captured when it opened*, a value that by construction never changes. So the
+prop's effect never fired: the position label kept saying `of 93,374` while the log had more, and
+`canLater` — which ⤓ and edge-paging are built on — stayed false at a ceiling that had moved. A
+unit test on the machine could not see this, because the machine did exactly what it was asked;
+the assertion had to be at the seam, on the rendered label. The general form: **a covered
+function proves the function works, not that anything calls it.**
+
+**A fifth: a comment that claimed an invariant the code did not enforce.** The scrollback route
+carried the note *"at most one of the two is ever waiting"*, and that was the whole argument for
+why one frame type can feed two consumers. It was false. `refreshDeeper()` never consulted the
+backfill's state, and `oldestWritten()` is non-null after **page 1 of 25** — so on a 93,374-line
+session the pill appears while 24 pages are still in flight, and the user is already at the top of
+the buffer, which is exactly where the pill lives. Opening it there leaves both machines waiting:
+the route asks the viewer first, so the viewer consumes a page the *backfill* requested (its
+`onPage` sees `loaded === 0` and anchors on whatever seq arrived), the backfill's stall timer
+fires 2 s later, and the live terminal paints 1,000 lines of history as though that were all the
+session had — the original bug, reproduced by the feature built to explain it. The fix is one
+gate, `Backfill.isLive()`, in `refreshDeeper`: the offer is withheld until the attach fetch is
+over, so the invariant the route depends on is now *created* somewhere rather than merely
+asserted. Deliberately **one** enforcement point, not two — a second check inside the route would
+be unreachable while this gate holds, and an unreachable guard is a branch no mutant can kill,
+which is worth less than the comment that names where the real one is.
+
+**A sixth, in the one control this feature offers when something goes wrong.** `HistoryView.retry()`
+cleared `stalled`, issued the request — and never emitted. Both flags it changes drive the
+overlay's red *"stalled — retry"* button, so clicking it left that button on screen for the whole
+3 s a page was in flight, and a second click was swallowed in silence by the `loading` guard: the
+only recovery affordance in the viewer reads as broken exactly when it is working. `seek()` had the
+emit and `retry()` was written as its short cousin, which is how the omission survived a test that
+did cover retry — the assertion was one line too late, after the page landed, where the state is
+correct again. The test now asserts the state *at the click*
+(`{ loading: true, stalled: false }`), which is the moment the user is looking at.
+
+**A seventh, and the worst of them: the viewer paged itself.** Reaching an edge moves the window
+— that is the gesture this feature exists for, since the user's report *is* "I kept scrolling up"
+— but xterm reaches both edges on its own, twice during a single open. `Terminal.reset()` fires
+exactly one `onScroll`, at `[0, 0]` (`CoreTerminal.reset` → `BufferService.reset`), and a
+re-anchor resets *before* it asks for anything, so the machine's `loading` guard is not yet
+armed: the top-edge branch called `earlier()`, which re-entered the seek that was still running,
+re-anchored half a window lower, and reset again. Independently, a page's lines are parsed on
+xterm's own queue (`WriteBuffer.write` → `setTimeout`), and every line that scrolls off fires
+`onScroll` with the viewport pinned to the bottom (`BufferService.scroll` assigns `ydisp = ybase`
+before firing) — so those events arrive *after* the last page cleared `loading`, onto a viewport
+`open()` deliberately parks at the **bottom** edge, because the line the user asked for is the one
+abutting the live buffer. Read as a gesture, that is `later()`.
+
+Measured against the real emulator — `@xterm/headless` 6.0.0, the same version as the app's
+`@xterm/xterm`, driving the unmodified machine with this overlay's wiring copied verbatim — one
+`open()` of the reporter's 93,374-line session produced **34 nested seeks and 54 page requests**,
+walked the window to the **start** of the log, and left seq **3,507 down to 1,999 on screen, out
+of order, with one contiguity break**. The user asks for the conversation just above the live
+buffer and is shown the oldest lines in the log, scrambled: the reported bug reproduced inside the
+feature built to explain it, for the second time this round. With the fix the same probe asks
+**4 times**, anchors at **68,374**, and shows 68,374→72,373 with **0 breaks**.
+
+The fix is one flag, `settled`: cleared before the reset that begins a move, set again inside the
+write callback that lands the machine's *own* scroll, after which every scroll event is one the
+user caused. One flag rather than a guard per edge, because the question both edges are really
+asking is *did the user do this?*
+
+**Why eleven passing cases said otherwise is the finding under the finding.** The mocked xterm
+parsed writes synchronously, never moved its viewport, and fired `onScroll` only when a test asked
+it to — so the events that cause this bug could not exist in it, and every claim about "an edge
+cannot re-trigger itself" rested on properties the double did not have. Given the two behaviours
+measured above (100 queued lines produce **0** scroll events before the drain and **71** after,
+all with `viewportY >= baseY`), **6 of the 11 existing cases turned red**. A double is a claim
+about the real thing, and an assertion is worth no more than the double's weakest property; the
+cheap way to check the claim is to drive the real artifact once, outside the suite, and then teach
+the fake only what was measured.
+
+**Verification.** The window machine (`historyView.ts`) is pure and tested apart from the DOM —
+17 cases covering both edges, the gap stop, rotation-following on the first page, the 3 s stall
+and its continue-from-`anchor+loaded` retry — the retry asserted at the click as well as after the
+page, since those are two different states and only the second was ever checked. The wiring is
+tested through a mocked xterm
+(`deepHistory.test.tsx`, 13 cases): the offer's arithmetic and its "not restarted" tooltip, whose
+two numbers are asserted as a complementary pair so they must add up to the log; no
+offer when the buffer holds the whole log; the rotation anchor above; that a page goes to the
+**viewer** and the live terminal receives nothing (both halves asserted — a router that fed both
+would pass on the first half alone); dispose-on-close; edge paging; the wrapped-row mapping; the
+unknown-boundary case below; that no offer appears while the attach fetch is still running, and
+that it appears — unprompted, without a second scroll — once the fetch completes; that a later
+snapshot's line count reaches the open viewer; that one `open()` asks for exactly one window's
+four pages and resets exactly **once** — the reset count is what separates "opened" from
+"walked", since four requests could also be four attempts at the same page; that the last page
+being parsed does not carry the viewer forward off the join, while the user's own scroll to that
+same edge still pages, so the gate is on *who caused the event* rather than on the edge; and
+that the arrow/page keys reach the viewer's scroll API rather than the session — with the
+overlay's focus asserted separately, because every key in that case is dispatched *at* the
+overlay and would pass with focus left on the live session. Its mocked xterm reports rows rather
+than lines (`isWrapped` per row), since a fake that returned one row per line would agree with
+the arithmetic the mapping exists to replace; it also parses on a queue, moves its viewport with
+the bottom, and fires the `[0, 0]` scroll `reset()` fires — each of those measured on the real
+6.0.0 first, because the seventh defect above lived precisely in the gap between the double and
+the emulator. Plus `Backfill.oldestWritten()` (2 cases,
+including the null a stalled fetch must report) and `unreachedHistory()` (5). Mutation: **15/15
+killed** — the five load-bearing decisions in the machine, the tooltip's derived pair, the
+overlay's focus, the row mapping (3,970 vs 7,970), the observed-boundary flag (whose mutant
+prints the invented `↑ 93,374 earlier lines` in the failure message), the live line count
+reaching the open viewer, the mid-fetch offer gate, `retry()`'s state emit, and all three halves
+of the `settled` gate — dropping the check (killed by 8 cases), not clearing the flag on reset,
+and never setting it, that last one the liveness mirror proving the gate did not simply switch
+edge-paging off (2 cases each) — each with a
+no-mutant control before and after a SHA-256-verified `cp` restore.
+
+Frontend suite: **30 files / 302 cases, 0 failures in 31–39 s** (three idle runs: 31.2 s and
+38.2 s at 300 cases, 35.8 s at 302 — a single wall-clock figure for a 30-worker suite is not
+reproducible enough to quote as
+one), and the same
+302 counted a second way — one file per vitest process, 30 processes, none of them reporting zero
+cases (a file that fails to boot subtracts silently from the whole-suite total, so the
+cross-check has to assert that every container is non-empty, not just that the sum matches). The
+reason two counts exist is worth
+writing down, because the wrong conclusion was available and convincing for most of a day: the
+first whole-suite attempts failed in scattered, varying places, which read as "this suite is
+flaky on this machine". It was not the machine either. **36 `while :; do :; done` shells left
+over from this round's own load experiments were still running**, at ~5 % CPU each, holding the
+14-core load average near 55 for two hours. They were orphaned (reparented to pid 1) because
+their cleanup was `SPIN=$(jobs -p); … kill $SPIN`, and `jobs -p` in a non-interactive `zsh -c`
+prints nothing — so the kill had no argument and reported success. Killing the 36 by pid took
+the load average from 55 to 8, and the suite went from 4 failures in 130 s to all passing in
+38.5 s with nothing in the tree changed (296 cases at that moment; the six added since are the
+review findings above).
+
+Two measurements from that period stay true and are the useful part: vitest's worker-start
+budget is a hardcoded 60 s (`START_TIMEOUT` in its pool runner, not reachable from config), and
+above roughly load 50 a jsdom worker does not boot inside it — **14 of 30 files** failed to
+start in one run, and **7 still did with `--maxWorkers=1 --fileParallelism=false`**, which is
+the opposite of what "reduce concurrency" is supposed to do. That load also stretches an
+ordinary render case from ~1.9 s to 18 s, which is what first looked like a failure in the new
+file; `testTimeout` was deliberately **not** raised a second time for it. `test_snapshot_large`
+failed there for the same reason and is not a regression: its 300×300 truecolor paint is 6.3 s
+of CPU that took **125.6 s of wall clock**, against a fixed 60 s deadline inside the test. On an
+idle machine it passes unpatched — 2,006,806 bytes delivered in parts. A deadline set 10× above
+the work it measures and still lost to load is measuring the wrong thing; replacing it with a
+progress-based one belongs in its own change. The rule the 36 spinners teach is
+the one rule 3 of this document already states for daemons, generalized: kill the pid you
+started, and capture it at the moment you start it — a cleanup that discovers its own targets
+can discover none and report success.
+
+Round 9's flakiness fix was also **half a fix**: it raised `testTimeout` to 15 s but left
+`findBy*`/`waitFor` on their own 1000 ms budget, 15× below it. Measured under the load above, a
+focus case failed at 2,587 ms inside its 15 s case while ordinary *passing* cases in the same run
+took 8,184 and 11,905 ms. `asyncUtilTimeout` is now 10 s, and `focus.test.tsx` asserts the value
+— the file that failed is the one that notices it being dropped.
+
+**What a human still has to confirm** is **GUI-39**, on a real `claude` session and a real
+93,374-line log: that the pill's number is right, that the viewer opens where the buffer ends
+with no gap and no repeat, that paging by keyboard and by edge-scroll both work, that RSS returns
+after Escape, and that focus comes back to the live session. No unit test can see the pixel where
+the two views meet.
 
 ## Reproducing this UAT
 

@@ -20,6 +20,7 @@ import {
   letterboxFraction,
   nextFontSize,
   overflowsHost,
+  unreachedHistory,
   zoomActionForKey,
 } from "./viewControls";
 import { currentTheme, onThemeChange, resolveTokens, theme } from "../theme";
@@ -29,6 +30,8 @@ import { lastNonEmptyLine } from "./screenLine";
 import { zoomedPaneId } from "./zoom";
 import PaneOverlay from "./PaneOverlay";
 import PaneToolbar from "./PaneToolbar";
+import HistoryOverlay from "./HistoryOverlay";
+import { WINDOW_LINES, type HistoryView } from "./historyView";
 
 interface LayoutState {
   panes: PaneRect[];
@@ -82,11 +85,45 @@ export default function TerminalView({
   // the same layout event, so they cannot disagree.
   const [layout, setLayout] = useState<LayoutState | null>(null);
   const [metrics, setMetrics] = useState<CellMetrics | null>(null);
+  // The session's grid, from the last snapshot. The deep-history viewer
+  // needs it to wrap stored lines the way they were written; a snapshot
+  // follows every geometry change, so this cannot go stale.
+  const [grid, setGrid] = useState({ cols: 80, rows: 24 });
   // How far a clipped view is scrolled inside its host, for the overlay.
   // Always {0,0} while the whole grid fits, which is the common case.
   const [pan, setPan] = useState({ x: 0, y: 0 });
   // The viewport is scrolled up: new output is arriving out of sight.
   const [behind, setBehind] = useState(false);
+  // History older than this terminal's buffer, and whether the user has
+  // reached the top of the buffer and is therefore looking straight at
+  // where it runs out. Both are needed before offering the deep viewer:
+  // the offer is only honest where the buffer visibly ends, and only
+  // useful when something is actually behind it.
+  const [deeper, setDeeper] = useState<{
+    unreached: number;
+    oldestLive: number;
+    total: number;
+    /** The backfill reported an oldest written line, so `unreached` is a
+     * measurement. False = it wrote none (an empty or stalled first page),
+     * `oldestLive` is a fallback, and the count must not be shown as fact. */
+    observed: boolean;
+  } | null>(null);
+  const [atTop, setAtTop] = useState(false);
+  // The deep-history viewer, open on a window that ENDS where this
+  // terminal's buffer begins. Null = closed, and closed is the default:
+  // its bounded window costs memory only while it is up (historyView.ts).
+  const [history, setHistory] = useState<{ anchor: number; total: number } | null>(null);
+  // The open viewer's machine, so the scrollback route can ask whether it
+  // is the one waiting for a page. A ref because the route is installed
+  // once, at attach, and must see the current answer — not the one that
+  // was true when the connection was made.
+  const historyRef = useRef<HistoryView | null>(null);
+  // Read by the two places that hand the keyboard back to the live
+  // terminal. While the viewer is up it owns the arrow and page keys, and a
+  // refocus behind it would send them to the session instead — where they
+  // are input, not navigation.
+  const historyOpenRef = useRef(false);
+  historyOpenRef.current = history !== null;
   // The window and the session's grid disagree, in one of two directions,
   // and either way ⤢ is the answer. "empty": a large letterbox around a
   // small session reads as "reserved space" (a real user asked what the
@@ -197,6 +234,11 @@ export default function TerminalView({
     const updateBehind = () => {
       const buf = term.buffer.active;
       setBehind(!isAtBottom(buf.viewportY, buf.baseY));
+      // At the very top of a buffer that HAS a top to reach. This is the
+      // one place the "history is missing" report is made: the user scrolls
+      // up, the buffer stops, and until now nothing on screen said whether
+      // that was the end of the session or the end of the buffer.
+      setAtTop(buf.viewportY <= 0 && buf.baseY > 0);
     };
     const scrollEv = term.onScroll(updateBehind);
     const writeEv = term.onWriteParsed(updateBehind);
@@ -303,6 +345,36 @@ export default function TerminalView({
     // newborn.
     let sawFirstSnapshot = false;
 
+    // The last sb_lines the daemon announced. Held here rather than in
+    // state because the deep-history summary is derived from it plus a
+    // number only the backfill machine knows, and deriving both in one
+    // place is what keeps them from disagreeing.
+    let lastSbLines = 0;
+    const refreshDeeper = () => {
+      // Not while the attach fetch is running: see Backfill.isLive(). The
+      // offer would be truthful but unsafe — one of the two machines would
+      // lose the page it is waiting for.
+      if (!backfill.isLive()) {
+        setDeeper(null);
+        return;
+      }
+      const oldestLive = backfill.oldestWritten();
+      const unreached = unreachedHistory(lastSbLines, oldestLive);
+      // A viewer needs somewhere to start, and "where this buffer begins"
+      // is the observed seq — never the requested floor (backfill.ts
+      // oldestWritten explains why the difference matters).
+      setDeeper(
+        unreached > 0
+          ? {
+              unreached,
+              oldestLive: oldestLive ?? lastSbLines,
+              total: lastSbLines,
+              observed: oldestLive !== null,
+            }
+          : null,
+      );
+    };
+
     const attach = async () => {
       // cols/rows 0 means "adopt the session's current size", verified
       // against the daemon: session_resize() early-returns on a zero
@@ -320,13 +392,21 @@ export default function TerminalView({
           // session's width, not the mount-default 80. This is also how
           // the viewer learns the session's real geometry.
           if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+          setGrid({ cols, rows });
           // Outside the resize branch on purpose: a session that happens to
           // be exactly the mount default (80×24) changes nothing here, and
           // gating the fit check on a size *change* left that session with
           // no hint at all until the user resized the window — the one case
           // where the hint is the only explanation on screen.
           fitView();
+          lastSbLines = Math.max(lastSbLines, sbLines);
           backfill.onSnapshot(cols, rows, sbLines, blob);
+          // Before any page has landed this reports the whole log as out of
+          // reach, which is true at that instant and self-corrects on the
+          // first page. The open viewer is told separately (setTotal), so a
+          // session that keeps talking raises its ceiling without moving
+          // the window the user is reading.
+          refreshDeeper();
           // Cell metrics change exactly when the grid or font does, and a
           // snapshot follows every geometry change — so this is the one
           // refresh point that cannot go stale.
@@ -336,7 +416,30 @@ export default function TerminalView({
             if (autoFitRef.current?.() === true) fitToWindow();
           }
         },
-        onScrollback: (firstSeq, lines) => backfill.onScrollback(firstSeq, lines),
+        // Two consumers, one frame type. MSG_SCROLLBACK_DATA carries no
+        // requester id, so the route has to be decided here, and it is only
+        // decidable because at most one of the two is ever waiting: a viewer
+        // exists only via the pill, the pill exists only while `deeper` is
+        // set, and refreshDeeper refuses to set it until backfill.isLive().
+        // That gate is the invariant's single enforcement point — asserted by
+        // "does not offer the viewer while the attach fetch is still running"
+        // in deepHistory.test.tsx, because without it the pill IS reachable
+        // after page 1 of 25 and the viewer would eat page 2.
+        //
+        // Asked first because it is the one that can be wrong: a page handed
+        // to a live backfill is silently dropped (backfill.ts, state !==
+        // "fetching"), while a page the viewer misses leaves it stalled on
+        // screen.
+        onScrollback: (firstSeq, lines) => {
+          if (historyRef.current?.wants() === true) {
+            historyRef.current.onPage(firstSeq, lines);
+            return;
+          }
+          backfill.onScrollback(firstSeq, lines);
+          // The oldest line this buffer holds is only known once a page has
+          // landed, and rotation can make it later than what we asked for.
+          refreshDeeper();
+        },
         onCtrl: (ev) => {
           if (disposed) return;
           if (ev.kind === "layout") {
@@ -425,7 +528,9 @@ export default function TerminalView({
     // Returning to the app must return the caret too. Switching away
     // (to a browser, to PowerPoint) and back otherwise leaves focus on
     // whatever last held it, which reads as a dead keyboard.
-    const onWindowFocus = () => term.focus();
+    const onWindowFocus = () => {
+      if (!historyOpenRef.current) term.focus();
+    };
     window.addEventListener("focus", onWindowFocus);
 
     return () => {
@@ -450,7 +555,7 @@ export default function TerminalView({
   // effect on purpose: clicking the session you are already on must
   // refocus without tearing down a working attachment.
   useEffect(() => {
-    termRef.current?.focus();
+    if (!historyOpenRef.current) termRef.current?.focus();
   }, [focusNonce]);
 
   const zoomed =
@@ -509,6 +614,89 @@ export default function TerminalView({
           {fitHint.kind === "clipped" ? "scroll to see it all" : "empty space"}{" "}
           — session is {fitHint.cols}×{fitHint.rows} · ⤢ fit to window
         </button>
+      )}
+      {/* The answer to "I scrolled up and my earlier conversation was not
+        * there". It appears exactly where the buffer runs out, names how
+        * many lines are behind it, and says the session still has them —
+        * because the alternative reading the reporter reached was that the
+        * session had been restarted or its memory cleared. Hidden while the
+        * viewer is open (it is the thing it opens) and whenever nothing is
+        * out of reach. */}
+      {atTop && deeper !== null && history === null && (
+        <button
+          onClick={() =>
+            setHistory({
+              // The window that ENDS where this buffer begins, so the join
+              // is continuous and the last line here is the line above the
+              // first line there.
+              anchor: Math.max(0, deeper.oldestLive - WINDOW_LINES),
+              total: deeper.total,
+            })
+          }
+          // Both numbers are derived from the same pair the pill is derived
+          // from, so the tooltip cannot disagree with the label beside it.
+          // It names no internal constant: a tooltip that sends the user to
+          // a symbol the README does not contain is worse than no pointer.
+          //
+          // …unless the backfill wrote nothing (`observed === false`), in
+          // which case there is no observed boundary and BOTH numbers would
+          // be invented: "holds the newest 0 lines" is false the moment live
+          // output scrolls into the buffer. A feature whose job is to be
+          // trusted about what was said has to say "unknown" here.
+          title={
+            deeper.observed
+              ? `This terminal holds the newest ${(deeper.total - deeper.unreached).toLocaleString("en-US")} lines; the daemon still has all ${deeper.total.toLocaleString("en-US")} of them. Nothing was cleared and the session was not restarted — a line costs memory here whether or not it has anything on it, so the buffer has a limit and this is it. Opens a read-only viewer over the rest.`
+              : `This terminal's history never finished loading, so how far back it reaches is unknown; the daemon has all ${deeper.total.toLocaleString("en-US")} lines. Nothing was cleared and the session was not restarted. Opens a read-only viewer on the newest of them.`
+          }
+          style={{
+            position: "absolute",
+            top: 12,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 2,
+            background: theme.raised,
+            color: theme.text,
+            border: `1px solid ${theme.raisedBorder}`,
+            borderRadius: 12,
+            padding: "3px 10px",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          {deeper.observed
+            ? `↑ ${deeper.unreached.toLocaleString("en-US")} earlier lines — open history`
+            : "↑ earlier lines — open history"}
+        </button>
+      )}
+      {history !== null && (
+        <HistoryOverlay
+          // The live number, not the one captured when the viewer opened: the
+          // session keeps running behind it, and every snapshot raises
+          // sb_lines. Passing the captured value left HistoryView.setTotal
+          // documented and tested but never actually called, so a viewer open
+          // across a busy minute reported "of 93,374" while the log had more
+          // and refused to page into it. `history.total` remains the floor for
+          // the case where `deeper` is somehow gone.
+          total={deeper?.total ?? history.total}
+          startSeq={history.anchor}
+          cols={grid.cols}
+          rows={grid.rows}
+          request={(startSeq, maxLines) => {
+            // A failed request has no response frame; the machine's stall
+            // timer turns that into a visible "retry" rather than a viewer
+            // that waits forever.
+            void transport
+              .scrollbackReq(startSeq, maxLines)
+              .catch(() => historyRef.current?.onStall());
+          }}
+          register={(view) => {
+            historyRef.current = view;
+          }}
+          onClose={() => {
+            setHistory(null);
+            termRef.current?.focus();
+          }}
+        />
       )}
       {behind && (
         <button

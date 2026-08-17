@@ -11,7 +11,7 @@
 // which element holds focus and when — not about rendering.
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, act, cleanup } from "@testing-library/react";
+import { render, fireEvent, act, cleanup, getConfig } from "@testing-library/react";
 import App from "../App";
 
 const focusSpy = vi.fn();
@@ -131,6 +131,26 @@ beforeEach(() => {
 // query matches several buttons — which fails as "multiple elements",
 // masking whatever the test was actually asserting.
 afterEach(() => cleanup());
+
+describe("the async query budget these cases depend on", () => {
+  it("exceeds the contention this suite measurably produces", () => {
+    // This file's `findByRole` is where the incomplete half of the #86
+    // flakiness fix surfaced. `testTimeout: 15_000` (vite.config.ts) bounds
+    // a whole CASE; `findBy*` carries its OWN timeout, default 1000 ms, and
+    // that was the binding one: measured on this machine with eight
+    // spinning processes against the 29-file run, "moves focus off the
+    // sidebar button and into the terminal" FAILED at 2587 ms while
+    // ordinary passing cases in the same run reached 8184 and 11905 ms.
+    // Asserted rather than commented because the setting lives in
+    // testSetup.ts, where nothing else would notice it being dropped —
+    // and its absence looks like a real focus bug, not a config change.
+    expect(getConfig().asyncUtilTimeout).toBeGreaterThanOrEqual(8184);
+    // …and stays under the case budget, so a genuinely missing element
+    // still fails with testing-library's "Unable to find element" and its
+    // DOM dump instead of a bare "test timed out".
+    expect(getConfig().asyncUtilTimeout).toBeLessThan(15_000);
+  });
+});
 
 describe("keyboard focus on first mount", () => {
   it("focuses a session opened from the URL, with no click anywhere", async () => {
