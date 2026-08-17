@@ -1,5 +1,14 @@
-// Session dashboard: LIST_SESSIONS2 polled every 2 s, click to switch,
-// template buttons, right-click kill (design: ux-spec.md).
+// Session dashboard: click to switch, template buttons, right-click kill
+// (design: ux-spec.md).
+//
+// The list arrives by LIST_SESSIONS2 either way; what changes is who
+// decides when to ask. A daemon that advertises SERVER_CAP_SESSION_EVENTS
+// pushes "the table changed" (MSG_SESSIONS_CHANGED) and the 2 s poll stops;
+// anything else — an older daemon, no daemon yet, a dropped connection, a
+// browser-served dev build with no Tauri channel at all — keeps polling.
+// The poll is not a redundant second source: it is the whole behaviour for
+// every case the push cannot cover, which is why `watchSessions` is
+// optional and its absence is the tested default.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ControlApi, SessionRow, Template } from "./api";
@@ -7,7 +16,9 @@ import { nextSessionName } from "./api";
 import { displayName } from "../displayName";
 import { theme } from "../theme";
 
-const POLL_MS = 2000;
+/** Fallback poll cadence, exported so a test measures the interval the
+ * component actually uses rather than a number remembered from it. */
+export const POLL_MS = 2000;
 
 export interface SidebarProps {
   api: ControlApi;
@@ -51,6 +62,10 @@ export default function Sidebar({
   // arrived at the same name.
   const [pending, setPending] = useState<{ name: string; pid: number } | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // Is the daemon telling us when to re-list? Starts false, so the first
+  // render polls: assuming push and being wrong means a sidebar that never
+  // updates, while assuming poll and being wrong costs one extra listing.
+  const [push, setPush] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -68,10 +83,23 @@ export default function Sidebar({
   }, [api]);
 
   useEffect(() => {
+    const watch = api.watchSessions;
+    if (watch == null) return;
+    return watch.call(api, {
+      onPush: setPush,
+      onChanged: () => void refresh(),
+    });
+  }, [api, refresh]);
+
+  useEffect(() => {
+    // Runs on every push transition as well as on mount, which is the
+    // re-list a (re)connect needs: the push carries no data, so gaining or
+    // losing it says nothing about what the table looks like now.
     void refresh();
+    if (push) return;
     const t = setInterval(() => void refresh(), POLL_MS);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, push]);
 
   useEffect(() => {
     api.listTemplates().then(setTemplates, (e) => setError(String(e)));

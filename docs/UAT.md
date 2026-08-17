@@ -159,6 +159,7 @@ cd src-tauri && cargo build          # ./target/debug/agent-terminal-gui
 | GUI-35 | the panels update without polling, and say so when they can't | open the **Usage** tab and leave it: watch a running Claude session's numbers move, then let the machine sit idle for a minute; switch to **Hooks** and back to Usage a few times quickly; with Usage open, `printf '%s\n' '{"bad":' >> ~/.claude/hooks/hooks.log` then switch to Hooks and watch the security card; finally quit and relaunch | Usage still tracks within ~2 s of a change and the counts stop moving when nothing is happening (no repaint flicker on an idle machine); rapid tab switching leaves both tabs live — each paints immediately on arrival rather than blanking for a tick, and neither ends up frozen; the security card notices the appended line and reports the chain broken; nothing in the panel ever silently stops updating — a stream that cannot start shows a red alert row with the reason, not a stale-looking panel |
 | GUI-36 | scroll-back survives a daemon `reload` | in a GUI-attached session print more than one screenful (`for i in $(seq 1 300); do echo "line-$i"; done`), scroll the GUI up and note the oldest line you can reach; then run `agent-terminal reload` from a shell OUTSIDE the GUI, wait for the GUI to reconnect, and scroll up again — do this against a session whose log is already large (`agent-terminal ls`, then `agent-terminal history -s NAME \| wc -l`) so the ring is full rather than short | the reconnected view scrolls back at least as far as the client's 25,000-line backfill cap reaches (`line-1` here), not to an empty scrollbar; the reload takes about as long as it did before (no multi-second stall on a session with a 20 MB log); `agent-terminal history -s NAME \| wc -l` is unchanged across the reload — on a log longer than 25,000 lines it stays larger than what the GUI can scroll, because the cap is the client's memory budget, not the daemon's depth (GUI-37). Before this fix the same steps produced a scrollbar with nothing above the current screen, which is how the bug was reported |
 | GUI-37 | scroll-back reaches BELOW the daemon's in-memory ring | in a session whose log is longer than the 10,000-line ring (`agent-terminal history -s NAME \| wc -l` to confirm; `for i in $(seq 1 15000); do echo "deep-$i"; done` makes one), attach it in the GUI **fresh** (⌘Q and relaunch, so the tab backfills from scratch rather than from what xterm already held), then scroll to the very top and read the oldest line; repeat after `agent-terminal reload`, which rebuilds the ring from the log | the oldest reachable line is ~25,000 back — for a 15,000-line log that is `deep-1`, i.e. the top of the log, and not `deep-5001` where the ring's own oldest line sits; the attach does not visibly stall (each 1,000-line page is a bounded seek + sweep, not a 32 MiB read), and the same depth is reachable after the reload, when the ring's index was rebuilt by the open-time scan rather than by live pushes. Before this fix the daemon announced the whole log's line count on the snapshot and then answered any request below the ring with the ring's oldest page instead — the scrollbar stopped 10,000 lines back with 18 MB of history still on disk |
+| GUI-38 | the sidebar hears about a change instead of asking every 2 s | with the GUI open on the sidebar, create a session from a **terminal** (`agent-terminal new -s uat-push -- sleep 600 < /dev/null`) and time how long the row takes to appear; then split it from a CLI attach (`Ctrl-\ %`) and watch its `⧉` badge, `agent-terminal kill -s uat-push` and watch the row go; then run three creates back to back in one command line and watch the sidebar settle; finally run the GUI against a **v0.1.0 daemon** (`PREFIX=/tmp/old make install` from the release tag, or just check out the tag and run its `agent-terminald`) and repeat the first step | against a current daemon each change shows up in well under a second — noticeably faster than the old fixed 2 s, and the three-create burst lands as one settled list rather than three staggered repaints; against the v0.1.0 daemon the row still appears, just within ~2 s, because the sidebar falls back to polling when `SERVER_CAP_SESSION_EVENTS` is absent. Kill the daemon under the GUI (`kill <pid from agent-terminal version>`) and start it again: the sidebar recovers on its own within a few seconds without a relaunch. Nothing here needs the GUI window focused |
 
 **Use a throwaway session for GUI-06/GUI-07.** Creating and killing are destructive; never
 exercise them against a session doing real work.
@@ -1028,6 +1029,85 @@ instrument notes worth keeping: the readiness probe cannot stay attached through
 burst (a wire client falls behind the 20 ms tick, overflows its out-ring and is dropped by the
 daemon — seen as 9,426 or 10,474 of 10,977 on 2 of 3 runs), and `grep -q .` does not match an
 empty file, so a `touch`-based marker silently burns the whole timeout instead of signalling.
+
+## Session-table round 10 (2026-08-17): the sidebar stops asking every 2 s
+
+The GUI sidebar had the last `setInterval(2000)` in the app: it re-listed sessions twenty
+times a minute whether or not anything had happened, and still showed a change up to 2 s
+late. This round replaces the *default* with a push — `MSG_SESSIONS_CHANGED` (0x39) — and
+keeps the poll as the behaviour for every case a push cannot cover.
+
+**Why the message is empty.** `app/design/deferred-daemon-work.md` §3 sketched `u8 kind` +
+the changed session's LIST2 entry. What shipped carries **nothing** and means "the table
+changed, ask again". Carrying the entry would have made 0x39 a second encoding of
+`MSG_SESSION_LIST2` that has to be versioned in lockstep with it, and a `kind` byte an
+enumeration of causes no client has a use for. Empty is also idempotent, and that is what
+lets the daemon coalesce a burst of creates onto one 20 ms tick — two notifications cost one
+extra list.
+
+**Detection is derived, not hooked.** Nine call sites in the daemon mutate the session table.
+Hooking each is nine chances to miss one, and a tenth producer added later starts silent. The
+daemon instead re-encodes the LIST2 payload on each tick and compares **bytes** against the
+last set it sent, so every producer is covered by one gate — including per-entry fields
+appended to LIST2 in a future PR, which will change the bytes without anyone remembering to
+say so. The baseline is seeded at **listen** time rather than on the first tick, which is an
+ordering guarantee and not a timing bet: the autospawn path connects and creates inside the
+first 20 ms, and a first-tick baseline would have made that session's own appearance look
+like "no change".
+
+**Delivery is global, unlike every other D→C message.** `MSG_PANE_BELL` fans out over one
+session's clients. 0x39 goes to every `CLIENT_CAP_SESSION_EVENTS` client whether attached or
+not, because a sidebar lists sessions it is not attached to — a fan-out scoped to a session
+would have made the message useless for its only consumer.
+
+**The client side is a state machine with three retry classes, not a reconnect loop.** The
+watcher holds one persistent control connection; `retry_after` maps `Dropped` → 1 s,
+`Unreachable` (no daemon) → 2 s, `Incapable` (a daemon without the bit) → 30 s. The floor
+rule is that the watcher must never knock harder than the 2 s poll it replaced, and the
+30 s probe exists because a daemon that lacks the capability today may be `reload`ed into one
+that has it. A daemon that answers but does not advertise `SERVER_CAP_SESSION_EVENTS` is
+treated exactly like no daemon: `daemon_pushes_session_events(None)` and the wrong bit both
+return false, so a client written before 0x39 existed cannot be sent 0x39 on the strength of
+`CLIENT_CAP_PANES`. Push state reaches the UI only on transitions (`LiveGate`), so the
+sidebar's poll effect re-lists once when push appears or disappears rather than on every
+frame.
+
+**A deliberate non-feature: no heartbeat.** A daemon that is alive but wedged reads to the
+watcher as "nothing changed" instead of a poll timeout. That is a real regression against the
+2 s poll and it is accepted, because the attach path has the same property, a wedged daemon is
+already visible as a frozen terminal, and the alternative is ~10 lines of keepalive logic
+testable only with a SIGSTOPped daemon and 60 s of wall clock. It is written into the module
+header in `control.rs` rather than left as an implicit gap.
+
+**Numbers.** Unit: **13,567 checks across 9 suites**, unchanged — the C half of this PR is
+wire behaviour, so it is covered by an integration script rather than by new unit cases, and
+claiming a unit-count increase would have been claiming coverage that does not exist.
+Integration: **33 scripts** (32 before), all rc=0, including the new
+`test_session_events.sh` (fan-out to an unattached client, capability gate, coalescing,
+no-change silence). Rust: `cargo test --workspace` **134 passed / 0 failed**, clippy and
+`cargo fmt --check` clean. Frontend: **264 tests across 28 files** (256 before), `npx tsc
+--noEmit` clean. Mutation: **14/14 killed** across the Rust watcher and the TS sidebar, with
+the no-mutant control green before *and* after restore.
+
+**What the mutation harness taught us about its own environment.** The GUI crate's `build.rs`
+fails the build when any TS file is newer than `../dist`, which is exactly what a TS mutant
+does. So restoring the tree is not enough — the harness must re-run `npm run build`, or the
+post-restore control fails for a reason that has nothing to do with the mutant. Rebuilding the
+bundle is part of restoring the tree, not a convenience.
+
+**Two honest gaps.** (1) Removing `session_changes_seed()` — the listen-time baseline — is
+**not killed by any automated test.** Its only observable effect is suppressing at most one
+idempotent notification inside the first 20 ms of daemon life; the half that matters (a
+first-tick change *is* announced) is covered by
+`sessions_changed_reaches_an_unattached_capable_client`. The seed is kept because it is the
+correct ordering, not because a test defends it. (2) One `real_daemon` run reported
+`13 passed; 3 failed` and has never reproduced: eleven subsequent runs, including concurrent
+and forced-recompile ones, were 16/16. It is recorded rather than explained.
+
+**What a human still has to confirm** is **GUI-38**: that a session created in a terminal
+appears in the sidebar in well under a second against a current daemon, that a burst of
+creates settles as one list, that a v0.1.0 daemon still updates the sidebar within ~2 s, and
+that killing the daemon under the GUI recovers without a relaunch.
 
 ## Reproducing this UAT
 

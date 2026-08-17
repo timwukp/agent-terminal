@@ -92,6 +92,10 @@ static void daemon_tick(void) {
     /* Cheap (a 32-slot scan) and it must not be gated on the 1 s flush timer:
      * an unauthenticated client slot is the resource being reclaimed. */
     server_reap_idle();
+    /* After compositing, so a notification never precedes the frame that made
+     * the table look that way; and on every tick, because this IS the
+     * coalescing window that turns a burst of kills into one notification. */
+    server_broadcast_session_changes();
     uint64_t now = now_ms();
     if (now - last_flush >= 1000) {
         session_flush_all();

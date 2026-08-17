@@ -33,8 +33,17 @@ pub const PROTO_MAX_PAYLOAD: usize = 1 << 20;
 
 /// proto.h: `CLIENT_CAP_PANES` (MSG_HELLO u16 flags).
 pub const CLIENT_CAP_PANES: u16 = 0x0001;
+/// proto.h: `CLIENT_CAP_SESSION_EVENTS` — ask for MSG_SESSIONS_CHANGED.
+/// Its own bit rather than a rider on `CLIENT_CAP_PANES`, because a client
+/// that set only 0x0001 was built before 0x39 existed.
+pub const CLIENT_CAP_SESSION_EVENTS: u16 = 0x0002;
 /// proto.h: `SERVER_CAP_PANES` (MSG_HELLO_OK u16 server_flags @10).
 pub const SERVER_CAP_PANES: u16 = 0x0001;
+/// proto.h: `SERVER_CAP_SESSION_EVENTS` — this daemon will send
+/// MSG_SESSIONS_CHANGED. Worth checking rather than assuming: without it,
+/// "the daemon will notify me" and "the daemon is too old and I must keep
+/// polling" are the same observation, which is silence.
+pub const SERVER_CAP_SESSION_EVENTS: u16 = 0x0002;
 
 /// A decoded frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +109,33 @@ mod tests {
             frame,
             [0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x01, 0x00]
         );
+    }
+
+    /// Both capabilities in one HELLO, pinned as bytes rather than as
+    /// `PANES | SESSION_EVENTS`: written that way the assertion would restate
+    /// the expression it is checking, and a swap of either constant's value
+    /// would leave it passing. 0x0003 in the flags field is what the daemon
+    /// reads, and the integration test asserts the mirror of it in HELLO_OK.
+    #[test]
+    fn hello_both_caps_bytes_pin() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&PROTO_VERSION.to_le_bytes());
+        payload.extend_from_slice(&(CLIENT_CAP_PANES | CLIENT_CAP_SESSION_EVENTS).to_le_bytes());
+        let frame = encode_frame(0x01, &payload);
+        assert_eq!(
+            frame,
+            [0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x03, 0x00]
+        );
+    }
+
+    /// The two capability namespaces are separate (client flags vs server
+    /// flags) but their bit values are deliberately aligned, so a reader can
+    /// compare a request against an advertisement without a translation table.
+    #[test]
+    fn cap_bits_are_distinct_and_aligned() {
+        assert_eq!(CLIENT_CAP_PANES & CLIENT_CAP_SESSION_EVENTS, 0);
+        assert_eq!(CLIENT_CAP_PANES, SERVER_CAP_PANES);
+        assert_eq!(CLIENT_CAP_SESSION_EVENTS, SERVER_CAP_SESSION_EVENTS);
     }
 
     #[test]

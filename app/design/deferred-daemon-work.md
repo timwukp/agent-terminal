@@ -35,9 +35,29 @@ CLIENT_CAP_PANES clients. Wire behaviour is pinned by
 single-pane silence, and the OSC-terminator non-ring); the GUI treats it
 exactly like a local bell (Terminal.tsx `pane_bell` ctrl event).
 
-## 3. Session event push (optional, later)
+## 3. Session event push — `MSG_SESSIONS_CHANGED` — **DONE**
 
-The sidebar polls LIST_SESSIONS2 every 2 s. If polling ever proves
-annoying (battery, latency), add `MSG_SESSION_EVENT` (D→C on the control
-connection: u8 kind = created/exited/pane-change, then the session's
-LIST2 entry). Not worth doing until measured to matter.
+Landed as proto.h 0x39, but deliberately *not* in the shape sketched here.
+The sketch was `u8 kind` + the changed session's LIST2 entry; what shipped
+is an **empty** message meaning "the table changed, ask again", because
+carrying the entry would have made 0x39 a second encoding of
+`MSG_SESSION_LIST2` that has to be versioned in lockstep with it, and a
+`kind` byte an enumeration of causes no client has a use for. Empty is
+also idempotent, which is what lets the daemon coalesce a burst of changes
+onto one 20 ms tick.
+
+Detection is derived, not hooked: the daemon re-encodes the LIST2 payload
+each tick and compares **bytes** against the last one it sent, so all nine
+producers that mutate the table are covered by one gate — including fields
+appended to LIST2 later. Baseline seeded at listen time, not on the first
+tick, so a client that connects and creates inside the first 20 ms (the
+autospawn path) is still notified.
+
+Delivery is global: unlike `MSG_PANE_BELL`, which fans out over one
+session's clients, this goes to every `CLIENT_CAP_SESSION_EVENTS` client
+whether attached or not, because a sidebar lists sessions it is not
+attached to. Wire behaviour is pinned by
+`tests/integration/test_session_events.sh` (fan-out, capability gate,
+coalescing, no-change silence); the GUI sidebar stops its 2 s poll while
+push is live and resumes on any daemon that does not advertise
+`SERVER_CAP_SESSION_EVENTS`.

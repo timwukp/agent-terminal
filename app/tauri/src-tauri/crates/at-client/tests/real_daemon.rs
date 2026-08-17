@@ -759,3 +759,180 @@ async fn zoom_is_visible_in_layout_geometry() {
     c.shutdown().await;
     d.stop().await;
 }
+
+#[tokio::test]
+async fn sessions_changed_reaches_an_unattached_capable_client() {
+    // The sidebar's push path, end to end through at-client's event mapping:
+    // a connection that is attached to NOTHING is told when someone else's
+    // session appears and disappears, and the list it then asks for reflects
+    // that. This is the property the 2 s poll existed to fake.
+    //
+    // It also races the daemon's very first 20 ms tick on purpose — nothing
+    // here sleeps after the listen line, so on a fast machine the connect and
+    // the create both land before it. That is the shape the autospawn path
+    // has, and the first version of the daemon side failed it: it suppressed
+    // the first tick's notification instead of seeding a baseline at listen
+    // time, so this test hung for its full 10 s timeout. Either ordering must
+    // notify, which is why the assertion is safe rather than flaky.
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+    let (mut watch, mut wrx) = connect(&d.sock(), proto::CLIENT_CAP_SESSION_EVENTS)
+        .await
+        .expect("connect watcher");
+    // Checked, not assumed: silence from an old daemon and silence from an
+    // idle new one are the same observation, so the client has to be able to
+    // tell them apart before it turns polling off.
+    let flags = watch.hello.server_flags.expect("daemon sends flags");
+    assert_ne!(
+        flags & proto::SERVER_CAP_SESSION_EVENTS,
+        0,
+        "daemon must advertise session events (flags {flags:#06x})"
+    );
+
+    let (mut maker, mut mrx) = connect(&d.sock(), 0).await.expect("connect maker");
+    maker
+        .send(&proto::new_session(80, 24, "pushed", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        if let Event::Snapshot { .. } = next_ev(&mut mrx).await {
+            break;
+        }
+    }
+
+    // The watcher never attached and never asked for a list, so the only way
+    // this event exists is a global fan-out.
+    // Not a loop: this connection asked for nothing else, so the very next
+    // event it sees must be the notification — accepting anything before it
+    // would let a stray frame stand in for the push.
+    match next_ev(&mut wrx).await {
+        Event::SessionsChanged => {}
+        other => panic!("expected SessionsChanged, got {other:?}"),
+    }
+    watch.send(&proto::list_sessions2()).await.unwrap();
+    let list = loop {
+        match next_ev(&mut wrx).await {
+            Event::SessionList(l) => break l,
+            Event::SessionsChanged => continue, // the maker's attach, coalesced or not
+            other => panic!("expected SessionList, got {other:?}"),
+        }
+    };
+    let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["pushed"], "the pushed change was real");
+
+    // And a kill notifies too — a gate that only noticed growth would pass
+    // everything above.
+    maker.shutdown().await;
+    let (mut killer, mut krx) = connect(&d.sock(), 0).await.expect("connect killer");
+    killer
+        .send(&proto::kill_session("pushed").unwrap())
+        .await
+        .unwrap();
+    loop {
+        match next_ev(&mut krx).await {
+            Event::SessionList(_) => break,
+            Event::Err { code, msg } => panic!("kill failed: {code} {msg}"),
+            _ => {}
+        }
+    }
+    loop {
+        match next_ev(&mut wrx).await {
+            Event::SessionsChanged => break,
+            Event::SessionList(_) => continue,
+            other => panic!("expected SessionsChanged after the kill, got {other:?}"),
+        }
+    }
+    watch.send(&proto::list_sessions2()).await.unwrap();
+    let list = loop {
+        match next_ev(&mut wrx).await {
+            Event::SessionList(l) => break l,
+            Event::SessionsChanged => continue,
+            other => panic!("expected SessionList, got {other:?}"),
+        }
+    };
+    assert!(
+        list.is_empty(),
+        "the kill was announced and is real: {list:?}"
+    );
+
+    watch.shutdown().await;
+    killer.shutdown().await;
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_without_the_capability_is_never_pushed_to() {
+    // The mirror of the above, and the reason CLIENT_CAP_SESSION_EVENTS is a
+    // bit of its own: a client that asked only for panes must not receive
+    // 0x39, or every pre-0.2 client would start getting frames it never
+    // negotiated. Non-vacuous by construction — the same window carries the
+    // capable client's notification, so "nothing arrived" cannot mean
+    // "nothing happened".
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+    let (panes_only, mut prx) = connect(&d.sock(), proto::CLIENT_CAP_PANES)
+        .await
+        .expect("connect panes-only");
+    let (watch, mut wrx) = connect(&d.sock(), proto::CLIENT_CAP_SESSION_EVENTS)
+        .await
+        .expect("connect watcher");
+
+    let (mut maker, mut mrx) = connect(&d.sock(), 0).await.expect("connect maker");
+    maker
+        .send(&proto::new_session(80, 24, "gated", &["/bin/cat"]).unwrap())
+        .await
+        .unwrap();
+    loop {
+        if let Event::Snapshot { .. } = next_ev(&mut mrx).await {
+            break;
+        }
+    }
+    // Not a loop: this connection asked for nothing else, so the very next
+    // event it sees must be the notification — accepting anything before it
+    // would let a stray frame stand in for the push.
+    match next_ev(&mut wrx).await {
+        Event::SessionsChanged => {}
+        other => panic!("expected SessionsChanged, got {other:?}"),
+    }
+    // The capable client has already been told, so the daemon has run its
+    // fan-out; anything queued for panes_only is queued by now.
+    match tokio::time::timeout(Duration::from_millis(500), prx.recv()).await {
+        Err(_) => {}
+        Ok(Some(ev)) => panic!("panes-only client received {ev:?}"),
+        Ok(None) => panic!("panes-only client's stream closed"),
+    }
+
+    panes_only.shutdown().await;
+    watch.shutdown().await;
+    maker.shutdown().await;
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_freshly_started_daemon_pushes_nothing() {
+    // The other half of the baseline question. Nothing has changed between the
+    // daemon binding its socket and this client saying hello, so a capable
+    // client must hear nothing at all — the daemon seeds its baseline at listen
+    // time precisely so the first tick is not a notification.
+    //
+    // Like the test above, this connects with no delay after the listen line,
+    // so it usually completes its handshake before the first 20 ms tick and
+    // therefore observes that tick's decision. When the machine is slow enough
+    // that the tick wins, the assertion is still true rather than inverted, so
+    // the coverage varies but the verdict never does.
+    let Some(d) = DaemonFixture::start().await else {
+        return;
+    };
+    let (watch, mut wrx) = connect(&d.sock(), proto::CLIENT_CAP_SESSION_EVENTS)
+        .await
+        .expect("connect watcher");
+    match tokio::time::timeout(Duration::from_millis(400), wrx.recv()).await {
+        Err(_) => {}
+        Ok(Some(ev)) => panic!("an idle daemon pushed {ev:?} at startup"),
+        Ok(None) => panic!("the watcher's stream closed"),
+    }
+    watch.shutdown().await;
+    d.stop().await;
+}

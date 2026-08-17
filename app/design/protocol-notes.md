@@ -27,8 +27,14 @@ the correct response is to disconnect (that is what the C client does —
    0700 and the daemon enforces peer-UID; a GUI client needs no special
    handling beyond connecting as the same user.
 2. Send `MSG_HELLO` (0x01): `u16 ver=1, u16 flags`. Set `CLIENT_CAP_PANES`
-   (0x0001) on the attach connection; the control connection may send 0.
-   Exact bytes for the capable hello: `04 00 00 00 01 01 00 01 00`.
+   (0x0001) on the attach connection; set `CLIENT_CAP_SESSION_EVENTS`
+   (0x0002) on whichever connection watches the session table. A control
+   connection that only makes one round trip may send 0.
+   Exact bytes for the panes-capable hello: `04 00 00 00 01 01 00 01 00`;
+   for both capabilities: `04 00 00 00 01 01 00 03 00`.
+   Capabilities are separate bits, not a level: a client written before
+   0x39 existed set 0x0001 and must never be sent 0x39 on the strength of
+   it.
 3. Read `MSG_HELLO_OK` (0x02): `u16 ver` always; then **tail-optional**
    additive appends — `u32 daemon_pid` @2, `u32 generation` @6,
    `u16 server_flags` @10. Parse each field only if the payload is long
@@ -43,7 +49,8 @@ the correct response is to disconnect (that is what the C client does —
 GUI clients should hold **two** connections:
 
 - **Control**: `MSG_LIST_SESSIONS2` (0x1a, empty) → `MSG_SESSION_LIST2`
-  (0x37) polled for the sidebar; `MSG_NEW_SESSION` (0x12:
+  (0x37) for the sidebar — asked for when `MSG_SESSIONS_CHANGED` (0x39)
+  says to, or polled when the daemon does not offer that; `MSG_NEW_SESSION` (0x12:
   `u16 cols, u16 rows, u8 nlen, name, u16 argv_bytes, argv` — argv is
   NUL-separated) and `MSG_KILL_SESSION` (0x13) for session management.
 - **Attach**: `MSG_ATTACH` (0x14: `u16 cols, u16 rows, u8 pane_id, u8 nlen,
@@ -71,6 +78,18 @@ a DETACH state machine.
 - `MSG_PANE_BELL` (0x38): `u8 pane_id`. A BEL in a **split** session,
   attributed to the pane that rang. Never sent for a single pane (the raw
   `\x07` rides `MSG_OUTPUT` there) and only to `CLIENT_CAP_PANES` clients.
+- `MSG_SESSIONS_CHANGED` (0x39): **empty payload** — "the session table
+  changed, ask again". Answer it with `MSG_LIST_SESSIONS2`; do not build a
+  parser for it, since there is nothing to parse and a future daemon
+  appending bytes must not break a client. Sent only to
+  `CLIENT_CAP_SESSION_EVENTS` clients, and unlike every other D→C message
+  here it goes to **all** of them, not just those attached to the session
+  that changed — a sidebar lists sessions it is not attached to. Changes
+  are coalesced onto the daemon's 20 ms tick, so a burst of creates is one
+  notification, and it is idempotent: two of them cost one extra list.
+  Check `SERVER_CAP_SESSION_EVENTS` (0x0002) in HELLO_OK's `server_flags`
+  before relying on it — an older daemon and an idle newer one both look
+  like silence, so absence of the bit is the only way to tell them apart.
 - `MSG_LAYOUT` (0x35): `u16 view_cols, u16 view_rows, u8 active_id,
   u8 npanes`, then per pane `u8 id, u16 x, u16 y, u16 cols, u16 rows`
   (cell coordinates). Sent only to clients that set `CLIENT_CAP_PANES`.

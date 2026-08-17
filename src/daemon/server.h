@@ -33,6 +33,20 @@ void server_shutdown(void);
  * connections deny service to every real client. */
 void server_reap_idle(void);
 
+/* Re-serialize the session table and, if it differs from what was last
+ * announced, send MSG_SESSIONS_CHANGED to every client that set
+ * CLIENT_CAP_SESSION_EVENTS — attached or not, which is what makes it usable
+ * by a client whose sidebar lists sessions it is not attached to.
+ *
+ * Driven by the daemon tick rather than by each session mutator, which buys
+ * three things: a burst coalesces into one notification, no fan-out ever runs
+ * from inside a mutator, and the set of things that can trigger one is "any
+ * field MSG_SESSION_LIST2 carries" instead of a hand-maintained list of call
+ * sites. Costs one encode (a scan of the 64-slot table, ≤5,250 bytes) plus a
+ * memcmp per tick, whether or not any client is listening — the same order of
+ * work as session_composite_all's idle scan next to it. */
+void server_broadcast_session_changes(void);
+
 /* Disconnect every client and hand back the listen fd for the next image to
  * inherit. The socket path is deliberately NOT unlinked. */
 int server_prepare_handoff(void);

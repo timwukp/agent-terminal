@@ -118,16 +118,22 @@ static void client_err(client *c, uint16_t code, const char *msg) {
 
 /* ---- request handlers ---- */
 
-/* The list handlers serialize every session into one PROTO_MAX_PAYLOAD buffer,
- * so their safety is a relationship between three constants declared in two
- * other headers. Both handlers also break out at the bound below, but a runtime
- * break silently TRUNCATES the user's session list; this assertion is what
- * turns "someone raised MAX_SESSIONS" from a buffer overflow into a build
- * failure. 19 is the per-entry overhead of the larger of the two layouts,
+/* The exact size a full MSG_SESSION_LIST2 payload can reach, so the buffers
+ * that hold one are sized by the layout instead of by PROTO_MAX_PAYLOAD's
+ * 1 MiB. 19 is the per-entry overhead of the larger of the two list layouts,
  * handle_list2: 2 entry-length prefix + 1 name length + 2 cols + 2 rows + 1 live
  * + 1 nclients + 4 pid + 4 exit status + 1 npanes + 1 zoomed, with the name
- * itself counted by SESSION_NAME_MAX; the leading 2 is the list's count field. */
-_Static_assert(2 + (size_t)MAX_SESSIONS * (SESSION_NAME_MAX + 19) <= PROTO_MAX_PAYLOAD,
+ * itself counted by SESSION_NAME_MAX; the leading 2 is the list's count field.
+ *
+ * Both list encoders still break out when the next entry would not fit, but a
+ * runtime break silently TRUNCATES the user's session list; this assertion is
+ * what turns "someone raised MAX_SESSIONS" from a buffer overflow into a build
+ * failure. With the encoder now bounded by this constant rather than by
+ * PROTO_MAX_PAYLOAD, the assertion is what proves the break is unreachable —
+ * so it is load-bearing for the sessions-changed diff too, which must see the
+ * whole table or it cannot notice a change in the tail of it. */
+#define SESSION_LIST2_MAX (2 + (size_t)MAX_SESSIONS * (SESSION_NAME_MAX + 19))
+_Static_assert(SESSION_LIST2_MAX <= PROTO_MAX_PAYLOAD,
                "MAX_SESSIONS x max session entry no longer fits one MSG_SESSION_LIST "
                "payload: raise PROTO_MAX_PAYLOAD or paginate the list message");
 
@@ -170,8 +176,18 @@ static void handle_list(client *c) {
     client_send(c, MSG_SESSION_LIST, payload, (uint32_t)off);
 }
 
-static void handle_list2(client *c) {
-    uint8_t payload[PROTO_MAX_PAYLOAD];
+/* Serialize the whole session table as a MSG_SESSION_LIST2 payload into `out`
+ * (at least SESSION_LIST2_MAX bytes); returns the length written.
+ *
+ * Lifted out of handle_list2 because it has a SECOND caller now — the
+ * sessions-changed gate below diffs these exact bytes to decide whether
+ * anything a client can observe has changed. Keeping it one function is the
+ * point, not a tidiness preference: the gate must watch precisely the fields
+ * this message carries, and a future append to the entry layout has to be
+ * covered automatically rather than remembered. Two copies would drift, and
+ * the failure would be silent in the worst direction — a field that changes
+ * without ever notifying anyone. */
+static size_t encode_session_list2(uint8_t *out, size_t cap) {
     size_t off = 2;
     uint16_t count = 0;
     for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -185,23 +201,95 @@ static void handle_list2(client *c) {
             if (s->panes[j].in_use) npanes++;
         pane *ap = session_active_pane(s);
         size_t entry = 1 + nlen + 2 + 2 + 1 + 1 + 4 + 4 + 1 + 1;
-        if (off + 2 + entry > sizeof payload) break;
-        put_u16(payload + off, (uint16_t)entry); off += 2;
-        payload[off++] = (uint8_t)nlen;
-        memcpy(payload + off, s->name, nlen); /* NOLINT(bugprone-not-null-terminated-result) */
+        if (off + 2 + entry > cap) break;
+        put_u16(out + off, (uint16_t)entry); off += 2;
+        out[off++] = (uint8_t)nlen;
+        memcpy(out + off, s->name, nlen); /* NOLINT(bugprone-not-null-terminated-result) */
         off += nlen;
-        put_u16(payload + off, s->view_cols); off += 2;
-        put_u16(payload + off, s->view_rows); off += 2;
-        payload[off++] = (ap && ap->child.pid > 0) ? 1 : 0;
-        payload[off++] = (uint8_t)ncli;
-        put_u32(payload + off, (uint32_t)(ap ? ap->child.pid : -1)); off += 4;
-        put_u32(payload + off, (uint32_t)(ap ? ap->exit_status : 0)); off += 4;
-        payload[off++] = (uint8_t)npanes;
-        payload[off++] = s->zoomed_id != 255 ? 1 : 0;
+        put_u16(out + off, s->view_cols); off += 2;
+        put_u16(out + off, s->view_rows); off += 2;
+        out[off++] = (ap && ap->child.pid > 0) ? 1 : 0;
+        out[off++] = (uint8_t)ncli;
+        put_u32(out + off, (uint32_t)(ap ? ap->child.pid : -1)); off += 4;
+        put_u32(out + off, (uint32_t)(ap ? ap->exit_status : 0)); off += 4;
+        out[off++] = (uint8_t)npanes;
+        out[off++] = s->zoomed_id != 255 ? 1 : 0;
         count++;
     }
-    put_u16(payload, count);
+    put_u16(out, count);
+    return off;
+}
+
+static void handle_list2(client *c) {
+    uint8_t payload[SESSION_LIST2_MAX];
+    size_t off = encode_session_list2(payload, sizeof payload);
     client_send(c, MSG_SESSION_LIST2, payload, (uint32_t)off);
+}
+
+/* ---- sessions-changed notification (MSG_SESSIONS_CHANGED) ----
+ *
+ * The last list the daemon believes capable clients have, stored as the BYTES
+ * rather than a hash of them. A hash would be smaller and the comparison
+ * cheaper, but a collision here does not delay an update — it drops it
+ * permanently, and the client would sit showing a stale list with nothing to
+ * make it ask again. 5,250 bytes is a cheap price for not having to reason
+ * about that. (Same argument, same words, as the GUI's panel ChangeGate.)
+ *
+ * A poll of the encoder rather than a hook in each mutator, deliberately. The
+ * fields MSG_SESSION_LIST2 exposes are written from session_new, session_kill,
+ * the SIGCHLD bottom half, attach, detach, split, close_pane, select/zoom and
+ * resize — nine producers today, and hand-hooking a set that size means the
+ * tenth one silently does not notify. Diffing the encoder's output has exactly
+ * one producer, which is the encoder. */
+static uint8_t g_last_list[SESSION_LIST2_MAX];
+static size_t g_last_list_len;
+
+/* Seed the baseline from the table as it stands at listen time, called from
+ * server_init.
+ *
+ * Needed because "nothing encoded yet" is not a state any client saw: the first
+ * tick would otherwise announce the step from an empty buffer to the table as it
+ * already was. Seeding rather than suppressing that first notification is the
+ * important half. Suppression loses a REAL change — a client that connects and
+ * creates a session inside the daemon's first 20 ms would have its own creation
+ * folded into the baseline and then never hear about anything, which is not
+ * hypothetical: the autospawn path connects immediately after starting the
+ * daemon, and at-client's real-daemon test reproduced exactly that and hung.
+ *
+ * Safe here as an ORDERING guarantee rather than a timing bet: server_init is
+ * what creates the listener, so no client can have completed a HELLO yet and the
+ * seeded state cannot be one anybody observed. main.c's handoff import runs
+ * before this too, so a reload seeds the restored table and announces nothing
+ * spurious to the clients that reconnect after it. */
+static void session_changes_seed(void) {
+    g_last_list_len = encode_session_list2(g_last_list, sizeof g_last_list);
+}
+
+static bool client_wants_session_events(const client *c) {
+    return c->hello_done && (c->caps & CLIENT_CAP_SESSION_EVENTS) != 0;
+}
+
+/* Re-encode the list; if it differs from what was last announced, tell every
+ * capable client to ask again. Driven by the daemon tick, which is what
+ * coalesces a burst into one notification. */
+void server_broadcast_session_changes(void) {
+    uint8_t now[SESSION_LIST2_MAX];
+    size_t n = encode_session_list2(now, sizeof now);
+    bool changed = n != g_last_list_len || memcmp(now, g_last_list, n) != 0;
+    if (!changed) return;
+    /* Recorded BEFORE the fan-out, not after. client_send disconnects a client
+     * that is past its backlog high-water, and a disconnect detaches it, which
+     * changes nclients — i.e. the loop below can change the very thing being
+     * announced. Storing first means that change is simply a difference the
+     * NEXT tick finds and announces; storing afterwards would record the
+     * post-disconnect state as already-announced and lose it. */
+    memcpy(g_last_list, now, n);
+    g_last_list_len = n;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client *c = &g_clients[i];
+        if (!c->in_use || !client_wants_session_events(c)) continue;
+        client_send(c, MSG_SESSIONS_CHANGED, NULL, 0);
+    }
 }
 
 static void handle_new(client *c, const uint8_t *p, size_t len) {
@@ -321,8 +409,12 @@ static void dispatch(client *c, uint8_t type, const uint8_t *p, size_t len) {
         put_u32(ok + 6, handoff_generation());
         /* server_flags: appended after generation, same additive rule. Lets a
          * capable client say "this daemon has no panes" instead of a silent
-         * no-op when its split chord goes unanswered. */
-        put_u16(ok + 10, SERVER_CAP_PANES);
+         * no-op when its split chord goes unanswered. Bits are OR'd in, never
+         * assigned one at a time: a client that tests for panes with
+         * `flags == SERVER_CAP_PANES` rather than a mask would break the day a
+         * second bit appeared, so both bits ship together and the integration
+         * test asserts BOTH are present. */
+        put_u16(ok + 10, SERVER_CAP_PANES | SERVER_CAP_SESSION_EVENTS);
         c->hello_done = true;
         client_send(c, MSG_HELLO_OK, ok, sizeof ok);
         return;
@@ -636,6 +728,9 @@ int server_init(const char *socket_path, int inherited_fd) {
             }
             g_listen_fd = inherited_fd;
             log_msg(LOG_INFO, "adopted inherited listener fd %d", inherited_fd);
+            /* Both success paths seed, not just the fresh-bind one: this is the
+             * reload path, where the table is at its least empty. */
+            session_changes_seed();
             return 0;
         }
     }
@@ -677,6 +772,7 @@ int server_init(const char *socket_path, int inherited_fd) {
         return -1;
     }
     g_listen_fd = fd;
+    session_changes_seed();
     return 0;
 }
 
