@@ -1109,6 +1109,47 @@ appears in the sidebar in well under a second against a current daemon, that a b
 creates settles as one list, that a v0.1.0 daemon still updates the sidebar within ~2 s, and
 that killing the daemon under the GUI recovers without a relaunch.
 
+## Daemon round 11 (2026-08-17): a session that outlives the client it points at
+
+Found by reading `server.c` while implementing round 10, not by a failing test. **`handle_new`
+recorded the new session without leaving the old one** — `c->attached = s` where
+`handle_attach` has always written `if (c->attached && c->attached != s)
+session_detach(c->attached, c);` first.
+
+**Why an inflated `nclients` was the least of it.** `g_clients` is a static table of **reused
+slots**. The old session keeps the pointer, `client_disconnect` only detaches from
+`c->attached` (by then the *new* session), so the entry survives the connection — and the next
+client to connect takes that slot. Measured against the unfixed daemon, with a session printing
+every 200 ms: a client that connected, said `MSG_HELLO`, and asked for nothing received **7
+`MSG_OUTPUT` frames** from a session it never named. It also votes in that session's
+smallest-attached-client geometry, so it can reflow a TUI it cannot see. And because
+`session_attach` returns early when the client is already in `clients[]`, that client's *own*
+later attach to the same session sends **no snapshot at all** — a terminal that never paints,
+which is the form a user would report it in.
+
+**Why it went unnoticed.** It needs a connection that creates twice, or attaches and then
+creates. Both shipped clients create once per connection: the CLI's `new` exits, and the GUI
+opens a fresh control connection per command. Nothing in the product reaches it — which is
+exactly why it is worth fixing now rather than after a refactor makes the GUI's control
+connection persistent.
+
+This is the mirror image of the `test_slot_reuse.sh` defect: there a *client* held a stale
+pointer into a reused **session** slot; here a *session* holds a stale pointer into a reused
+**client** slot. Same static-table shape, opposite direction — and the pair is why the new
+script asserts on the harm rather than on the count.
+
+**Verification.** `tests/integration/test_new_detaches.sh`, four properties: the list reports
+0 clients on the abandoned session; a fresh connection that never asked for it receives no
+render frames; that connection can still attach to it for real and get a snapshot; and
+`ATTACH a; NEW c` leaks the same way. **Each of the four was confirmed to go red on its own**
+against the unfixed daemon, with the earlier assertions relaxed so it had to fail for its own
+reason — otherwise property 1 masks the other three and three of them are decoration. Unit:
+13,567 checks / 0 failures unchanged. Integration: **34** scripts (33 before), all rc=0.
+Mutation: 1/1 killed, control green before and after restore.
+
+**Nothing for a human to check.** No shipped client can reach the path, so there is no GUI row
+for this round; the wire script is the whole acceptance.
+
 ## Reproducing this UAT
 
 The interactive cases are pty scripts; the shape for all of them:
