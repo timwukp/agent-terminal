@@ -103,10 +103,13 @@ fn a_rewritten_usage_replaces_its_predecessor() {
 #[test]
 fn a_rewrite_in_a_later_minute_credits_the_minute_it_was_counted_in() {
     // The rewrite above happens inside one minute, which is the easy case.
-    // A finalized usage can land after the minute boundary instead —
-    // measured 1,079 times across the 1,857 transcripts on one machine —
-    // and then the retraction belongs to the minute the tokens were ADDED
-    // to, not to the minute the rewrite arrived in.
+    // A finalized usage can land after the minute boundary instead, and
+    // then the retraction belongs to the minute the tokens were ADDED to,
+    // not to the minute the rewrite arrived in. Measured on one machine:
+    // the 85 transcripts this watcher can read contain 2 rewrites, 1 of
+    // them cross-minute; the full tree (1,857 files, including the
+    // subagent/workflow transcripts list_active does not yet descend
+    // into) contains 1,079 cross-minute rewrites.
     let mut acc = Accumulator::default();
     acc.feed(&assistant_line("m1", "2026-08-11T13:42:59.000Z", 50));
     acc.feed(&assistant_line("m2", "2026-08-11T13:43:01.000Z", 7));
