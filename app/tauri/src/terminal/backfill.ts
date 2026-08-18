@@ -92,6 +92,8 @@ export class Backfill {
   /** First seq not yet requested / next page start. */
   private nextStart = 0;
   private wroteAny = false;
+  /** Seq of the oldest line actually written; see oldestWritten(). */
+  private oldest: number | null = null;
   /** One past the last seq to show (sb_lines at snapshot time). */
   private target = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -134,7 +136,10 @@ export class Backfill {
     // [firstSeq, target).
     const show = Math.min(lines.length, Math.max(0, this.target - firstSeq));
     for (let i = 0; i < show; i++) this.sinks.writeLine(lines[i]);
-    if (show > 0) this.wroteAny = true;
+    if (show > 0) {
+      this.wroteAny = true;
+      if (this.oldest === null) this.oldest = firstSeq;
+    }
     const covered = firstSeq + lines.length;
     if (lines.length === 0 || covered >= this.target) {
       this.finish();
@@ -147,6 +152,36 @@ export class Backfill {
   /** The stall timer fired (or the host gave up): paint what we have. */
   onStall(): void {
     if (!this.disposed && this.state !== "live") this.finish();
+  }
+
+  /** The attach-time fetch is over (or was never needed): live output goes
+   * straight to the view and no page is outstanding.
+   *
+   * The deep-history offer is gated on this. Both machines consume
+   * MSG_SCROLLBACK_DATA, which carries no requester id, so exactly one may
+   * be waiting at a time — and the pill is reachable mid-fetch, because the
+   * first page already gives it a number to show and the user can scroll to
+   * the top while the remaining 24 are still in flight. Opening a viewer
+   * there would let it eat a page this machine asked for: the live history
+   * ends up truncated and the window anchors on a seq nobody chose. */
+  isLive(): boolean {
+    return this.state === "live";
+  }
+
+  /** Seq of the oldest history line this machine actually wrote into the
+   * view, or null when it wrote none (a session with no history, or a
+   * fetch that stalled before its first page landed).
+   *
+   * The deep-history viewer (historyView.ts) needs this to know where the
+   * live buffer begins, and it has to be the OBSERVED seq rather than the
+   * requested floor (`sb_lines - FETCH_MAX`): the daemon answers from the
+   * oldest seq the log still holds, which rotation can move forward after
+   * the request. A viewer that abutted the *request* would then leave a
+   * hole between its last line and the live buffer's first while
+   * presenting the two as continuous — the one failure this feature must
+   * not have, since being trusted about what was said is its whole job. */
+  oldestWritten(): number | null {
+    return this.oldest;
   }
 
   /** Component unmount: nothing may fire afterwards. */

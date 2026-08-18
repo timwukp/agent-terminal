@@ -261,7 +261,14 @@ it, seeked out of the on-disk log — so the mouse wheel scrolls back through
 output from before the GUI ever connected. The cap is a client-side memory
 budget, not the daemon's limit: xterm.js stores 12 bytes per cell, so 25,000
 lines is ~37 MB per tab at 124 columns, and it is paid at attach because
-xterm cannot prepend to its buffer. ⌘/Ctrl `+`
+xterm cannot prepend to its buffer. Scroll to the top of that buffer and the
+GUI says how many lines are behind it — the largest session measured here has
+93,374, so 68,374 of them are out of the buffer's reach — and offers a
+**read-only history viewer** that pages through the whole log in a 4,000-line
+window (~6 MB at 124 columns, freed when it closes): ⤒/↑/↓/⤓, Home/End, or
+simply keep scrolling at either edge. It needs no new protocol message: the
+same `MSG_SCROLLBACK_REQ` has served any depth ever since the daemon learned
+to seek past its in-memory ring into the on-disk log. ⌘/Ctrl `+`
 `−` `0` zoom the glyphs without reflowing the session's grid; the window
 never resizes a session someone else created — the toolbar's ⤢ button
 (or the hint that labels a large letterbox, or a window too small for the

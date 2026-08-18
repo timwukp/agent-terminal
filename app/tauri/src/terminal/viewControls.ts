@@ -45,6 +45,26 @@ export function isAtBottom(viewportY: number, baseY: number): boolean {
   return viewportY >= baseY;
 }
 
+/** Lines of history that exist in the session but are NOT in this
+ * terminal's buffer — everything older than the oldest line backfill
+ * wrote.
+ *
+ * `sbLines` is the snapshot's total; `oldestLive` is
+ * Backfill.oldestWritten() (null when no history page landed, in which
+ * case the whole log is out of reach rather than none of it — the
+ * direction a "did it write anything?" boolean gets backwards).
+ *
+ * This is the number the user is owed: their report was "I scrolled up and
+ * my earlier conversation was not there", and the honest answer names how
+ * many lines are beyond the buffer rather than implying the session was
+ * restarted or cleared. Zero means the terminal really does hold all of
+ * it, and the deep-history affordance must stay hidden — offering to open
+ * a viewer onto nothing is its own kind of lie. */
+export function unreachedHistory(sbLines: number, oldestLive: number | null): number {
+  if (sbLines <= 0) return 0;
+  return Math.max(0, Math.min(sbLines, oldestLive ?? sbLines));
+}
+
 /** Window title: the active session first (that is what ⌘-Tab and
  * screenshots need), the app name as suffix.
  *

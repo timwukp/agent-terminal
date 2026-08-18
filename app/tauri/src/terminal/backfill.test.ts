@@ -126,6 +126,37 @@ describe("Backfill", () => {
     expect(requests[1]).toEqual([1800, 200]);
   });
 
+  it("reports the oldest line it wrote, as served — not as requested", () => {
+    const { sinks } = journal();
+    const b = new Backfill(sinks);
+    // Nothing has landed yet: null, which the deep-history caller reads as
+    // "none of the log is reachable" (viewControls.unreachedHistory). The
+    // opposite default would hide the viewer on exactly the sessions that
+    // need it most.
+    expect(b.oldestWritten()).toBeNull();
+    b.onSnapshot(80, 24, 2000, enc("P"));
+    expect(b.oldestWritten()).toBeNull();
+    // Asked from 0, answered from 800 (rotation). 800 is where this
+    // buffer begins; a viewer abutting 0 would leave lines 0..799 in
+    // neither view while presenting the join as continuous.
+    b.onScrollback(800, lines(1000));
+    expect(b.oldestWritten()).toBe(800);
+    // Later pages are newer, so the oldest never moves again.
+    b.onScrollback(1800, lines(200));
+    expect(b.oldestWritten()).toBe(800);
+  });
+
+  it("reports no oldest line when a page came back carrying nothing to write", () => {
+    const { sinks } = journal();
+    const b = new Backfill(sinks);
+    // sb_lines said 3, and the page is entirely past it — every line is
+    // clamped away, so this buffer got no history at all. Recording 0 here
+    // (the firstSeq) would claim the buffer starts at the log's start.
+    b.onSnapshot(80, 24, 3, enc("P"));
+    b.onScrollback(3, lines(5));
+    expect(b.oldestWritten()).toBeNull();
+  });
+
   it("clamps lines past the announced total (they are already in queued output)", () => {
     const { calls, sinks } = journal();
     const b = new Backfill(sinks);

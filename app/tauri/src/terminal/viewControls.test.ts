@@ -13,6 +13,7 @@ import {
   makeOneShotSet,
   nextFontSize,
   overflowsHost,
+  unreachedHistory,
   windowTitle,
   zoomActionForKey,
 } from "./viewControls";
@@ -147,6 +148,40 @@ describe("makeOneShotSet", () => {
     // Re-selecting the session later must NOT re-impose geometry.
     expect(s.consume("claude-1")).toBe(false);
     expect(s.consume("never-added")).toBe(false);
+  });
+});
+
+describe("unreachedHistory", () => {
+  it("counts everything older than the oldest line the buffer holds", () => {
+    // The reported session: 93,374 lines of history, FETCH_MAX = 25,000
+    // written at attach, so 68,374 lines exist and are not on screen. This
+    // is the number the "open history" offer shows.
+    expect(unreachedHistory(93374, 68374)).toBe(68374);
+  });
+  it("is zero when the buffer holds all of it, so nothing is offered", () => {
+    // Not "small": exactly zero, because the affordance is gated on > 0 and
+    // an off-by-one here offers a viewer onto an empty window.
+    expect(unreachedHistory(900, 0)).toBe(0);
+    expect(unreachedHistory(0, null)).toBe(0);
+    expect(unreachedHistory(0, 0)).toBe(0);
+  });
+  it("treats 'no page landed' as the whole log being out of reach", () => {
+    // The direction a "did it write anything?" boolean gets backwards: a
+    // stalled fetch means the user can reach NONE of the history, not all
+    // of it, and the viewer is the only way to see any of it.
+    expect(unreachedHistory(93374, null)).toBe(93374);
+  });
+  it("follows the served seq, which rotation moves forward", () => {
+    // Asked from 68,374, answered from 70,000: 70,000 lines are unreached,
+    // not 68,374. Using the request would understate it by 1,626 and — the
+    // part that matters — would anchor the viewer's window into a gap.
+    expect(unreachedHistory(93374, 70000)).toBe(70000);
+  });
+  it("never claims more is missing than the log has", () => {
+    // A stale total, below a later page's seq, must not produce a count
+    // above the total.
+    expect(unreachedHistory(1000, 5000)).toBe(1000);
+    expect(unreachedHistory(1000, -5)).toBe(0);
   });
 });
 
