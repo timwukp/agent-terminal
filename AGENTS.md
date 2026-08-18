@@ -670,6 +670,28 @@ both; Dependabot moves the pins). The one write scope in the repo is
 job-level, on the release workflow's publish job, because creating a GitHub
 Release requires it.
 
+### Version management
+
+Two identities, both required, because each answers a question the other
+cannot:
+
+- **The semver** (`app/tauri/src-tauri/tauri.conf.json`, `package.json`,
+  `src-tauri/Cargo.toml` — bump all three together, plus both lockfiles) is
+  the release train. **Any PR that changes user-visible behaviour bumps it
+  in that same PR** — feature → minor, fix → patch. A version number that
+  has shipped is never reused for different behaviour: v0.1.0 once named
+  both the pre- and post-deep-history GUI bundles, and nothing on screen
+  could tell them apart.
+- **The build stamp** (`tools/version.sh`, `<head12>[-dirty.<content8>]`)
+  is automatic per-tree identity. The C binaries embed it via the Makefile;
+  the GUI embeds it via `build.rs` (`AT_BUILD_IDENTITY`) and shows
+  `v<semver> (<stamp>)` in the panel footer. This is what makes an
+  unreleased or UAT build distinguishable without anyone remembering to
+  bump anything.
+
+When handing someone a locally built artifact, state the full identity
+(semver + stamp + build time), never the semver alone.
+
 ### Cutting a release
 
 Releases are tag-triggered (`.github/workflows/release.yml`) and ship a

@@ -39,9 +39,39 @@ fn main() {
         println!("cargo:rerun-if-changed={s}");
     }
     println!("cargo:rerun-if-changed=../dist");
+    // The identity stamp's inputs: this crate's own sources (an edit
+    // must re-stamp the dirty hash) and the git refs (a commit must flip
+    // dirty → clean). A binary cargo declines to rebuild keeps the stamp
+    // of the tree it was actually built from, which is the truth.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=../../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../../.git/index");
 
+    stamp_identity();
     check_frontend();
     tauri_build::build();
+}
+
+/// Stamp `tools/version.sh`'s tree identity into the binary (read back
+/// by src/version.rs). The C Makefile regenerates at_version.h on every
+/// make for the same purpose; this is cargo's equivalent. The script is
+/// run from the repo root because its untracked-file sweep is
+/// cwd-scoped, and the stamp must match what `make` puts in the C
+/// binaries for the same tree.
+fn stamp_identity() {
+    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../..");
+    let id = std::process::Command::new("sh")
+        .arg("tools/version.sh")
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        // Same fallback the script itself uses outside a checkout; the
+        // version.rs test refuses it in any environment that has git.
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=AT_BUILD_IDENTITY={id}");
 }
 
 fn check_frontend() {

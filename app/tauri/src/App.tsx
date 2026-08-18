@@ -14,12 +14,15 @@ import { decideNotify, deliverNotification } from "./notify";
 import { makeOneShotSet } from "./terminal/viewControls";
 import { theme } from "./theme";
 import ThemeSwitch from "./ThemeSwitch";
+import VersionBadge from "./VersionBadge";
+import { TauriVersionApi } from "./versionApi";
 
 export default function App() {
   const transport = useMemo(() => new TauriTransport(), []);
   const api = useMemo(() => new TauriControlApi(), []);
   const usageApi = useMemo(() => new TauriUsageApi(), []);
   const hooksApi = useMemo(() => new TauriHooksApi(), []);
+  const versionApi = useMemo(() => new TauriVersionApi(), []);
   // The inactive tab's panel unmounts, which stops its polling for free.
   const [claudeTab, setClaudeTab] = useState<"usage" | "hooks">("usage");
 
@@ -232,6 +235,7 @@ export default function App() {
               ))}
             </div>
             {claudeTab === "usage" ? <TokenPanel api={usageApi} /> : <HooksPanel api={hooksApi} />}
+            <VersionBadge api={versionApi} />
           </>
         )}
       </aside>
