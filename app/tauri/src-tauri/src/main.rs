@@ -10,6 +10,7 @@ mod panels;
 mod session;
 mod templates;
 mod usage;
+mod version;
 
 fn main() {
     tauri::Builder::default()
@@ -45,6 +46,7 @@ fn main() {
             hooks::hook_log_snapshot,
             panels::panel_stream,
             panels::panel_stream_stop,
+            version::app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
