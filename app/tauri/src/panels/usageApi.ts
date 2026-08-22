@@ -26,6 +26,9 @@ export interface TranscriptUsage {
   model: string;
   last_timestamp: string;
   buckets: Bucket[];
+  /** Bytes of this transcript not yet counted (the per-call read budget
+   * ran out). Non-zero = the totals above are still climbing. */
+  pending_bytes: number;
 }
 
 export interface UsageApi {

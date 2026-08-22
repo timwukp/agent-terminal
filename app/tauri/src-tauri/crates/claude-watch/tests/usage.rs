@@ -227,6 +227,113 @@ fn watcher_tails_appends_and_resets_on_truncation() {
 }
 
 #[test]
+fn a_read_budget_spreads_history_across_calls_and_says_so() {
+    // The first snapshot over a machine's history measured 131.4 MB /
+    // ~81 s as ONE synchronous call. Under a budget the same bytes are
+    // read a slice per call: every capped call must (a) stop at the
+    // budget, (b) admit what it skipped via pending_bytes, (c) resume
+    // where it stopped, and (d) converge on exactly the numbers an
+    // unbudgeted read produces — nothing dropped at the seams, even
+    // when the cap lands mid-line.
+    let root = tempfile::tempdir().expect("tempdir");
+    let proj = root.path().join("-opt-proj");
+    std::fs::create_dir(&proj).unwrap();
+    let mut content = String::new();
+    for i in 0..200 {
+        let ts = format!("2026-08-11T10:{:02}:{:02}.000Z", i / 60, i % 60);
+        content.push_str(&assistant_line(&format!("m{i}"), &ts, 3));
+        content.push('\n');
+    }
+    let total_len = content.len() as u64;
+    std::fs::write(proj.join("big.jsonl"), &content).unwrap();
+
+    let mut w = Watcher::new(root.path().to_path_buf());
+    let budget = total_len / 7; // guaranteed to cut lines mid-way
+    let first = w.snapshot_with_budget(budget);
+    assert_eq!(first.len(), 1, "a still-loading transcript is a row");
+    assert!(
+        first[0].messages < 200,
+        "the budget must actually stop the read ({} of 200)",
+        first[0].messages
+    );
+    assert!(
+        first[0].pending_bytes > 0,
+        "a partial row must admit it is partial"
+    );
+
+    let mut calls = 1;
+    loop {
+        let snap = w.snapshot_with_budget(budget);
+        calls += 1;
+        assert!(calls < 20, "never converged");
+        if snap[0].pending_bytes == 0 {
+            assert_eq!(snap[0].messages, 200, "everything counted, once");
+            assert_eq!(snap[0].totals.output_tokens, 600);
+            break;
+        }
+    }
+
+    // Steady state after convergence: appended bytes still arrive.
+    let mut cur = std::fs::read(proj.join("big.jsonl")).unwrap();
+    cur.extend_from_slice(
+        (assistant_line("m-new", "2026-08-11T11:00:00.000Z", 5) + "\n").as_bytes(),
+    );
+    std::fs::write(proj.join("big.jsonl"), cur).unwrap();
+    let snap = w.snapshot_with_budget(budget);
+    assert_eq!(snap[0].messages, 201);
+    assert_eq!(snap[0].totals.output_tokens, 605);
+    assert_eq!(snap[0].pending_bytes, 0);
+}
+
+#[test]
+fn the_budget_is_shared_across_files_not_granted_per_file() {
+    // Two transcripts, one call, budget = half their combined bytes.
+    // The call must stop at the budget IN TOTAL — a per-file grant would
+    // read both files whole and the panel's "still reading" honesty
+    // would never trigger on exactly the machine that needs it (many
+    // active transcripts). Read sizes are exact (read_slice takes
+    // min(want, remaining) bytes), so the leftover is exact too.
+    let root = tempfile::tempdir().expect("tempdir");
+    let proj = root.path().join("-opt-proj");
+    std::fs::create_dir(&proj).unwrap();
+    let mut total: u64 = 0;
+    for name in ["a.jsonl", "b.jsonl"] {
+        let mut content = String::new();
+        for i in 0..100 {
+            let ts = format!("2026-08-11T10:{:02}:{:02}.000Z", i / 60, i % 60);
+            content.push_str(&assistant_line(&format!("{name}-m{i}"), &ts, 2));
+            content.push('\n');
+        }
+        total += content.len() as u64;
+        std::fs::write(proj.join(name), &content).unwrap();
+    }
+
+    let mut w = Watcher::new(root.path().to_path_buf());
+    let budget = total / 2;
+    let first = w.snapshot_with_budget(budget);
+    let pending: u64 = first.iter().map(|r| r.pending_bytes).sum();
+    assert_eq!(
+        pending,
+        total - budget,
+        "one call reads budget bytes in total; everything else is owed"
+    );
+
+    let mut calls = 1;
+    loop {
+        let snap = w.snapshot_with_budget(budget);
+        calls += 1;
+        assert!(calls < 10, "never converged");
+        if snap.iter().all(|r| r.pending_bytes == 0) {
+            let msgs: u64 = snap.iter().map(|r| r.messages).sum();
+            let out: u64 = snap.iter().map(|r| r.totals.output_tokens).sum();
+            assert_eq!(msgs, 200, "both files fully counted, nothing twice");
+            assert_eq!(out, 400);
+            break;
+        }
+    }
+}
+
+#[test]
 fn watcher_ignores_non_jsonl_and_orders_newest_first() {
     let root = tempfile::tempdir().expect("tempdir");
     let proj = root.path().join("-opt-proj");
