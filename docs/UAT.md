@@ -1348,8 +1348,9 @@ file; `testTimeout` was deliberately **not** raised a second time for it. `test_
 failed there for the same reason and is not a regression: its 300×300 truecolor paint is 6.3 s
 of CPU that took **125.6 s of wall clock**, against a fixed 60 s deadline inside the test. On an
 idle machine it passes unpatched — 2,006,806 bytes delivered in parts. A deadline set 10× above
-the work it measures and still lost to load is measuring the wrong thing; replacing it with a
-progress-based one belongs in its own change. The rule the 36 spinners teach is
+the work it measures and still lost to load is measuring the wrong thing; it has since been
+replaced with a progress-based one — the socket's per-read 30 s timeout, which every arriving
+frame restarts, so only a genuine stall fails. The rule the 36 spinners teach is
 the one rule 3 of this document already states for daemons, generalized: kill the pid you
 started, and capture it at the moment you start it — a cleanup that discovers its own targets
 can discover none and report success.

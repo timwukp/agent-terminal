@@ -76,6 +76,18 @@ def connect():
     assert typ == 0x02, 'expected HELLO_OK, got %r' % typ
     return s
 
+def read_frame_or_stall(s, what):
+    # Progress-based deadline: the socket timeout (30 s, set in connect)
+    # restarts at every recv, so any arriving frame is progress and only
+    # a genuine stall fails. A fixed wall-clock cap here lost to machine
+    # load once: 6.3 s of paint CPU took 125.6 s of wall clock with
+    # frames arriving the whole time (docs/UAT.md, round 9), and the
+    # test failed a run in which nothing was wrong.
+    try:
+        return read_frame(s)
+    except socket.timeout:
+        assert False, '%s stalled: no frame for %gs' % (what, s.gettimeout())
+
 def wait_log(pattern, timeout=10):
     for _ in range(timeout * 10):
         with open(daemon_log, errors='replace') as f:
@@ -106,10 +118,8 @@ assert wait_log("session 'fat': pid"), 'session never created'
 # Drain the live tee until the sentinel arrives, so the grid is fully painted
 # before the second client asks for its snapshot.
 seen = b''
-deadline = time.time() + 60
 while b'PAINTED' not in seen:
-    assert time.time() < deadline, 'paint never finished'
-    typ, payload = read_frame(s1)
+    typ, payload = read_frame_or_stall(s1, 'paint')
     assert typ is not None, 'daemon dropped the painting client'
     if typ == 0x30:
         seen += payload[-4096:] if len(payload) > 4096 else payload
@@ -134,7 +144,7 @@ total = len(payload) - 12
 # the end of the snapshot bytes.
 s2.sendall(frame(0x40, struct.pack('<Q', 0x1234)))
 while True:
-    typ, payload = read_frame(s2)
+    typ, payload = read_frame_or_stall(s2, 'snapshot')
     assert typ is not None, 'daemon dropped us mid-snapshot'
     if typ == 0x41:
         break
