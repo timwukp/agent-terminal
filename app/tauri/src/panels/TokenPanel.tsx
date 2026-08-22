@@ -90,6 +90,15 @@ export default function TokenPanel({ api }: { api: UsageApi }) {
           {error}
         </p>
       )}
+      {(rows ?? []).some((r) => r.pending_bytes > 0) && (
+        <p
+          role="status"
+          title="the first read over a large history is spread across ticks so the window never freezes"
+          style={{ fontSize: 10, color: theme.textMuted }}
+        >
+          still reading history — totals are climbing
+        </p>
+      )}
       {rows !== null && rows.length === 0 && (
         <p style={{ fontSize: 11, color: theme.textMuted }}>
           no transcripts active in the last 48 h — claude writes them under ~/.claude/projects as

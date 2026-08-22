@@ -267,11 +267,26 @@ pub struct TranscriptUsage {
     pub model: String,
     pub last_timestamp: String,
     pub buckets: Vec<Bucket>,
+    /// Bytes this transcript is known to hold that have not been counted
+    /// yet (the read budget ran out). Non-zero means the numbers above
+    /// are still climbing; the panel says so instead of presenting a
+    /// partial total as final.
+    pub pending_bytes: u64,
 }
 
 /// Only transcripts written to within this window are tailed. Keeps the
 /// per-poll stat set proportional to *live* work, not to history.
 pub const ACTIVE_WINDOW_SECS: u64 = 48 * 3600;
+
+/// Most bytes one `snapshot()` call will read, shared across all files.
+/// Steady state never comes near it (a call reads only appended bytes),
+/// but the FIRST call over a machine's history does: 131.4 MB of active
+/// transcripts measured here, ~81 s of parsing — as one synchronous call,
+/// that froze whatever thread asked. Under the budget the same work
+/// happens a slice per call and the caller's cadence (the panel stream's
+/// 2 s tick) spreads it out; `pending_bytes` on each row says the
+/// numbers are still climbing.
+pub const SNAPSHOT_READ_BUDGET: u64 = 4 * 1024 * 1024;
 
 struct Tail {
     cursor: Cursor,
@@ -296,8 +311,20 @@ impl Watcher {
 
     /// Poll every active transcript and return current numbers, newest
     /// activity first. Cheap when nothing changed: one stat per file,
-    /// reads only appended bytes.
+    /// reads only appended bytes — and never more than
+    /// [`SNAPSHOT_READ_BUDGET`] in one call (see there for why).
     pub fn snapshot(&mut self) -> Vec<TranscriptUsage> {
+        self.snapshot_with_budget(SNAPSHOT_READ_BUDGET)
+    }
+
+    /// `snapshot` with the per-call read cap explicit, for tests. The
+    /// budget bounds this CALL's work; what it leaves unread is reported
+    /// on the affected rows as `pending_bytes` and read by later calls,
+    /// each resuming at the byte offset the last one reached.
+    pub fn snapshot_with_budget(&mut self, budget: u64) -> Vec<TranscriptUsage> {
+        let mut remaining = budget;
+        // (path, bytes this file still has beyond what was counted)
+        let mut behind: HashMap<PathBuf, u64> = HashMap::new();
         for path in list_active(&self.root) {
             let tail = self.tails.entry(path.clone()).or_insert_with(|| Tail {
                 cursor: Cursor::default(),
@@ -315,15 +342,26 @@ impl Watcher {
                 };
             }
             if meta.len() > tail.cursor.offset() {
-                if let Ok(chunk) = read_from(&path, tail.cursor.offset()) {
-                    tail.cursor.feed_chunk(&chunk, &mut tail.acc);
+                let want = meta.len() - tail.cursor.offset();
+                let take = want.min(remaining);
+                if take > 0 {
+                    if let Ok(chunk) = read_slice(&path, tail.cursor.offset(), take) {
+                        remaining -= chunk.len() as u64;
+                        tail.cursor.feed_chunk(&chunk, &mut tail.acc);
+                    }
+                }
+                let left = meta.len().saturating_sub(tail.cursor.offset());
+                if left > 0 {
+                    behind.insert(path.clone(), left);
                 }
             }
         }
         let mut out: Vec<TranscriptUsage> = self
             .tails
             .iter()
-            .filter(|(_, t)| t.acc.messages > 0 || t.acc.malformed > 0)
+            .filter(|(path, t)| {
+                t.acc.messages > 0 || t.acc.malformed > 0 || behind.contains_key(*path)
+            })
             .map(|(path, t)| TranscriptUsage {
                 id: path
                     .file_stem()
@@ -340,6 +378,7 @@ impl Watcher {
                 model: t.acc.model.clone(),
                 last_timestamp: t.acc.last_timestamp.clone(),
                 buckets: t.acc.buckets.clone(),
+                pending_bytes: behind.get(path).copied().unwrap_or(0),
             })
             .collect();
         out.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
@@ -375,11 +414,14 @@ fn list_active(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn read_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+/// At most `max` bytes at `offset`. A short read (EOF inside `max`) is
+/// fine; a chunk ending mid-line is fine too — `Cursor` keeps the
+/// partial line and the next call resumes where this one stopped.
+fn read_slice(path: &Path, offset: u64, max: u64) -> std::io::Result<Vec<u8>> {
     let mut f = std::fs::File::open(path)?;
     f.seek(SeekFrom::Start(offset))?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    f.take(max).read_to_end(&mut buf)?;
     Ok(buf)
 }
 

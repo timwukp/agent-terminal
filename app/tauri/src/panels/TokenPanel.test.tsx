@@ -22,6 +22,7 @@ function transcript(over: Partial<TranscriptUsage> = {}): TranscriptUsage {
       { minute: "2026-08-11T13:41", output_tokens: 900 },
       { minute: "2026-08-11T13:42", output_tokens: 600 },
     ],
+    pending_bytes: 0,
     ...over,
   };
 }
@@ -84,6 +85,20 @@ describe("TokenPanel", () => {
     const view = render(<TokenPanel api={apiOf([transcript({ malformed: 3 })])} />);
     await act(async () => {});
     expect(view.container.textContent).toContain("3 unparsed");
+  });
+
+  it("says the totals are still climbing while any row has unread bytes", async () => {
+    // The first read over a large history is budgeted across ticks; a
+    // partial total presented as final would be a lie the panel can see.
+    const view = render(<TokenPanel api={apiOf([transcript({ pending_bytes: 8_000_000 })])} />);
+    await act(async () => {});
+    expect(view.container.textContent).toContain("still reading history");
+  });
+
+  it("drops the climbing notice once every row is settled", async () => {
+    const view = render(<TokenPanel api={apiOf([transcript()])} />);
+    await act(async () => {});
+    expect(view.container.textContent).not.toContain("still reading history");
   });
 
   it("reads once for the first paint, then repaints from pushed frames", async () => {
